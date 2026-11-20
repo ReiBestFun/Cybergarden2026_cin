@@ -1,0 +1,872 @@
+/* ============================================================
+   БАЗОВЫЕ СТИЛИ / СБРОС
+   ============================================================ */
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #393a40;
+  background: #f9f7f1;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: .55;
+  cursor: wait;
+}
+
+/* ============================================================
+   КАРКАС ПРИЛОЖЕНИЯ
+   ============================================================ */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ---------- Боковая навигация ---------- */
+
+.app-nav {
+  width: 218px;
+  flex-shrink: 0;
+  background: #fdfbf7;
+  border-right: 1px solid #e7ddd3;
+  padding: 25px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 35px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  font-size: 19px;
+  font-weight: 750;
+  padding-left: 8px;
+}
+
+.brand-mark {
+  background: #f4e2d1;
+  border-radius: 12px;
+  padding: 9px;
+  color: #a56e45;
+  display: flex;
+}
+
+.nav-links {
+  display: grid;
+  gap: 7px;
+}
+
+.nav-links a {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  color: #6c625b;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.nav-links a.active,
+.nav-links a:hover {
+  background: #f5e7d8;
+  color: #8a5838;
+}
+
+.nav-footer {
+  margin-top: auto;
+  font-size: 12px;
+  color: #887b71;
+  line-height: 1.9;
+  padding-left: 10px;
+}
+
+.nav-footer span {
+  color: #b2a397;
+}
+
+/* ---------- Основной контент ---------- */
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.page {
+  padding: 36px;
+  max-width: 1500px;
+  margin: auto;
+}
+
+.page h1,
+.editor-toolbar h1 {
+  font-size: 25px;
+  letter-spacing: -.6px;
+  margin: 0 0 8px;
+}
+
+.muted {
+  font-size: 12px;
+  color: #8f8277;
+  line-height: 1.6;
+}
+
+.page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 30px;
+}
+
+/* ============================================================
+   КНОПКИ
+   ============================================================ */
+
+.btn {
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 15px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn.primary {
+  background: #a96f47;
+  color: white;
+}
+
+.btn.primary:hover {
+  background: #925a35;
+}
+
+.btn.secondary {
+  background: white;
+  color: #594c44;
+  border: 1px solid #e5d9ce;
+}
+
+/* ============================================================
+   СВОДКА / ПАНЕЛИ
+   ============================================================ */
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #e7ddd3;
+  border-radius: 15px;
+  padding: 23px;
+  margin-bottom: 15px;
+}
+
+.panel h2 {
+  font-size: 26px;
+  margin: 12px 0 0;
+}
+
+.panel h3 {
+  margin: 0 0 22px;
+}
+
+.workflow-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+}
+
+.workflow-card > div {
+  flex: 1;
+}
+
+.workflow-card p {
+  margin: 6px 0 0;
+}
+
+.tag {
+  display: inline-block;
+  background: #f7e8d9;
+  color: #976746;
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ============================================================
+   РЕДАКТОР (страница workflow)
+   ============================================================ */
+
+.editor-page {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.editor-toolbar {
+  height: 88px;
+  background: #fdfbf7;
+  border-bottom: 1px solid #e7ddd3;
+  padding: 19px 25px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+}
+
+.editor-toolbar h1 {
+  font-size: 19px;
+  margin-bottom: 2px;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.editor-layout {
+  display: grid;
+  grid-template-columns: 222px minmax(0, 1fr) 265px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------- Библиотека нод / настройки ---------- */
+
+.node-library,
+.settings-panel {
+  background: #fdfbf7;
+  padding: 20px 15px;
+  overflow: auto;
+}
+
+.node-library {
+  border-right: 1px solid #e7ddd3;
+}
+
+.settings-panel {
+  border-left: 1px solid #e7ddd3;
+  padding: 20px;
+}
+
+.node-library h3,
+.settings-panel h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.node-library section {
+  margin-top: 23px;
+}
+
+.node-library h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #99897a;
+  margin: 0 0 10px;
+}
+
+.library-node {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 10px;
+  border: 1px solid #e7ddd3;
+  background: white;
+  border-radius: 10px;
+  margin-bottom: 8px;
+  cursor: grab;
+  transition: background .15s;
+}
+
+.library-node:hover {
+  background: #fff4e9;
+}
+
+.library-node strong,
+.library-node small {
+  display: block;
+}
+
+.library-node strong {
+  font-size: 12px;
+}
+
+.library-node small {
+  font-size: 10px;
+  color: #988a7d;
+  margin-top: 4px;
+}
+
+/* ---------- Канвас ---------- */
+
+.canvas {
+  position: relative;
+  background: #f9f7f1;
+  min-width: 0;
+}
+
+.canvas-hint {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  background: #ffffffeb;
+  padding: 9px 13px;
+  border-radius: 9px;
+  color: #8b7a6c;
+  font-size: 11px;
+  box-shadow: 0 2px 12px #bda58a33;
+  pointer-events: none;
+}
+
+/* ---------- Ноды flow ---------- */
+
+.flow-node {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid #ded1c4;
+  min-width: 210px;
+  padding: 17px 16px;
+  border-radius: 13px;
+  box-shadow: 0 5px 16px #85634315;
+}
+
+.flow-node.selected {
+  outline: 2px solid #ca946e;
+}
+
+.flow-node strong,
+.flow-node small {
+  display: block;
+}
+
+.flow-node strong {
+  font-size: 12px;
+}
+
+.flow-node small {
+  font-size: 10px;
+  color: #8e8074;
+  margin-top: 5px;
+}
+
+.node-icon {
+  display: flex;
+  padding: 10px;
+  background: #f0eafa;
+  border-radius: 10px;
+  color: #aa7754;
+}
+
+.flow-node.secrets .node-icon,
+.flow-node.sca .node-icon,
+.flow-node.sast .node-icon {
+  background: #fff1e7;
+  color: #bd8861;
+}
+
+.flow-node.telegram .node-icon {
+  background: #e7f4ef;
+  color: #5c9a83;
+}
+
+.node-status {
+  margin-left: auto;
+  font-size: 15px;
+}
+
+.node-status.done {
+  color: #55a181;
+}
+
+.node-status.running {
+  color: #c79b57;
+}
+
+/* ---------- Панель настроек ---------- */
+
+.settings-panel label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 17px 0;
+}
+
+.settings-panel input {
+  display: block;
+  width: 100%;
+  margin-top: 9px;
+  border: 1px solid #ded7e7;
+  border-radius: 9px;
+  background: white;
+  padding: 11px;
+  color: #393a40;
+  font-size: 12px;
+}
+
+.selected-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 22px;
+  font-size: 13px;
+}
+
+.icon-btn {
+  border: 0;
+  background: transparent;
+  color: #8d8196;
+}
+
+/* ============================================================
+   ЧАТ-ВИДЖЕТ
+   ============================================================ */
+
+.chat-widget {
+  position: absolute;
+  right: 284px;
+  bottom: 20px;
+  width: 325px;
+  background: white;
+  border: 1px solid #e2d5c8;
+  border-radius: 15px;
+  box-shadow: 0 12px 45px #71543d24;
+  overflow: hidden;
+  z-index: 10;
+}
+
+.chat-widget:not(.open) {
+  width: auto;
+}
+
+.chat-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 0;
+  background: #f4e5d7;
+  color: #76533d;
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.chat-toggle svg:last-child {
+  margin-left: auto;
+}
+
+.chat-messages {
+  height: 230px;
+  overflow: auto;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-message {
+  max-width: 90%;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: #f8efe7;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.chat-message.user {
+  align-self: flex-end;
+  background: #f0dfcf;
+}
+
+.chat-input {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid #eaded2;
+  padding: 10px;
+}
+
+.chat-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  font-size: 12px;
+}
+
+.chat-input button {
+  background: #a96f47;
+  border: 0;
+  color: white;
+  border-radius: 8px;
+  padding: 9px;
+  display: flex;
+}
+
+/* ============================================================
+   ТАБЛИЦЫ / КОД
+   ============================================================ */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 12px;
+}
+
+th,
+td {
+  padding: 14px;
+  border-bottom: 1px solid #ede3d9;
+}
+
+th {
+  color: #88796c;
+  font-weight: 600;
+}
+
+code {
+  font-size: 11px;
+}
+
+/* ============================================================
+   АДАПТИВНОСТЬ
+   ============================================================ */
+
+@media (max-width: 1050px) {
+  .app-nav {
+    width: 170px;
+  }
+
+  .editor-layout {
+    grid-template-columns: 175px minmax(0, 1fr) 220px;
+  }
+
+  .chat-widget {
+    right: 235px;
+  }
+
+  .toolbar-actions .btn {
+    padding: 9px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-nav {
+    width: 60px;
+    padding: 14px 6px;
+  }
+
+  .brand {
+    font-size: 0;
+  }
+
+  .nav-links a {
+    font-size: 0;
+    justify-content: center;
+  }
+
+  .nav-footer {
+    display: none;
+  }
+
+  .editor-layout {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+
+  .settings-panel {
+    display: none;
+  }
+
+  .chat-widget {
+    right: 15px;
+    width: min(310px, 75vw);
+  }
+
+  .editor-toolbar {
+    padding: 12px;
+    height: auto;
+  }
+
+  .editor-toolbar h1 {
+    font-size: 15px;
+  }
+
+  .toolbar-actions {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-actions .btn {
+    font-size: 11px;
+  }
+
+  .page {
+    padding: 18px;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================
+   ТЁМНАЯ «ТЁПЛАЯ» ПЕРЕОПРЕДЕЛЁННАЯ ТЕМА
+   (Warm ivory / terracotta refresh)
+   ============================================================ */
+
+:root {
+  color: #393a40;
+  background: #f9f7f1;
+}
+
+.app-nav {
+  background: #f7f2eb;
+}
+
+.editor-toolbar {
+  background: #fdfbf7;
+}
+
+.editor-layout {
+  grid-template-columns: 222px minmax(0, 1fr) 350px;
+}
+
+/* ---------- Правая боковая панель ---------- */
+
+.right-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: #fdfbf7;
+  border-left: 1px solid #e7ddd3;
+}
+
+.settings-panel {
+  border-left: 0;
+  flex: 1;
+  min-height: 145px;
+  overflow: auto;
+  padding: 20px;
+}
+
+/* ---------- Чат-виджет в правой панели ---------- */
+
+.chat-widget {
+  position: static;
+  right: auto;
+  bottom: auto;
+  width: auto;
+  flex: 0 0 44%;
+  min-height: 270px;
+  max-height: 52%;
+  display: flex;
+  flex-direction: column;
+  margin: 0 12px 12px;
+  border-radius: 14px;
+  box-shadow: 0 5px 22px #71543d14;
+}
+
+.chat-widget:not(.open) {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 0;
+}
+
+.chat-toggle {
+  flex: 0 0 auto;
+  background: #f3e5d8;
+  color: #815538;
+}
+
+.chat-messages {
+  flex: 1;
+  min-height: 100px;
+  height: auto;
+  overflow: auto;
+}
+
+.chat-input {
+  flex: 0 0 auto;
+}
+
+.chat-input input {
+  background: transparent;
+}
+
+/* ---------- Кнопки и ноды ---------- */
+
+.btn.primary {
+  background: #a96f47;
+  color: white;
+}
+
+.btn.primary:hover {
+  background: #915b36;
+}
+
+.flow-node.selected {
+  outline: 2px solid #c68c61;
+}
+
+/* ---------- Бейджи серьёзности ---------- */
+
+.severity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .03em;
+}
+
+.severity-high,
+.severity-critical {
+  color: #a72e2e;
+  background: #fde6e4;
+  border: 1px solid #efc4c1;
+}
+
+.severity-medium {
+  color: #a35d13;
+  background: #fff0d8;
+  border: 1px solid #f3d3a3;
+}
+
+.severity-low {
+  color: #2f7a58;
+  background: #e4f5e9;
+  border: 1px solid #b9e4c8;
+}
+
+.severity-info,
+.severity-informational {
+  color: #426c9a;
+  background: #e8f1fb;
+  border: 1px solid #c4d8f0;
+}
+
+/* ============================================================
+   АДАПТИВНОСТЬ (для правой панели)
+   ============================================================ */
+
+@media (max-width: 1150px) {
+  .editor-layout {
+    grid-template-columns: 175px minmax(0, 1fr) 290px;
+  }
+}
+
+@media (max-width: 760px) {
+  .editor-layout {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+
+  .right-sidebar {
+    position: absolute;
+    right: 0;
+    top: 88px;
+    bottom: 0;
+    width: min(320px, 70vw);
+    z-index: 9;
+    box-shadow: -5px 0 20px #71543d15;
+  }
+
+  .settings-panel {
+    display: block;
+  }
+
+  .chat-widget {
+    margin: 0 8px 8px;
+    max-height: 45%;
+  }
+}
+
+/* Компактный плавающий AI-чат */
+.chat-widget {
+  position: fixed !important;
+  right: 24px;
+  bottom: 24px;
+  top: auto !important;
+
+  width: 340px;
+  height: 52px;
+  max-height: none;
+
+  display: flex;
+  flex-direction: column;
+
+  background: #fffdfb;
+  border: 1px solid #e7ddd3;
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(57, 58, 64, 0.12);
+
+  overflow: hidden;
+  z-index: 100;
+}
+
+.chat-widget.open {
+  height: min(440px, calc(100vh - 100px));
+}
+
+.chat-header {
+  flex-shrink: 0;
+  min-height: 52px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chat-input {
+  flex-shrink: 0;
+}
+
+.chat-widget:not(.open) .chat-messages,
+.chat-widget:not(.open) .chat-input {
+  display: none;
+}
+
+.chat-toggle {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: #a96f47;
+  cursor: pointer;
+}

@@ -1,5 +1,6 @@
-# AI Security Workflow
+# AI Security Workflow (CyberFlow)
 
-Бэкенд для статической проверки учебных Kotlin/Spring Boot проектов. FastAPI принимает графы, воркер выполняет задания из PostgreSQL, а анализаторы Secrets, SCA и SAST формируют находки и отчёты.
+Визуальный конструктор сценариев проверки безопасности для учебных Kotlin/Spring Boot проектов.
 
-[Запуск, Swagger и проверка бэкенда](backend/README.md)
+- `backend/`: FastAPI принимает графы, воркер выполняет задания из PostgreSQL, а анализаторы Secrets, SCA и SAST формируют находки и отчёты. [Запуск, Swagger и проверка бэкенда](backend/README.md)
+- `frontend/`: редактор сценариев на React, Vite и React Flow. [Запуск фронтенда](frontend/README.md)

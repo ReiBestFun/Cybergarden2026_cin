@@ -1,0 +1,141 @@
+"""Run the static-analysis nodes against one prepared local snapshot."""
+
+from __future__ import annotations
+
+import argparse
+import math
+import multiprocessing
+import os
+import sys
+import tempfile
+from multiprocessing.connection import Connection
+from pathlib import Path
+from typing import Callable
+
+from .analyzers import Snapshot, VulnerabilityCatalog, scan_sast, scan_sca, scan_secrets
+from .analyzers.models import Category, ScanError, Warning
+from .reports import NodeResult, RunReport, merge_findings, readable_report, submission_json
+
+ALL_SCANS: tuple[Category, ...] = ("secrets", "sca", "sast")
+_SCAN_FAILED = Warning("SCAN_FAILED", "Тестер завершился с ошибкой.")
+
+
+def _scan_node(category: Category, snapshot: Snapshot, catalog_path: Path | None, output: Connection) -> None:
+    try:
+        if category == "secrets":
+            result = scan_secrets(snapshot)
+        elif category == "sast":
+            result = scan_sast(snapshot)
+        else:
+            if catalog_path is None:
+                raise ScanError(Warning("INVALID_CATALOG", "Для SCA требуется справочник Maven."))
+            result = scan_sca(snapshot, VulnerabilityCatalog.from_file(catalog_path))
+        outcome = NodeResult(category, "succeeded", result)
+    except ScanError as error:
+        outcome = NodeResult(category, "failed", warning=error.warning)
+    except Exception:
+        outcome = NodeResult(category, "failed", warning=_SCAN_FAILED)
+    with output:
+        output.send(outcome)
+
+
+def run_scan(category: Category, snapshot: Snapshot, catalog: Path | None, timeout: float) -> NodeResult:
+    context = multiprocessing.get_context("spawn")
+    reader, writer = context.Pipe(duplex=False)
+    process = context.Process(target=_scan_node, args=(category, snapshot, catalog, writer), daemon=True)
+    with reader, writer:
+        try:
+            process.start()
+        except OSError:
+            return NodeResult(category, "failed", warning=_SCAN_FAILED)
+        writer.close()
+        try:
+            if reader.poll(timeout):
+                return reader.recv()
+            return NodeResult(category, "failed", warning=Warning("SCAN_TIMEOUT", "Тестер превысил лимит времени."))
+        except (EOFError, OSError):
+            return NodeResult(category, "failed", warning=_SCAN_FAILED)
+        finally:
+            process.join(0.1)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            process.close()
+
+
+def run_analysis(
+    directory: Path,
+    sha: str,
+    catalog: Path | None,
+    *,
+    scans: tuple[Category, ...] = ALL_SCANS,
+    timeout: float = 30,
+    save_node: Callable[[NodeResult], None] | None = None,
+) -> RunReport:
+    """Pass a terminal node status and its findings together to the optional storage callback."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Таймаут должен быть положительным числом.")
+    if not scans or len(set(scans)) != len(scans) or any(scan not in ALL_SCANS for scan in scans):
+        raise ValueError("Укажите неповторяющиеся типы анализаторов.")
+
+    nodes: list[NodeResult] = []
+    try:
+        snapshot = Snapshot.from_directory(directory, sha)
+    except ScanError as error:
+        for scan in scans:
+            node = NodeResult(scan, "failed", warning=error.warning)
+            if save_node is not None:
+                save_node(node)
+            nodes.append(node)
+        return merge_findings(sha if error.warning.code != "INVALID_SHA" else "", tuple(nodes))
+    for scan in scans:
+        node = run_scan(scan, snapshot, catalog, timeout)
+        if save_node is not None:
+            save_node(node)
+        nodes.append(node)
+    return merge_findings(snapshot.sha, tuple(nodes))
+
+
+def _write_report(path: Path, text: str) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(text)
+            stream.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Статический анализ локального снимка учебного проекта.")
+    parser.add_argument("directory", type=Path, help="Корень проекта в подготовленном снимке")
+    parser.add_argument("--sha", required=True, help="Полный SHA коммита снимка")
+    parser.add_argument("--catalog", type=Path, help="JSON-справочник организаторов для SCA")
+    parser.add_argument("--json-out", type=Path, required=True, help="Путь к JSON для сдачи")
+    parser.add_argument("--markdown-out", type=Path, help="Путь к читаемому отчёту")
+    parser.add_argument("--timeout", type=float, default=30, help="Лимит секунд на одну проверку")
+    args = parser.parse_args()
+    if args.markdown_out and args.markdown_out.resolve() == args.json_out.resolve():
+        parser.error("Для JSON и Markdown требуются разные выходные пути.")
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("Таймаут должен быть положительным числом.")
+    report = run_analysis(args.directory, args.sha, args.catalog, timeout=args.timeout)
+    markdown = readable_report(report)
+    try:
+        if report.status != "failed":
+            _write_report(args.json_out, submission_json(report))
+        if args.markdown_out:
+            _write_report(args.markdown_out, markdown)
+        else:
+            print(markdown, end="")
+    except OSError:
+        print("Не удалось записать отчёт.", file=sys.stderr)
+        return 2
+    return {"succeeded": 0, "partial": 1, "failed": 2}[report.status]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

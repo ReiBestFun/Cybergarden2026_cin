@@ -1,0 +1,571 @@
+"""Source-level checks for supported Kotlin and Spring security patterns."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Iterator
+
+from tree_sitter import Node
+
+from . import kotlin as kt
+from .models import Finding, Scan, ScanResult, Severity, Snapshot, Warning
+
+_RULES: dict[str, tuple[Severity, str, str, str]] = {
+    "sql-injection": (
+        "high", "Пользовательский ввод в SQL", "SQL-команда строится на основе параметра запроса.",
+        "Передавайте значения отдельными параметрами JDBC, а текст запроса оставляйте статическим.",
+    ),
+    "tls-verification": (
+        "medium", "Ослабленная проверка TLS", "Клиент использует настройку, отключающую проверку TLS.",
+        "Используйте штатную проверку сертификата и имени хоста.",
+    ),
+    "credentialed-cors": (
+        "medium", "Слишком широкий CORS с учётными данными",
+        "Широкий допуск источников применяется к маршруту с пользовательскими данными.",
+        "Разрешайте учётные данные только для конкретных доверенных источников.",
+    ),
+    "route-authorization": (
+        "high", "Отсутствует ограничение доступа к маршруту",
+        "Публичное правило открывает обработчик, который работает с защищаемыми данными или действиями.",
+        "Ограничьте доступ нужной ролью и проверьте порядок правил Spring Security.",
+    ),
+    "object-authorization": (
+        "high", "Отсутствует проверка владельца объекта",
+        "Идентификатор из запроса используется для чтения записи без подтверждённой проверки владельца.",
+        "Ограничьте выборку или ответ идентификатором владельца из аутентифицированного пользователя.",
+    ),
+}
+_MAPPING_METHODS = {f"{method.title()}Mapping": method for method in ("GET", "POST", "PUT", "DELETE", "PATCH")}
+_AUTH_ANNOTATIONS = {"PreAuthorize", "Secured", "RolesAllowed", "PostAuthorize"}
+_WEB_INPUTS = {"RequestParam", "PathVariable", "RequestHeader", "RequestBody", "CookieValue", "ModelAttribute"}
+_OWNERS = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\b", re.IGNORECASE)
+_OWNER_BIND = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\s*=\s*(\?)", re.IGNORECASE)
+_SENSITIVE = re.compile(
+    r"\b(?:(?:customer|user|account|tenant|owner)_?(?:id|address|number)|"
+    r"password|email|email_address|phone|phone_number|ssn)\b", re.IGNORECASE
+)
+_SQL_START = re.compile(r"^\s*(?:select|insert|update|delete|with)\b", re.IGNORECASE)
+_JDBC_METHODS = {"query", "queryForList", "queryForObject", "queryForMap", "update", "execute"}
+_JDBC_TYPES = {"JdbcTemplate", "NamedParameterJdbcTemplate", "JdbcOperations", "NamedParameterJdbcOperations"}
+_FUNCTION_SCOPE = frozenset({"function_declaration", "class_declaration"})
+
+
+def _short(node: Node) -> str:
+    return kt.text(node).rsplit(".", 1)[-1]
+
+
+def _unqualified(name: str) -> str:
+    return name.rsplit(".", 1)[-1]
+
+
+def _type(node: Node) -> str:
+    user_type = kt.child(node, "user_type")
+    if user_type is None and (nullable := kt.child(node, "nullable_type")) is not None:
+        user_type = kt.child(nullable, "user_type")
+    return kt.text(user_type).split("<", 1)[0] if user_type is not None else ""
+
+
+def _annotations(node: Node) -> Iterator[tuple[str, Node]]:
+    modifiers = kt.child(node, "modifiers")
+    if modifiers is None and node.type == "parameter_modifiers":
+        modifiers = node
+    if modifiers is not None:
+        for entry in kt.children(modifiers):
+            if entry.type != "annotation":
+                continue
+            parts = kt.children(entry)
+            if not parts:
+                continue
+            invocation = parts[-1]
+            annotation = kt.child(invocation, "user_type") if invocation.type == "constructor_invocation" else invocation
+            if annotation is not None:
+                yield _short(annotation), invocation
+
+
+def _literal_nodes(node: Node) -> Iterator[tuple[Node, str]]:
+    for child in kt.walk(node, "string_literal"):
+        if (value := kt.literal(child)) is not None:
+            yield child, value
+
+
+def _parameter_list(function: Node) -> dict[str, tuple[str, set[str]]]:
+    result = {}
+    modifiers: set[str] = set()
+    params = kt.child(function, "function_value_parameters")
+    if params is not None:
+        for param in kt.children(params):
+            if param.type == "parameter_modifiers":
+                modifiers = {name for name, _ in _annotations(param)}
+            elif param.type == "parameter":
+                name = kt.child(param, "identifier")
+                if name is not None:
+                    result[kt.text(name)] = (_type(param), modifiers)
+                modifiers = set()
+    return result
+
+
+@dataclass(frozen=True)
+class Function:
+    path: str
+    source: kt.KotlinFile
+    node: Node
+    body: Node
+    owner: str
+    name: str
+    parameters: tuple[str, ...]
+    parameter_types: dict[str, str]
+    inputs: frozenset[str]
+    principal: frozenset[str]
+    guarded: bool
+
+    def calls(self) -> Iterator[tuple[Node, kt.Call]]:
+        for node in kt.walk(self.body, "call_expression", stop=_FUNCTION_SCOPE):
+            if call := kt.call(node):
+                yield node, call
+
+
+@dataclass(frozen=True)
+class Route:
+    method: str
+    path: str
+    function: Function
+
+
+def _request_mapping(node: Node) -> Iterator[tuple[str, str]]:
+    for name, annotation in _annotations(node):
+        if name not in _MAPPING_METHODS and name != "RequestMapping":
+            continue
+        method = _MAPPING_METHODS.get(name, "*")
+        arguments = kt.child(annotation, "value_arguments")
+        paths: list[str] = []
+        if arguments is not None:
+            for arg in kt.children(arguments):
+                values = kt.children(arg)
+                if len(values) == 2 and kt.text(values[0]) == "method":
+                    methods = re.findall(r"\bRequestMethod\.(GET|POST|PUT|DELETE|PATCH)\b", kt.text(values[-1]))
+                    if len(methods) == 1:
+                        method = methods[0]
+                    continue
+                if len(values) == 1 or (len(values) == 2 and kt.text(values[0]) in {"value", "path"}):
+                    paths.extend(value for _, value in _literal_nodes(values[-1]))
+        for path in paths or [""]:
+            yield method, path
+
+
+def _index(
+    path: str, source: kt.KotlinFile
+) -> tuple[list[Function], list[Route]]:
+    functions: list[Function] = []
+    routes: list[Route] = []
+    package_node = kt.child(source.root, "package_header")
+    package_name = kt.child(package_node, "qualified_identifier") if package_node else None
+    package = kt.text(package_name) if package_name else ""
+    imports = {}
+    for entry in kt.children(source.root):
+        if entry.type == "import" and (qualified := kt.child(entry, "qualified_identifier")) is not None:
+            alias = kt.child(entry, "identifier")
+            name = kt.text(qualified)
+            imports[kt.text(alias) if alias is not None else _unqualified(name)] = name
+
+    def qualify(name: str) -> str:
+        if not name or "." in name:
+            return name
+        return imports.get(name) or (f"{package}.{name}" if package else name)
+
+    for declaration in kt.walk(source.root, "class_declaration"):
+        class_name = declaration.child_by_field_name("name")
+        class_body = kt.child(declaration, "class_body")
+        if class_name is None or class_body is None:
+            continue
+        annotations = {name for name, _ in _annotations(declaration)}
+        class_mapping = list(_request_mapping(declaration)) or [("*", "")]
+        fields = {}
+        for param in kt.walk(declaration, "class_parameter", stop=frozenset({"class_body"})):
+            name, kind = kt.child(param, "identifier"), _type(param)
+            if name is not None and kind:
+                fields[kt.text(name)] = qualify(kind)
+        for node in kt.children(class_body):
+            if node.type != "function_declaration":
+                continue
+            name, body = node.child_by_field_name("name"), kt.child(node, "function_body")
+            if name is None or body is None:
+                continue
+            params = _parameter_list(node)
+            guarded = bool(_AUTH_ANNOTATIONS & (annotations | {name for name, _ in _annotations(node)}))
+            function = Function(
+                path, source, node, body, qualify(kt.text(class_name)), kt.text(name), tuple(params),
+                fields | {key: qualify(kind) for key, (kind, _) in params.items()},
+                frozenset(key for key, (_, modifiers) in params.items() if modifiers & _WEB_INPUTS),
+                frozenset(key for key, (kind, modifiers) in params.items()
+                          if _unqualified(qualify(kind)) in {"Principal", "Authentication"}
+                          or "AuthenticationPrincipal" in modifiers),
+                guarded,
+            )
+            functions.append(function)
+            if annotations & {"RestController", "Controller"}:
+                for parent_method, parent_path in class_mapping:
+                    for method, subpath in _request_mapping(node):
+                        route_path = "/" + "/".join(part.strip("/") for part in (parent_path, subpath) if part.strip("/"))
+                        routes.append(Route(method if method != "*" else parent_method, route_path, function))
+    return functions, routes
+
+
+def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
+    severity, title, description, remediation = _RULES[kind]
+    start = kt.line(node)
+    end = min(kt.end_line(last or node), start + 14)
+    return Finding(
+        f"sast.{kind}", "sast", severity, title, description, remediation, function.path,
+        start, end, title, {"class": kind},
+    )
+
+
+def _sql_calls(function: Function) -> Iterator[tuple[Node, kt.Call, Node, str]]:
+    for node, call in function.calls():
+        if call.name not in _JDBC_METHODS or call.receiver is None or not call.args:
+            continue
+        receiver = function.parameter_types.get(kt.text(call.receiver), "")
+        if _unqualified(receiver) not in _JDBC_TYPES:
+            continue
+        sql = function.source.resolve(call.args[0])
+        content = kt.string_content(sql)
+        if content is None and sql.type == "binary_expression" and kt.operator(sql) == "+":
+            pieces = [kt.string_content(item) or "" for item in kt.walk(sql, "string_literal")]
+            content = next(iter(pieces), "")
+        if content and _SQL_START.match(content):
+            yield node, call, sql, content
+
+
+def _uses_names(source: kt.KotlinFile, node: Node, names: frozenset[str], depth: int = 0) -> bool:
+    if depth >= 12:
+        return False
+    node = source.resolve(node)
+    if node.type == "identifier":
+        return kt.text(node) in names
+    if (value := kt.string_content(node)) is not None:
+        for match in kt.TEMPLATE.finditer(value):
+            expression = match["name"] or match["braced"]
+            if not expression:
+                continue
+            name = re.match(r"\s*([A-Za-z_]\w*)", expression)
+            if name:
+                binding = source.binding(name[1], node)
+                if binding is not None and _uses_names(source, binding, names, depth + 1):
+                    return True
+                if binding is None and name[1] in names:
+                    return True
+        return False
+    if node.type in {"call_expression", "navigation_expression", "binary_expression", "value_arguments", "value_argument"}:
+        return any(_uses_names(source, child, names, depth + 1) for child in kt.children(node))
+    return False
+
+
+def _tls_findings(function: Function) -> Iterator[Finding]:
+    for assignment in kt.walk(function.body, "assignment", stop=_FUNCTION_SCOPE):
+        left, right = (assignment.child_by_field_name(side) for side in ("left", "right"))
+        if left is None or right is None or _short(left) != "hostnameVerifier":
+            continue
+        builder = kt.call(function.source.resolve(right))
+        if builder is None or builder.name != "HostnameVerifier" or builder.block is None:
+            continue
+        statements = [node for node in kt.children(builder.block) if node.type != "lambda_parameters"]
+        if len(statements) != 1 or kt.text(statements[0]) not in {"true", "return true"}:
+            continue
+        scope = assignment.parent
+        while scope and scope.type not in {"lambda_literal", "function_body"}:
+            scope = scope.parent
+        apply = scope.parent.parent if scope and scope.type == "lambda_literal" and scope.parent else None
+        context = kt.call(apply) if apply is not None else None
+        receiver_is_https = (
+            context is not None and context.name in {"apply", "also"} and context.receiver is not None
+            and "HttpsURLConnection" in kt.text(function.source.resolve(context.receiver))
+        )
+        typed_connection = left.type == "navigation_expression" and (
+            _unqualified(function.parameter_types.get(kt.text(kt.children(left)[0]), "")) == "HttpsURLConnection"
+        )
+        if receiver_is_https or typed_connection:
+            yield _finding("tls-verification", function, assignment)
+    for node, call in function.calls():
+        if call.name in {"trustManager", "setHostnameVerifier", "hostnameVerifier"} and call.args:
+            arg = kt.text(function.source.resolve(call.args[0]))
+            if re.fullmatch(r"(?:[\w.]*\.)?(?:InsecureTrustManagerFactory|NoopHostnameVerifier)\.INSTANCE", arg):
+                yield _finding("tls-verification", function, node)
+
+
+@dataclass(frozen=True)
+class AccessRule:
+    function: Function
+    node: Node
+    action: str
+    method: str
+    pattern: str
+
+    def matches(self, route: Route) -> bool:
+        if self.method != "*" and self.method != route.method:
+            return False
+        parts = self.pattern.strip("/").split("/")
+        if parts == ["**"]:
+            return True
+        pattern = ""
+        for part in parts:
+            if part == "**":
+                pattern += r"(?:/.*)?"
+            elif part == "*" or (part.startswith("{") and part.endswith("}")):
+                pattern += "/[^/]+"
+            else:
+                pattern += "/" + re.escape(part).replace(r"\*", "[^/]*")
+        return re.fullmatch(pattern, route.path) is not None
+
+
+def _security(functions: list[Function], scan: Scan) -> tuple[list[AccessRule], bool]:
+    chains = [
+        function for function in functions
+        if any(_unqualified(kind) == "HttpSecurity" for kind in function.parameter_types.values())
+    ]
+    if len(chains) != 1:
+        if chains:
+            scan.warn(Warning("UNRESOLVED_SECURITY_CHAIN", "Несколько цепочек Spring Security требуют ручной проверки."), incomplete=True)
+        return [], False
+    chain = chains[0]
+    rules: list[AccessRule] = []
+    cors = False
+    authorization = []
+    for _, call in chain.calls():
+        if call.name == "cors" and call.receiver is not None:
+            cors = call.block is None or not any(
+                (nested := kt.call(node)) and nested.name == "disable"
+                for node in kt.walk(call.block, "call_expression")
+            )
+        elif call.name == "authorizeHttpRequests" and call.block is not None:
+            authorization.append(call.block)
+    if len(authorization) != 1:
+        scan.warn(Warning("UNRESOLVED_SECURITY_CHAIN", "Не удалось определить порядок правил Spring Security.", chain.path), incomplete=True)
+        return [], cors
+    for node in kt.walk(authorization[0], "call_expression", stop=_FUNCTION_SCOPE):
+        call = kt.call(node)
+        if call is None:
+            continue
+        if call.name not in {"permitAll", "authenticated", "hasRole", "hasAnyRole", "hasAuthority", "denyAll"} or call.receiver is None:
+            continue
+        matcher = kt.call(call.receiver)
+        if matcher and matcher.name == "anyRequest":
+            rules.append(AccessRule(chain, node, call.name, "*", "/**"))
+        if matcher and matcher.name in {"requestMatchers", "antMatchers"} and matcher.args:
+            first = _short(matcher.args[0])
+            has_method = first in _MAPPING_METHODS.values()
+            options = matcher.args[1:] if has_method else matcher.args
+            method = first if has_method else "*"
+            paths = [kt.literal(arg) for arg in options]
+            if paths and all(value and value.startswith("/") for value in paths):
+                for value in paths:
+                    rules.append(AccessRule(chain, node, call.name, method, value))
+                continue
+        elif matcher and matcher.name == "anyRequest":
+            continue
+        scan.warn(Warning("UNRESOLVED_SECURITY_RULE", "Поддерживается сопоставление статических шаблонов маршрутов.", chain.path), incomplete=True)
+        return rules, cors
+    return rules, cors
+
+
+def _direct_calls(
+    caller: Function, index: dict[tuple[str, str], list[Function]]
+) -> Iterator[tuple[kt.Call, Function]]:
+    for _, call in caller.calls():
+        owner = caller.owner if call.receiver is None else caller.parameter_types.get(kt.text(call.receiver))
+        if owner is None:
+            continue
+        candidates = [
+            function for function in index.get((owner, call.name), [])
+            if len(function.parameters) == len(call.args)
+        ]
+        if len(candidates) == 1:
+            yield call, candidates[0]
+
+
+def _sensitive(function: Function) -> bool:
+    if function.principal:
+        return True
+    return any(_SENSITIVE.search(sql) for _, _, _, sql in _sql_calls(function)) or any(
+        _SENSITIVE.search(value) for _, value in _literal_nodes(function.body)
+    )
+
+
+def _checked(function: Function) -> bool:
+    return function.guarded or any(
+        call.name in {"hasRole", "hasAuthority", "isUserInRole", "checkPermission", "requireRole"}
+        for _, call in function.calls()
+    )
+
+
+def _cors_findings(
+    functions: list[Function], routes: list[Route], rules: list[AccessRule], scan: Scan
+) -> Iterator[Finding]:
+    def unresolved(function: Function) -> None:
+        scan.warn(Warning("UNRESOLVED_CORS", "Не удалось статически разобрать регистрацию CORS.", function.path), incomplete=True)
+
+    for function in functions:
+        for _, call in function.calls():
+            if call.name != "registerCorsConfiguration" or len(call.args) != 2:
+                continue
+            path = kt.literal(call.args[0])
+            if not path:
+                unresolved(function)
+                continue
+            config = function.source.resolve(call.args[1])
+            builder = kt.call(config)
+            if not builder or builder.name != "apply" or builder.block is None or builder.receiver is None:
+                unresolved(function)
+                continue
+            constructor = kt.call(builder.receiver)
+            if constructor is None or constructor.name != "CorsConfiguration":
+                unresolved(function)
+                continue
+            fields = {}
+            for entry in kt.children(builder.block):
+                if entry.type == "assignment":
+                    left, right = (entry.child_by_field_name(side) for side in ("left", "right"))
+                    if left is not None and right is not None:
+                        fields[_short(left)] = (entry, function.source.resolve(right))
+            origins, credentials = fields.get("allowedOriginPatterns"), fields.get("allowCredentials")
+            if not origins or not credentials:
+                continue
+            credential_value = kt.text(credentials[1])
+            origin_values = {origin for _, origin in _literal_nodes(origins[1])}
+            if credential_value not in {"true", "false"} or not origin_values:
+                unresolved(function)
+                continue
+            if credential_value != "true" or not origin_values & {"*", "http://*", "https://*"}:
+                continue
+            methods = {value.upper() for _, value in _literal_nodes(fields["allowedMethods"][1])} if "allowedMethods" in fields else set()
+            matcher = AccessRule(function, origins[0], "", "*", path)
+            if any(
+                matcher.matches(route) and (not methods or "*" in methods or route.method in methods) and (
+                    route.function.principal
+                    or (
+                        _sensitive(route.function)
+                        and (access := next((rule for rule in rules if rule.matches(route)), None))
+                        and access.action in {"authenticated", "hasRole", "hasAnyRole", "hasAuthority"}
+                    )
+                )
+                for route in routes
+            ):
+                first, last = sorted((origins[0], credentials[0]), key=lambda node: node.start_byte)
+                yield _finding("credentialed-cors", function, first, last)
+
+
+def _checks_owner_before_return(function: Function, principal: frozenset[str]) -> bool:
+    block = kt.child(function.body, "block")
+    if block is None or not principal:
+        return False
+    for condition in kt.children(block):
+        if condition.type != "if_expression":
+            continue
+        test = condition.child_by_field_name("condition")
+        parts = kt.children(condition)
+        if test is None or len(parts) < 2 or kt.operator(test) != "!=":
+            continue
+        branches = kt.children(parts[1]) if parts[1].type == "block" else [parts[1]]
+        if (
+            branches and branches[-1].type in {"return_expression", "throw_expression"}
+            and _OWNERS.search(kt.text(test)) and _uses_names(function.source, test, principal)
+        ):
+            if branches[-1].type == "throw_expression" or kt.text(branches[-1]).strip() in {"return", "return null"}:
+                return True
+    return False
+
+
+def _jdbc_values(args: tuple[Node, ...]) -> list[Node]:
+    return [
+        arg for arg in args[1:]
+        if arg.type not in {"lambda_literal", "annotated_lambda"}
+        and not re.search(r"::class\.java(?:ObjectType)?$", kt.text(arg))
+    ]
+
+
+def _object_findings(
+    route: Route, connections: list[tuple[kt.Call, Function]], scan: Scan
+) -> Iterator[Finding]:
+    handler = route.function
+    candidates = [(handler, handler.inputs, handler.principal)]
+    for call, target in connections:
+        parameters = target.parameters
+        inputs = frozenset(
+            name for arg, name in zip(call.args, parameters)
+            if _uses_names(handler.source, arg, handler.inputs)
+        )
+        principal = frozenset(
+            name for arg, name in zip(call.args, parameters)
+            if _uses_names(handler.source, arg, handler.principal)
+        )
+        if inputs:
+            candidates.append((target, inputs, principal))
+    for function, inputs, principal in candidates:
+        for node, call, _, sql in _sql_calls(function):
+            where = re.search(r"\bwhere\b", sql, re.IGNORECASE)
+            if where is None or not _OWNERS.search(sql[:where.start()]):
+                continue
+            values = _jdbc_values(call.args)
+            if not any(_uses_names(function.source, arg, inputs) for arg in values):
+                continue
+            if _checks_owner_before_return(function, principal) or _checks_owner_before_return(handler, handler.principal):
+                continue
+            predicate = sql[where.end():]
+            owner_filter = _OWNER_BIND.search(predicate)
+            if owner_filter and not re.search(r"\bor\b", predicate, re.IGNORECASE):
+                position = sql.count("?", 0, where.end() + owner_filter.start(1))
+                if position < len(values):
+                    bound = values[position]
+                    if _uses_names(function.source, bound, principal):
+                        continue
+                    if _uses_names(function.source, bound, inputs):
+                        yield _finding("object-authorization", function, node)
+                        continue
+            if _OWNERS.search(predicate):
+                scan.warn(Warning("UNRESOLVED_OWNER_CHECK", "Не удалось подтвердить источник идентификатора владельца.", function.path), incomplete=True)
+                continue
+            yield _finding("object-authorization", function, node)
+
+
+def scan_sast(snapshot: Snapshot) -> ScanResult:
+    scan = Scan(snapshot, lambda path: path.suffix == ".kt")
+    findings: list[Finding] = []
+    functions: list[Function] = []
+    routes: list[Route] = []
+    index: dict[tuple[str, str], list[Function]] = {}
+    for path, data in scan.files.items():
+        source = kt.KotlinFile(data)
+        if source.root.has_error:
+            scan.skip(path, "KOTLIN_PARSE_ERROR", "Файл Kotlin разобран частично.")
+        current_functions, current_routes = _index(path, source)
+        functions.extend(current_functions)
+        routes.extend(current_routes)
+        for function in current_functions:
+            index.setdefault((function.owner, function.name), []).append(function)
+            for node, _, sql, _ in _sql_calls(function):
+                if _uses_names(function.source, sql, function.inputs):
+                    findings.append(_finding("sql-injection", function, node))
+            findings.extend(_tls_findings(function))
+
+    rules, cors = _security(functions, scan)
+    if cors:
+        findings.extend(_cors_findings(functions, routes, rules, scan))
+    for route in routes:
+        handler = route.function
+        connections = list(_direct_calls(handler, index))
+        rule = next((rule for rule in rules if rule.matches(route)), None)
+        if rule and rule.action == "permitAll" and not _checked(handler):
+            targets = [target for _, target in connections]
+            if _sensitive(handler) or any(_sensitive(target) and not _checked(target) for target in targets):
+                findings.append(_finding("route-authorization", rule.function, rule.node))
+        if handler.inputs:
+            findings.extend(_object_findings(route, connections, scan))
+            if not connections and any(
+                call.receiver is not None and kt.text(call.receiver) in handler.parameter_types
+                and _unqualified(handler.parameter_types[kt.text(call.receiver)]) not in _JDBC_TYPES
+                and any(_uses_names(handler.source, arg, handler.inputs) for arg in call.args)
+                for _, call in handler.calls()
+            ):
+                scan.warn(Warning("UNRESOLVED_CALL", "Не удалось связать обработчик с вызываемым методом.", handler.path), incomplete=True)
+    return scan.result("sast", "Правила Kotlin, JDBC и Spring Security", findings)

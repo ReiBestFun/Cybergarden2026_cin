@@ -1,62 +1,106 @@
+import { api } from './client';
+
+export type ParamField = {
+  type?: 'string' | 'integer' | 'number' | 'boolean';
+  title?: string;
+  description?: string;
+  default?: string | number | boolean;
+  const?: string | number | boolean;
+  enum?: Array<string | number>;
+  anyOf?: Array<{ type?: string }>;
+  format?: string;
+  placeholder?: string;
+  minimum?: number;
+  maximum?: number;
+};
+
 export type ParamSchema = {
   type?: 'object';
-  properties?: Record<string, {
-    type?: 'string' | 'integer' | 'number' | 'boolean';
-    title?: string;
-    description?: string;
-    default?: string | number | boolean;
-    enum?: Array<string | number>;
-    format?: string;
-    placeholder?: string;
-    minimum?: number;
-    maximum?: number;
-  }>;
+  properties?: Record<string, ParamField>;
   required?: string[];
 };
 
+export type Port = { id: string; type?: string; required?: boolean; multiple?: boolean };
+
+// `kind` is the backend node type (manual_trigger, scan_secrets, ...).
 export type NodeTypeDefinition = {
   kind: string;
   label: string;
   description: string;
   category: string;
   params_schema: ParamSchema;
-  inputs?: Array<{ id: string; type?: string }>;
-  outputs?: Array<{ id: string; type?: string }>;
+  inputs: Port[];
+  outputs: Port[];
 };
 
-// This is a development fixture, not a second hard-coded UI catalog.
-// Backend should return this exact array shape from GET /node-types.
-export const mockNodeTypes: NodeTypeDefinition[] = [
-  { kind: 'manual', label: 'Ручной запуск', description: 'Запуск по кнопке', category: 'Запуск', params_schema: { type: 'object', properties: {} }, inputs: [], outputs: [{id:'out'}] },
-  { kind: 'schedule', label: 'Расписание', description: 'Периодический запуск', category: 'Запуск', params_schema: { type: 'object', properties: { cron: { type: 'string', title: 'Cron-выражение', placeholder: '0 14 * * *' } }, required: ['cron'] }, inputs: [], outputs: [{id:'out'}] },
-  { kind: 'webhook', label: 'Webhook Trigger', description: 'Запуск по HTTP-запросу', category: 'Запуск', params_schema: { type: 'object', properties: { path: { type: 'string', title: 'Webhook path', placeholder: '/hooks/security' } } }, inputs: [], outputs: [{id:'out'}] },
-  { kind: 'git', label: 'Git Repository', description: 'Загрузка исходного кода', category: 'Источники', params_schema: { type: 'object', properties: { url: { type: 'string', title: 'URL репозитория', placeholder: 'https://github.com/TBagirov/training' }, ref: { type: 'string', title: 'Ветка или commit', default: 'main' } }, required: ['url'] }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'upload_zip', label: 'ZIP Archive', description: 'Загруженный архив проекта', category: 'Источники', params_schema: { type: 'object', properties: { artifact_id: { type: 'string', title: 'ID загруженного архива' } }, required: ['artifact_id'] }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'secrets', label: 'Secrets Scanner', description: 'Поиск секретов', category: 'Безопасность', params_schema: { type: 'object', properties: { path: { type: 'string', title: 'Путь внутри проекта', placeholder: 'src/main' } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'sca', label: 'SCA Scanner', description: 'Проверка зависимостей', category: 'Безопасность', params_schema: { type: 'object', properties: { path: { type: 'string', title: 'Путь внутри проекта', placeholder: 'build.gradle.kts' } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'sast', label: 'SAST Scanner', description: 'Анализ Kotlin-кода', category: 'Безопасность', params_schema: { type: 'object', properties: { path: { type: 'string', title: 'Путь внутри проекта', placeholder: 'src/main' } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'condition', label: 'IF / ELSE', description: 'Условное ветвление', category: 'Логика', params_schema: { type: 'object', properties: { expression: { type: 'string', title: 'Условие', placeholder: 'critical_count > 0' } }, required: ['expression'] }, inputs: [{id:'in'}], outputs: [{id:'true'}, {id:'false'}] },
-  { kind: 'merge', label: 'Merge', description: 'Объединение результатов', category: 'Логика', params_schema: { type: 'object', properties: {} }, inputs: [{id:'left'}, {id:'right'}], outputs: [{id:'out'}] },
-  { kind: 'compare', label: 'Compare', description: 'Сравнение значений', category: 'Логика', params_schema: { type: 'object', properties: { field: { type: 'string', title: 'Поле' }, operator: { type: 'string', title: 'Оператор', enum: ['eq','ne','gt','lt','gte','lte'] }, value: { type: 'string', title: 'Значение' } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'regex_filter', label: 'Regex Filter', description: 'Фильтрация по шаблону', category: 'Логика', params_schema: { type: 'object', properties: { pattern: { type: 'string', title: 'Регулярное выражение' }, field: { type: 'string', title: 'Поле' } }, required: ['pattern'] }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'ai', label: 'AI Analysis', description: 'Объяснение находок', category: 'AI', params_schema: { type: 'object', properties: { prompt: { type: 'string', title: 'Инструкция модели' } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'report', label: 'Report', description: 'Формирование отчёта', category: 'Отчёты', params_schema: { type: 'object', properties: { format: { type: 'string', title: 'Формат', enum: ['json','markdown'] } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
-  { kind: 'telegram', label: 'Telegram', description: 'Уведомление', category: 'Уведомления', params_schema: { type: 'object', properties: { chatId: { type: 'string', title: 'Chat ID' }, credential_id: { type: 'string', title: 'ID credential (без токена)' } } }, inputs: [{id:'in'}], outputs: [] },
-  { kind: 'ci_gate', label: 'CI Gate', description: 'Блокировка CI при находках', category: 'Интеграции', params_schema: { type: 'object', properties: { fail_on: { type: 'string', title: 'Порог критичности', enum: ['critical','high','medium','low'] } } }, inputs: [{id:'in'}], outputs: [{id:'out'}] },
+// Shape of GET /api/check-types items.
+type BackendCheckType = {
+  type: string;
+  label: string;
+  description: string;
+  inputs: Port[];
+  outputs: Port[];
+  config_schema: ParamSchema;
+};
+
+const CATEGORIES: Record<string, string> = {
+  manual_trigger: 'Запуск',
+  schedule_trigger: 'Запуск',
+  repository: 'Источники',
+  scan_secrets: 'Анализаторы',
+  scan_sca: 'Анализаторы',
+  scan_sast: 'Анализаторы',
+  merge_findings: 'Логика',
+  condition: 'Логика',
+  ai_report: 'AI',
+  notify_telegram: 'Уведомления',
+};
+
+const FIELD_TITLES: Record<string, string> = {
+  field: 'Поле сводки',
+  operator: 'Операция',
+  value: 'Значение',
+  channel: 'Канал',
+};
+
+export function fromBackend(item: BackendCheckType): NodeTypeDefinition {
+  const properties = Object.fromEntries(Object.entries(item.config_schema?.properties ?? {}).map(
+    ([key, field]) => [key, { ...field, title: FIELD_TITLES[key] ?? field.title ?? key }],
+  ));
+  return {
+    kind: item.type,
+    label: item.label,
+    description: item.description,
+    category: CATEGORIES[item.type] ?? 'Прочее',
+    params_schema: { ...item.config_schema, properties },
+    inputs: item.inputs ?? [],
+    outputs: item.outputs ?? [],
+  };
+}
+
+const port = (id: string, type: string, multiple = false): Port => ({ id, type, required: true, multiple });
+
+// Offline fixture that mirrors GET /api/check-types, used only when the backend is unreachable.
+const MOCK_CHECK_TYPES: BackendCheckType[] = [
+  { type: 'manual_trigger', label: 'Ручной запуск', description: 'Поставить запуск в очередь по кнопке.', inputs: [], outputs: [port('params', 'run_params')], config_schema: {} },
+  { type: 'schedule_trigger', label: 'Расписание', description: 'Поставить запуск в очередь по расписанию.', inputs: [], outputs: [port('params', 'run_params')], config_schema: {} },
+  { type: 'repository', label: 'Репозиторий', description: 'Подготовить исходники и зафиксировать коммит.', inputs: [port('params', 'run_params')], outputs: [port('snapshot', 'snapshot')], config_schema: {} },
+  { type: 'scan_secrets', label: 'Secrets', description: 'Найти встроенные секреты.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
+  { type: 'scan_sca', label: 'SCA', description: 'Сопоставить зависимости с учебным справочником.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
+  { type: 'scan_sast', label: 'SAST', description: 'Проверить Kotlin и конфигурацию безопасности.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
+  { type: 'merge_findings', label: 'Объединение находок', description: 'Собрать результаты анализаторов.', inputs: [port('results', 'scan_result', true)], outputs: [port('bundle', 'findings_bundle')], config_schema: {} },
+  { type: 'condition', label: 'IF / ELSE', description: 'Выбрать ветку по сводке или покрытию.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('true', 'findings_bundle'), port('false', 'findings_bundle')], config_schema: { type: 'object', required: ['field', 'operator', 'value'], properties: {
+    field: { type: 'string', enum: ['summary.total', 'summary.high_count', 'summary.critical_count', 'coverage.status'] },
+    operator: { type: 'string', enum: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'matches'] },
+    value: { anyOf: [{ type: 'integer' }, { type: 'string' }] },
+  } } },
+  { type: 'ai_report', label: 'AI-отчёт', description: 'Подготовить рекомендации по сохранённым находкам.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('report', 'report')], config_schema: {} },
+  { type: 'notify_telegram', label: 'Telegram', description: 'Отправить сводку в настроенный канал.', inputs: [port('report', 'report')], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', properties: { channel: { type: 'string', const: 'default', default: 'default' } } } },
 ];
+export const mockNodeTypes: NodeTypeDefinition[] = MOCK_CHECK_TYPES.map(fromBackend);
 
 export async function fetchNodeTypes(signal?: AbortSignal): Promise<NodeTypeDefinition[]> {
-  const base = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
-  try {
-    const response = await fetch(`${base}/node-types`, { signal });
-    if (!response.ok) throw new Error(`GET /node-types: ${response.status}`);
-    const payload: unknown = await response.json();
-    const items = Array.isArray(payload) ? payload : (payload && typeof payload === 'object' && 'node_types' in payload ? (payload as {node_types:unknown}).node_types : null);
-    if (!Array.isArray(items) || !items.every(x => x && typeof x.kind === 'string' && typeof x.label === 'string' && x.params_schema && typeof x.params_schema === 'object')) throw new Error('Некорректный ответ /node-types');
-    return items as NodeTypeDefinition[];
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    console.warn('Node types API unavailable, using local mock:', error);
-    return mockNodeTypes;
-  }
+  const payload = await api<{ items: BackendCheckType[] }>('/api/check-types', { signal });
+  if (!Array.isArray(payload?.items)) throw new Error('Некорректный ответ /api/check-types');
+  return payload.items.map(fromBackend);
 }

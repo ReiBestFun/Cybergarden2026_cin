@@ -26,12 +26,12 @@ Swagger доступен по адресу http://127.0.0.1:8000/docs. Марш�
 
 ### Подключение фронтенда
 
-Ветка [frontend](https://github.com/ReiBestFun/Cybergarden2026_cin/tree/frontend) пока использует localStorage и демонстрационный запуск. CORS разрешает локальному Vite обращаться к API с порта 5173.
+Фронтенд лежит в [frontend/](../frontend/README.md) и работает с этим API напрямую. В разработке Vite проксирует `/api` на http://127.0.0.1:8000, поэтому CORS не нужен.
 
-- Загружайте палитру, параметры и идентификаторы портов через GET /api/check-types. Передавайте Graph в API с полями id, type, config, position у нод и id, source, source_port, target, target_port у рёбер.
-- Преобразуйте data.kind React Flow в серверные типы. Для manual, schedule, secrets, sca, sast, ai, telegram используются manual_trigger, schedule_trigger, scan_secrets, scan_sca, scan_sast, ai_report, notify_telegram. Тип condition совпадает. Для исполняемого графа добавьте repository перед анализаторами и merge_findings после них. Сохраняйте sourceHandle и targetHandle как source_port и target_port.
-- Настраивайте расписание отдельным PUT /api/workflows/{workflow_id}/schedule с ежедневным временем и часовым поясом. Настройки condition передавайте как field, operator, value. Канал Telegram задаётся на сервере.
-- Для запуска вызовите POST /api/workflows/{workflow_id}/runs, затем опрашивайте GET /api/runs/{run_id}. Для списка находок используйте GET /api/runs/{run_id}/findings, для сводки — GET /api/runs/{run_id}/report.
+- Палитра, параметры и порты нод берутся из GET /api/check-types. В React Flow `data.kind` совпадает с серверным типом ноды, а `sourceHandle` и `targetHandle` с `source_port` и `target_port`.
+- «Сохранить» находит или создаёт проект по ссылке на репозиторий и вызывает POST /api/projects/{project_id}/workflows или PATCH /api/workflows/{workflow_id}. Для ноды schedule_trigger время уходит в PUT /api/workflows/{workflow_id}/schedule.
+- «Запустить» сохраняет граф, проверяет его через POST /api/workflows/{workflow_id}/validate, ставит запуск POST /api/workflows/{workflow_id}/runs и раз в секунду опрашивает GET /api/runs/{run_id}, раскрашивая ноды по статусам.
+- Страница результатов читает GET /api/runs/{run_id} и /findings, экспорт идёт через /export. История и список сценариев собираются из /api/projects, /runs и /workflows.
 
 ## Локальный запуск анализаторов
 

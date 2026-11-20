@@ -1,4 +1,6 @@
+import { useEffect } from 'react';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
+import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon } from 'lucide-react';
 import { Editor } from '../features/editor/Editor';
@@ -6,6 +8,8 @@ import { Scenarios } from '../pages/Scenarios';
 import { Results } from '../pages/Results';
 import { History } from '../pages/History';
 function Shell() {
+  const refreshCatalog = useNodeTypesStore(s => s.refresh);
+  useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
   return (
     <div className="app-shell">
       <nav className="app-nav">

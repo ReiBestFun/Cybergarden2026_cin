@@ -870,3 +870,63 @@ code {
   color: #a96f47;
   cursor: pointer;
 }
+/* ---------- Связка с API: статусы, уведомления, результаты ---------- */
+
+.node-status.succeeded { color: #55a181; }
+.node-status.failed { color: #b45b44; font-weight: 700; }
+.node-status.skipped,
+.node-status.pending { color: #a39a92; }
+.flow-node.status-running { box-shadow: 0 0 0 2px #e6c48f; }
+.flow-node.status-failed { box-shadow: 0 0 0 2px #e3a796; }
+.flow-node.status-skipped { opacity: 0.6; }
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: #f0eafa;
+  color: #4b3f63;
+}
+.notice span { flex: 1; }
+.notice.error { background: #fde8e3; color: #8a2f1c; }
+.notice.success { background: #e7f4ef; color: #2f6b55; }
+.notice.info { background: #fdf3e2; color: #7a5520; }
+.notice a { font-weight: 600; color: inherit; }
+.editor-page > .notice { margin: 0 20px 10px; }
+
+.tag.warn { background: #fef3c7; color: #92400e; }
+.tag.run-succeeded { background: #e7f4ef; color: #2f6b55; }
+.tag.run-partial { background: #fef3c7; color: #92400e; }
+.tag.run-failed { background: #fde8e3; color: #8a2f1c; }
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.toolbar-actions a.btn { text-decoration: none; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: #faf6f1; }
+
+.settings-panel label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-panel label.checkbox input { width: auto; margin: 0; }
+.node-run h4 { margin: 18px 0 8px; font-size: 13px; }
+.node-run pre {
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f7f3ee;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

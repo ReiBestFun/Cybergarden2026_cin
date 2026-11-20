@@ -37,6 +37,6 @@ export function Canvas() {
       onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)} fitView>
       <Background color="#dfd4c8" gap={22} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
     </ReactFlow>
-    <div className="canvas-hint">Демо: статусы имитируются. Реальные сканеры пока не подключены.</div>
+    <div className="canvas-hint">Соединяйте порты одного типа. Запуск выполняется на бэкенде, статусы нод обновляются по ходу.</div>
   </main>;
 }

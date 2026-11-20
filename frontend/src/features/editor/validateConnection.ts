@@ -2,7 +2,7 @@ import type { Connection, Edge } from '@xyflow/react';
 import type { FlowNode } from './types';
 import type { NodeTypeDefinition } from '../../shared/api/nodeTypes';
 
-type Port = { id: string; type?: string };
+type Port = { id: string; type?: string; multiple?: boolean };
 
 export function validateConnection(
   connection: Connection,
@@ -30,6 +30,9 @@ export function validateConnection(
   if (edges.some(e => e.source === source && e.target === target &&
       (e.sourceHandle ?? outputs[0]?.id) === output.id &&
       (e.targetHandle ?? inputs[0]?.id) === input.id)) return false;
+  // Inputs without `multiple` accept a single connection (backend MULTIPLE_INPUTS rule).
+  if (input.multiple === false &&
+      edges.some(e => e.target === target && (e.targetHandle ?? inputs[0]?.id) === input.id)) return false;
   // Adding source -> target creates a cycle if target can already reach source.
   const visited = new Set<string>();
   const stack = [target];

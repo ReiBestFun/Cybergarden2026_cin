@@ -145,6 +145,35 @@ def test_allow_any_repository_switch():
     assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
 
 
+def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
+    client, sessions = api
+    workflow_id = create_workflow(client, create_project(client), ci_graph())
+    editor = f"/api/workflows/{workflow_id}"
+    hook = f"/api/hooks/{workflow_id}"
+    sha = "a" * 40
+    response = client.post(f"{editor}/ci-test", json={"commit_sha": sha})
+    assert response.status_code == 202
+    run_id = response.json()["id"]
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["trigger"] == "ci" and run["source_snapshot"]["ref"] == sha
+    (tmp_path / "Service.kt").write_text('val serviceName = "demo"\n', encoding="utf-8")
+
+    @contextmanager
+    def prepare(url, ref, **kwargs):
+        yield RepositorySnapshot(Snapshot.from_directory(tmp_path, ref), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepare)
+    assert run_next(sessions, client.app.state.settings, None)
+    token_response = client.post(f"{editor}/ci-token", json={})
+    assert token_response.headers["cache-control"] == "no-store"
+    old_headers = {"Authorization": f"Bearer {token_response.json()['token']}"}
+    status_endpoint = f"{hook}/runs/{run_id}"
+    assert client.get(status_endpoint, headers=old_headers).json()["gate"]["decision"] == "passed"
+    token = client.post(f"{editor}/ci-token", json={}).json()["token"]
+    assert client.get(status_endpoint, headers=old_headers).status_code == 401
+    assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
 def test_daily_schedule_skips_nonexistent_local_time():
     now = datetime(2026, 3, 28, 15, 0, tzinfo=UTC)
     assert next_daily_slot(time(2, 30), ZoneInfo("Europe/Berlin"), now) == datetime(2026, 3, 30, 0, 30, tzinfo=UTC)

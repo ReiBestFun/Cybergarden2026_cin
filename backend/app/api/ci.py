@@ -1,18 +1,19 @@
-from secrets import compare_digest
+from hashlib import sha256
+from secrets import compare_digest, token_urlsafe
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 
 from ..config import Settings
-from ..db.models import Project, ScanRun
+from ..db.models import Project, ScanRun, Workflow
 from ..db.session import Database
 from ..integrations.github_actions import RunnerMode, security_workflow
 from ..integrations.repository import allowed_repository_urls, is_repository_allowed
 from ..nodes.catalog import CiTriggerConfig
-from ..schemas.contracts import CiRunCreate, CiRunStatus, CiVerdict, Graph
+from ..schemas.contracts import CiRunCreate, CiRunStatus, CiVerdict, CommitSha, Graph, Input
 from ..workflows.queue import enqueue_ci_run
 from ..workflows.validation import validate_graph
 from .common import ApiError, graph_error, normalize_repository
@@ -23,17 +24,25 @@ router = APIRouter(tags=["ci"])
 _bearer = HTTPBearer(auto_error=False)
 
 
+class CiTestRequest(Input):
+    commit_sha: CommitSha
+
+
 def _authorize(
-    workflow_id: UUID, request: Request,
+    workflow_id: UUID, request: Request, db: Database,
     bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> Settings:
     settings: Settings = request.app.state.settings
-    expected = settings.ci_workflow_tokens.get(workflow_id)
-    if expected is None or not expected.get_secret_value() or bearer is None or not compare_digest(
-        expected.get_secret_value().encode(), bearer.credentials.encode(),
-    ):
-        raise ApiError(401, "CI_UNAUTHORIZED", "Нужен действующий токен CI для этого сценария.")
-    return settings
+    if bearer is not None:
+        digest = db.scalar(select(Workflow.ci_token_hash).where(Workflow.id == workflow_id))
+        if digest is not None:
+            if compare_digest(digest, sha256(bearer.credentials.encode()).hexdigest()):
+                return settings
+        else:
+            expected = settings.ci_workflow_tokens.get(workflow_id)
+            if expected and compare_digest(expected.get_secret_value().encode(), bearer.credentials.encode()):
+                return settings
+    raise ApiError(401, "CI_UNAUTHORIZED", "Нужен действующий токен CI для этого сценария.")
 
 
 CiSettings = Annotated[Settings, Depends(_authorize)]
@@ -49,6 +58,29 @@ def _ci_graph(graph_json: dict) -> Graph:
     if issues := validate_graph(graph, expected_trigger="ci_trigger"):
         raise graph_error(issues[0])
     return graph
+
+
+@router.post("/workflows/{workflow_id}/ci-test", status_code=202)
+def start_ci_test(workflow_id: UUID, body: CiTestRequest, db: Database, request: Request) -> dict[str, UUID]:
+    workflow = get_workflow(workflow_id, db, lock=True)
+    project = get_project(workflow.project_id, db)
+    _check_repository(project, request.app.state.settings)
+    graph = _ci_graph(workflow.graph_json)
+    run = enqueue_ci_run(db, project, workflow, graph, body.commit_sha, f"web-{uuid4()}")
+    db.commit()
+    return {"id": run.id}
+
+
+@router.post("/workflows/{workflow_id}/ci-token")
+def issue_token(workflow_id: UUID, body: Input, db: Database, request: Request, response: Response) -> dict[str, str]:
+    workflow = get_workflow(workflow_id, db, lock=True)
+    _check_repository(get_project(workflow.project_id, db), request.app.state.settings)
+    _ci_graph(workflow.graph_json)
+    token = token_urlsafe(32)
+    workflow.ci_token_hash = sha256(token.encode()).hexdigest()
+    db.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return {"token": token}
 
 
 @router.get("/workflows/{workflow_id}/security.yml", response_class=Response)

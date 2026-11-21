@@ -4,13 +4,13 @@ import type { FlowNode, NodeKind } from './types';
 import { useNodeTypesStore } from './nodeTypesStore';
 import {
   getSaved, saveDraft, setLastRunId, initialNodes, initialEdges, DEFAULT_NAME,
-  defaultSchedule, scheduleFromServer, scheduleSettings, type ScheduleDraft,
+  ciPreset, defaultSchedule, scheduleFromServer, scheduleSettings, type ScheduleDraft,
 } from './defaults';
 import { validateConnection } from './validateConnection';
 import { fromApiGraph, toApiGraph } from './graph';
 import { ApiError, errorMessage } from '../../shared/api/client';
 import {
-  createWorkflow, ensureProject, getRun, getSchedule, getWorkflow, isFinished, setSchedule, startRun, updateWorkflow, validateWorkflow,
+  createWorkflow, ensureProject, getProject, getRun, getSchedule, getWorkflow, isFinished, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
   type RunDetail, type Schedule,
 } from '../../shared/api/workflows';
 
@@ -35,10 +35,10 @@ type EditorState = {
   renameSelected: (label: string) => void;
   removeSelected: () => void;
   setNotice: (notice: Notice) => void;
-  newWorkflow: () => void;
+  newWorkflow: (preset?: 'ci') => void;
   loadWorkflow: (id: string) => Promise<void>;
   save: () => Promise<string | null>;
-  runWorkflow: () => Promise<void>;
+  runWorkflow: (commitSha?: string) => Promise<void>;
 };
 
 const saved = getSaved();
@@ -87,8 +87,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
     removeSelected: () => set((state) => ({ nodes: state.nodes.filter((n) => n.id !== state.selected), edges: state.edges.filter((e) => e.source !== state.selected && e.target !== state.selected), selected: null })),
     setNotice: (notice) => set({ notice }),
 
-    newWorkflow: () => {
-      set({ nodes: initialNodes, edges: initialEdges, name: DEFAULT_NAME, workflowId: null, selected: null, run: null, notice: null, schedule: defaultSchedule(), serverSchedule: null });
+    newWorkflow: (preset) => {
+      set({ nodes: initialNodes, edges: initialEdges, name: DEFAULT_NAME, workflowId: null, selected: null, run: null, notice: null,
+        schedule: defaultSchedule(), serverSchedule: null, ...(preset === 'ci' ? { ...ciPreset, projectId: null } : {}) });
       persist();
     },
 
@@ -96,13 +97,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ busy: 'load', notice: null });
       try {
         const workflow = await getWorkflow(id);
+        const project = await getProject(workflow.project_id);
         const types = useNodeTypesStore.getState().types;
         const labels = get().workflowId === id ? Object.fromEntries(get().nodes.map(n => [n.id, n.data.label])) : {};
         const { nodes, edges } = fromApiGraph(workflow.graph, types, labels);
         const serverSchedule = await getSchedule(workflow.id).catch(() => null);
         const configured = serverSchedule && (serverSchedule.time || serverSchedule.cron);
         set({
-          nodes, edges, name: workflow.name, workflowId: workflow.id, projectId: workflow.project_id, selected: null, run: null,
+          nodes, edges, name: workflow.name, workflowId: workflow.id, project: project.repository_url, projectId: workflow.project_id, selected: null, run: null,
           serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule()) : defaultSchedule(),
         });
         persist();
@@ -148,7 +150,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }
     },
 
-    runWorkflow: async () => {
+    runWorkflow: async (commitSha) => {
       if (get().busy) return;
       set({ busy: 'run', notice: null, run: null });
       clearStatuses();
@@ -157,7 +159,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (!workflowId) return;
         const check = await validateWorkflow(workflowId);
         if (!check.valid) throw new ApiError(422, check.issues[0]);
-        const { id } = await startRun(workflowId);
+        const { id } = commitSha ? await startCiTest(workflowId, commitSha) : await startRun(workflowId);
         setLastRunId(id);
         set({ notice: { kind: 'info', text: 'Запуск в очереди. Ожидаем воркер…' } });
         for (;;) {
@@ -167,6 +169,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
           if (run.status === 'running') set({ notice: { kind: 'info', text: 'Выполняется…' } });
           if (isFinished(run.status)) {
             const total = run.summary?.total ?? 0;
+            const decision = run.nodes.find(node => node.type === 'ci_gate')?.output_preview?.decision;
+            if (commitSha && (decision === 'blocked' || decision === 'error')) {
+              set({ notice: { kind: 'error', text: decision === 'blocked'
+                ? `CI заблокирован по критичности. Находок: ${total}.`
+                : `CI завершился с неполным покрытием. Находок: ${total}.` } });
+              break;
+            }
             set({ notice: run.status === 'failed'
               ? { kind: 'error', text: `Запуск завершился ошибкой: ${run.error?.message ?? 'неизвестная ошибка'}` }
               : { kind: 'success', text: `Запуск завершён (${run.status === 'partial' ? 'частичное покрытие' : 'успешно'}). Находок: ${total}.` } });

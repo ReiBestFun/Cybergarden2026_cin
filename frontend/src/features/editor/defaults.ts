@@ -4,6 +4,7 @@ import type { Frequency, Schedule, ScheduleSettings } from '../../shared/api/wor
 
 export const DEFAULT_REPOSITORY = 'https://github.com/TBagirov/training';
 export const DEFAULT_NAME = 'Security check workflow';
+export const TRAINING_CI_SHA = 'fe1fcbe212669783480666b9b60147c8a8c6eef4';
 const DRAFT_KEY = 'cyberflow.workflow.v2';
 
 const node = (id: string, kind: string, label: string, x: number, y: number): FlowNode =>
@@ -30,6 +31,17 @@ export const initialEdges: Edge[] = [
   edge('e-sca-merge', 'sca', 'result', 'merge', 'results'),
   edge('e-sast-merge', 'sast', 'result', 'merge', 'results'),
 ];
+
+export const ciPreset = {
+  name: 'CI/CD · Учебный репозиторий',
+  project: DEFAULT_REPOSITORY,
+  nodes: [
+    { ...node('trigger', 'ci_trigger', 'GitHub Actions', 40, 200), data: { kind: 'ci_trigger', label: 'GitHub Actions', config: { branch: 'main' } } },
+    ...initialNodes.slice(1),
+    node('gate', 'ci_gate', 'Порог CI', 1210, 200),
+  ],
+  edges: [...initialEdges, edge('e-merge-gate', 'merge', 'bundle', 'gate', 'bundle')],
+};
 
 export type Draft = {
   nodes: FlowNode[];

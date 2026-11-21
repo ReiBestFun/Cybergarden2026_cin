@@ -32,6 +32,7 @@ class Workflow(Base):
     project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"))
     name: Mapped[str] = mapped_column(String(120))
     graph_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    ci_token_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

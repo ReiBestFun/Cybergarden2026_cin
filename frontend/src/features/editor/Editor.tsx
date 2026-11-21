@@ -6,6 +6,7 @@ import { useNodeTypesStore } from './nodeTypesStore';
 import { NodePalette } from './NodePalette';
 import { Canvas } from './Canvas';
 import { SettingsPanel } from './SettingsPanel';
+import { CiSetup } from './CiSetup';
 import { toApiGraph } from './graph';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow } from '../../shared/api/workflows';
@@ -76,7 +77,7 @@ export function Editor() {
           <span className="muted">{name} · {workflowId ? 'сохранён на сервере' : 'не сохранён'}</span>
         </div>
         <div className="toolbar-actions">
-          <button className="btn secondary" onClick={newWorkflow} disabled={!!busy} title="Новый сценарий">
+          <button className="btn secondary" onClick={() => newWorkflow()} disabled={!!busy} title="Новый сценарий">
             <FilePlus size={16} /> Новый
           </button>
           <button className="btn secondary" onClick={() => void save()} disabled={!!busy}>
@@ -90,9 +91,9 @@ export function Editor() {
               <Download size={16} /> security.yml
             </button>
           )}
-          <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
+          {!hasCiTrigger && <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
             <Play size={16} /> {busy === 'run' ? 'Выполнение…' : 'Запустить'}
-          </button>
+          </button>}
         </div>
       </header>
 
@@ -103,6 +104,8 @@ export function Editor() {
           <button className="icon-btn" aria-label="Скрыть" onClick={() => setNotice(null)}><X size={15} /></button>
         </div>
       )}
+
+      {hasCiTrigger && <CiSetup key={project} />}
 
       <div className="editor-layout">
         <NodePalette />

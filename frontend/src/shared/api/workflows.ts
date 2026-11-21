@@ -75,7 +75,11 @@ export const updateWorkflow = (id: string, name: string, graph: ApiGraph) =>
   api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph } });
 export const validateWorkflow = (id: string) =>
   api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {} });
-export const getSecurityWorkflow = (id: string) => apiFile(`/api/workflows/${id}/security.yml`);
+export const getSecurityWorkflow = (id: string, mode: 'local' | 'hosted' = 'local') =>
+  apiFile(`/api/workflows/${id}/security.yml?mode=${mode}`);
+export const issueCiToken = (id: string) => api<{ token: string }>(`/api/workflows/${id}/ci-token`, { method: 'POST', json: {} });
+export const startCiTest = (id: string, commitSha: string) =>
+  api<{ id: string }>(`/api/workflows/${id}/ci-test`, { method: 'POST', json: { commit_sha: commitSha } });
 export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
 export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: true } & ScheduleSettings)) =>
   api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });

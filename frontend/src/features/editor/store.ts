@@ -3,8 +3,8 @@ import { applyNodeChanges, applyEdgeChanges, addEdge, type NodeChange, type Edge
 import type { FlowNode, NodeKind } from './types';
 import { useNodeTypesStore } from './nodeTypesStore';
 import {
-  getSaved, saveDraft, setLastRunId, initialNodes, initialEdges, DEFAULT_NAME,
-  ciPreset, defaultSchedule, scheduleFromServer, scheduleSettings, type ScheduleDraft,
+  getSaved, saveDraft, setLastRunId, DEFAULT_NAME, DEFAULT_REPOSITORY,
+  ciPreset, defaultSchedule, hasScheduleFields, scheduleFromServer, scheduleSettings, type ScheduleDraft,
 } from './defaults';
 import { validateConnection } from './validateConnection';
 import { fromApiGraph, toApiGraph } from './graph';
@@ -12,13 +12,14 @@ import { ApiError, errorMessage } from '../../shared/api/client';
 import { watchRun } from '../../shared/api/runEvents';
 import {
   createWorkflow, ensureProject, getProject, getSchedule, getWorkflow, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
-  type RunDetail, type Schedule,
+  type GeneratedWorkflow, type RunDetail, type Schedule,
 } from '../../shared/api/workflows';
 
 export type Notice = { kind: 'error' | 'info' | 'success'; text: string } | null;
 
 type EditorState = {
   nodes: FlowNode[]; edges: Edge[]; selected: string | null;
+  canvasRevision: number;
   project: string; name: string; projectId: string | null; workflowId: string | null;
   schedule: ScheduleDraft; serverSchedule: Schedule | null;
   busy: 'save' | 'run' | 'load' | null; notice: Notice; run: RunDetail | null;
@@ -37,6 +38,7 @@ type EditorState = {
   removeSelected: () => void;
   setNotice: (notice: Notice) => void;
   newWorkflow: (preset?: 'ci') => void;
+  applyGenerated: (draft: GeneratedWorkflow) => void;
   loadWorkflow: (id: string) => Promise<void>;
   save: () => Promise<string | null>;
   runWorkflow: (commitSha?: string) => Promise<void>;
@@ -45,6 +47,7 @@ type EditorState = {
 const saved = getSaved();
 export const useEditorStore = create<EditorState>((set, get) => {
   let runUpdates: AbortController | undefined;
+  let loadRequest = 0;
   const persist = () => {
     const s = get();
     saveDraft({ nodes: s.nodes, edges: s.edges, project: s.project, name: s.name, projectId: s.projectId, workflowId: s.workflowId, schedule: s.schedule });
@@ -57,7 +60,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   const clearStatuses = () => set(s => ({ nodes: s.nodes.map(n => ({ ...n, data: { ...n.data, status: undefined } })) }));
 
   return {
-    nodes: saved.nodes, edges: saved.edges, selected: null,
+    nodes: saved.nodes, edges: saved.edges, selected: null, canvasRevision: 0,
     project: saved.project, name: saved.name, projectId: saved.projectId, workflowId: saved.workflowId,
     schedule: { ...defaultSchedule(), ...saved.schedule }, serverSchedule: null,
     busy: null, notice: null, run: null,
@@ -90,14 +93,43 @@ export const useEditorStore = create<EditorState>((set, get) => {
     newWorkflow: (preset) => {
       runUpdates?.abort();
       runUpdates = undefined;
-      set({ nodes: initialNodes, edges: initialEdges, name: DEFAULT_NAME, workflowId: null, selected: null, run: null, notice: null, busy: null,
-        schedule: defaultSchedule(), serverSchedule: null, ...(preset === 'ci' ? { ...ciPreset, projectId: null } : {}) });
+      set({ nodes: [], edges: [], name: DEFAULT_NAME, project: DEFAULT_REPOSITORY, projectId: null, canvasRevision: get().canvasRevision + 1,
+        workflowId: null, selected: null, run: null, notice: null, busy: null,
+        schedule: defaultSchedule(), serverSchedule: null, ...(preset === 'ci' ? ciPreset : {}) });
+      persist();
+    },
+
+    applyGenerated: (draft) => {
+      const state = get();
+      if (state.busy) return;
+      const graph = fromApiGraph(draft.graph, useNodeTypesStore.getState().types);
+      const scheduleNode = graph.nodes.find(node => node.data.kind === 'schedule_trigger');
+      const schedule = { ...defaultSchedule(), enabled: draft.issues.length === 0 };
+      if (draft.schedule) {
+        schedule.frequency = draft.schedule.frequency;
+        schedule.time = draft.schedule.time ?? '';
+        schedule.weekdays = draft.schedule.weekdays ?? [];
+        schedule.day_of_month = draft.schedule.day_of_month ?? 0;
+        schedule.cron = draft.schedule.cron ?? '';
+        schedule.timezone = draft.schedule.timezone ?? schedule.timezone;
+      }
+      set({
+        ...graph, name: draft.name, project: draft.repository_url ?? state.project,
+        workflowId: null, run: null, serverSchedule: null, schedule, canvasRevision: state.canvasRevision + 1,
+        selected: draft.issues[0]?.node_id ?? scheduleNode?.id ?? null,
+        notice: draft.issues.length
+          ? { kind: 'info', text: draft.issues.map(issue => issue.message).join(' ') + (scheduleNode ? ' После настройки включите расписание.' : '') }
+          : { kind: 'success', text: 'Черновик создан. Проверьте настройки и сохраните сценарий.' },
+      });
       persist();
     },
 
     loadWorkflow: async (id) => {
       runUpdates?.abort();
       runUpdates = undefined;
+      const request = ++loadRequest;
+      const revision = get().canvasRevision;
+      const isCurrent = () => request === loadRequest && revision === get().canvasRevision;
       set({ busy: 'load', notice: null });
       try {
         const workflow = await getWorkflow(id);
@@ -106,21 +138,26 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const labels = get().workflowId === id ? Object.fromEntries(get().nodes.map(n => [n.id, n.data.label])) : {};
         const { nodes, edges } = fromApiGraph(workflow.graph, types, labels);
         const serverSchedule = await getSchedule(workflow.id).catch(() => null);
+        if (!isCurrent()) return;
         const configured = serverSchedule && (serverSchedule.time || serverSchedule.cron);
+        const fallback = get().workflowId === id ? get().schedule : defaultSchedule();
         set({
           nodes, edges, name: workflow.name, workflowId: workflow.id, project: project.repository_url, projectId: workflow.project_id, selected: null, run: null,
-          serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule()) : defaultSchedule(),
+          canvasRevision: revision + 1, busy: null,
+          serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule())
+            : { ...fallback, enabled: serverSchedule?.enabled ?? fallback.enabled },
         });
         persist();
       } catch (error) {
+        if (!isCurrent()) return;
         fail(error);
-      } finally {
         set({ busy: null });
       }
     },
 
     save: async () => {
       const s = get();
+      const isCurrent = () => s.canvasRevision === get().canvasRevision && s.busy !== 'load' && get().busy !== 'load';
       set({ busy: s.busy ?? 'save', notice: null });
       try {
         const graph = toApiGraph(s.nodes, s.edges, useNodeTypesStore.getState().types);
@@ -135,22 +172,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
           }
         }
         if (!workflowId) workflowId = (await createWorkflow(project.id, s.name, graph)).id;
+        if (!isCurrent()) return null;
         set({ projectId: project.id, workflowId });
         const scheduled = s.nodes.some(n => n.data.kind === 'schedule_trigger');
         if (scheduled || s.workflowId) {
-          const serverSchedule = await setSchedule(workflowId, scheduled && s.schedule.enabled
-            ? { enabled: true, ...scheduleSettings(s.schedule) }
-            : { enabled: false });
+          const serverSchedule = await setSchedule(workflowId, scheduled && (s.schedule.enabled || hasScheduleFields(s.schedule))
+            ? { enabled: s.schedule.enabled, ...scheduleSettings(s.schedule) } : { enabled: false });
+          if (!isCurrent()) return null;
           set({ serverSchedule });
         }
         persist();
         if (get().busy === 'save') set({ notice: { kind: 'success', text: 'Сценарий сохранён на сервере.' } });
         return workflowId;
       } catch (error) {
-        fail(error);
+        if (isCurrent()) fail(error);
         return null;
       } finally {
-        if (get().busy === 'save') set({ busy: null });
+        if (isCurrent() && get().busy === 'save') set({ busy: null });
       }
     },
 

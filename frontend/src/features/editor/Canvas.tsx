@@ -1,6 +1,6 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type React from 'react';
-import { ReactFlow, Background, Controls, MiniMap, useReactFlow, type Connection } from '@xyflow/react';
+import { ReactFlow, Background, Controls, MiniMap, useNodesInitialized, useReactFlow, type Connection } from '@xyflow/react';
 import { useNodeTypesStore } from './nodeTypesStore';
 import { nodeTypes } from './FlowNode';
 import { useEditorStore } from './store';
@@ -8,9 +8,16 @@ import { validateConnection } from './validateConnection';
 import type { NodeKind } from './types';
 
 export function Canvas() {
-  const { nodes, edges, run, onNodesChange, onEdgesChange, onConnect, setSelected, addNode } = useEditorStore();
+  const { nodes, edges, run, canvasRevision, onNodesChange, onEdgesChange, onConnect, setSelected, addNode } = useEditorStore();
   const knownKinds = useNodeTypesStore(s => s.types);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  const fittedRevision = useRef<number | null>(null);
+  useEffect(() => {
+    if (!nodesInitialized || canvasRevision === fittedRevision.current) return;
+    fittedRevision.current = canvasRevision;
+    void fitView({ padding: 0.2, maxZoom: 1 });
+  }, [canvasRevision, fitView, nodesInitialized]);
   const isValidConnection = useCallback((connection: Connection) =>
     validateConnection(connection, nodes, edges, knownKinds), [nodes, edges, knownKinds]);
   const displayedEdges = useMemo(() => {
@@ -53,7 +60,7 @@ export function Canvas() {
         })
       } 
       nodeTypes={nodeTypes}
-      onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)} fitView>
+      onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)}>
       <Background color="#dfd4c8" gap={22} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
     </ReactFlow>
     <div className="canvas-hint">Соединяйте порты одного типа. Запуск выполняется на бэкенде, статусы нод обновляются по ходу.</div>

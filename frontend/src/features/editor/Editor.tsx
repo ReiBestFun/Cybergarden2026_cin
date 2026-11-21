@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Save, Download, Play, Bot, X, MessageCircle, Send, FilePlus } from 'lucide-react';
+import { Save, Download, Play, X, FilePlus } from 'lucide-react';
 import { useEditorStore } from './store';
 import { useNodeTypesStore } from './nodeTypesStore';
 import { NodePalette } from './NodePalette';
@@ -8,6 +8,7 @@ import { Canvas } from './Canvas';
 import { SettingsPanel } from './SettingsPanel';
 import { CiSetup } from './CiSetup';
 import { PublishTemplate } from './PublishTemplate';
+import { WorkflowGenerator } from './WorkflowGenerator';
 import { toApiGraph } from './graph';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow } from '../../shared/api/workflows';
@@ -21,7 +22,7 @@ function download(blob: Blob, filename: string) {
 }
 
 export function Editor() {
-  const { nodes, edges, project, name, workflowId, busy, notice, run, save, runWorkflow, loadWorkflow, newWorkflow, setNotice } = useEditorStore();
+  const { nodes, edges, project, name, workflowId, busy, notice, run, canvasRevision, save, runWorkflow, loadWorkflow, newWorkflow, setNotice } = useEditorStore();
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
   const [downloadingCi, setDownloadingCi] = useState(false);
@@ -38,12 +39,6 @@ export function Editor() {
     }
   }, [params, loadWorkflow, setParams]);
 
-  const [chatOpen, setChatOpen] = useState(false);
-  const [message, setMessage] = useState('');
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; text: string }[]>([
-    { role: 'assistant', text: 'Привет! Я помогу настроить ноды. Подключение к LLM появится на следующем этапе.' },
-  ]);
-
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });
     download(blob, 'cyberflow-workflow.json');
@@ -59,16 +54,6 @@ export function Editor() {
     } finally {
       setDownloadingCi(false);
     }
-  };
-
-  const send = () => {
-    if (!message.trim()) return;
-    setMessages((ms) => [
-      ...ms,
-      { role: 'user', text: message.trim() },
-      { role: 'assistant', text: 'Сейчас это демонстрационный чат. После подключения LLM я смогу предлагать изменения параметров и схемы.' },
-    ]);
-    setMessage('');
   };
 
   return (
@@ -117,29 +102,7 @@ export function Editor() {
         <SettingsPanel />
       </div>
 
-      <div className={`chat-widget ${chatOpen ? 'open' : ''}`}>
-        <button className="chat-toggle" onClick={() => setChatOpen((v) => !v)}>
-          <Bot size={19} /> AI-помощник {chatOpen ? <X size={17} /> : <MessageCircle size={17} />}
-        </button>
-        {chatOpen && (
-          <>
-            <div className="chat-messages">
-              {messages.map((m, i) => (
-                <div key={i} className={`chat-message ${m.role}`}>{m.text}</div>
-              ))}
-            </div>
-            <div className="chat-input">
-              <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && send()}
-                placeholder="Например: настрой проверку секретов…"
-              />
-              <button onClick={send} aria-label="Отправить"><Send size={17} /></button>
-            </div>
-          </>
-        )}
-      </div>
+      <WorkflowGenerator key={canvasRevision} />
     </div>
   );
 }

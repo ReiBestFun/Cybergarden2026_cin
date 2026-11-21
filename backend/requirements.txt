@@ -1,6 +1,7 @@
 alembic==1.20.1
 cryptography==50.0.2
 fastapi==0.165.0
+httpx==0.28.1
 psycopg[binary]==3.3.9
 pydantic==2.14.4
 pydantic-settings==2.16.3
@@ -9,4 +10,5 @@ regex==2026.11.19
 SQLAlchemy==2.1.9
 tree-sitter==0.26.1
 tree-sitter-kotlin==1.1.0
+tzdata==2026.6; sys_platform == "win32"
 uvicorn==0.54.0

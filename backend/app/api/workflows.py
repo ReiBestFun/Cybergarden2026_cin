@@ -1,20 +1,24 @@
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from sqlalchemy import select
 
 from ..db.models import Schedule, Workflow
 from ..db.session import Database
+from ..integrations.repository import is_repository_allowed
+from ..llm import ModelError
 from ..nodes.catalog import CATALOG, CatalogRead
 from ..schemas.contracts import (
     Graph, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
     WorkflowCreate, WorkflowPatch, WorkflowRead,
 )
+from ..workflows.generation import GeneratedWorkflow, GenerationError, GenerationRequest, generate_workflow
 from ..workflows.scheduling import ScheduleSpecError, next_slot
 from ..workflows.schedules import apply_spec, preview, schedule_read, spec_from_settings
 from ..workflows.validation import validate_draft, validate_graph
-from .common import ApiError, PageQuery, graph_error, page
+from .common import ApiError, PageQuery, graph_error, normalize_repository, page
 from .projects import get_project
 
 router = APIRouter(tags=["workflows"])
@@ -37,6 +41,24 @@ def _draft(graph: Graph) -> dict:
 @router.get("/check-types", response_model=CatalogRead)
 def list_node_types() -> CatalogRead:
     return CatalogRead(items=list(CATALOG.values()))
+
+
+@router.post("/workflows/generate", response_model=GeneratedWorkflow)
+def generate_draft(data: GenerationRequest, request: Request) -> GeneratedWorkflow:
+    urls = {normalize_repository(url.rstrip(".,;:!?")) for url in re.findall(
+        r"""https://github\.com/[^\s<>()\[\]{}"'\x60]+""", data.description,
+    )}
+    if len(urls) > 1:
+        raise ApiError(422, "MULTIPLE_REPOSITORIES", "Укажите один учебный репозиторий для сценария.")
+    repository_url = next(iter(urls), None)
+    if repository_url is not None and not is_repository_allowed(repository_url, request.app.state.allowed_repositories):
+        raise ApiError(422, "REPOSITORY_NOT_ALLOWED", "Репозиторий отсутствует в списке учебных источников.")
+    try:
+        return generate_workflow(data, request.app.state.settings, repository_url)
+    except ModelError as error:
+        raise ApiError(502, "MODEL_ERROR", str(error)) from None
+    except GenerationError as error:
+        raise ApiError(422, "GENERATION_FAILED", str(error)) from None
 
 
 @router.get("/projects/{project_id}/workflows", response_model=Page[WorkflowRead])
@@ -111,9 +133,17 @@ def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database) -> Sched
     workflow = get_workflow(workflow_id, db, lock=True)
     schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id).with_for_update())
     if not data.enabled:
+        if data.timezone is not None:
+            spec = _spec(data)
+            if schedule is None:
+                schedule = Schedule(workflow_id=workflow_id)
+                db.add(schedule)
+            apply_spec(schedule, spec)
         if schedule is not None:
             schedule.enabled = False
             schedule.next_run_at = None
+            if data.timezone is not None:
+                schedule.last_error = None
             db.commit()
         return schedule_read(schedule)
 

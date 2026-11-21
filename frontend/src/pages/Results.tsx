@@ -114,6 +114,13 @@ export function Results() {
         </div>
       )}
 
+      {(report?.llm?.text || report?.llm?.error) && (
+        <section className="panel">
+          <h3>AI-рекомендации</h3>
+          <p style={{ whiteSpace: 'pre-line' }}>{report.llm.text ?? report.llm.error?.message}</p>
+        </section>
+      )}
+
       {checks.length > 0 && (
         <div className="panel">
           <h3>Диагностика проверок</h3>

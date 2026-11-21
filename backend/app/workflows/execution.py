@@ -9,6 +9,7 @@ from typing import Literal
 import regex
 from pydantic import ValidationError
 
+from ..ai_reports import ReportError, explain_report
 from ..analyzers.models import Category, Finding, ScanError, Warning, finding_key
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
@@ -171,6 +172,16 @@ class GraphExecution:
             return Step(ports=("bundle",), preview={**gate.model_dump(), **_bundle_preview(bundle)}, bundle=bundle, ci_verdict=gate)
         if node.type in NOTIFIER_CONFIGS:
             return self._notify(node, edges)
+        if node.type == "ai_report":
+            bundle = self.steps[edges[0].source].bundle
+            assert bundle is not None
+            try:
+                text = explain_report(bundle, self.settings)
+            except ReportError as error:
+                # Keep the scanner report available to downstream notifications.
+                return Step("failed", ports=("report",), bundle=bundle,
+                            warning=Warning("AI_REPORT_UNAVAILABLE", str(error)))
+            return Step(ports=("report",), bundle=bundle, preview={"text": text, "model": self.settings.llm_model})
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
 
     def _notify(self, node: Node, edges: list[Edge]) -> Step:
@@ -185,6 +196,10 @@ class GraphExecution:
         )
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
+        upstream = self.steps[edges[0].source]
+        if edges[0].source_port == "report":
+            explanation = (upstream.preview or {}).get("text") or "AI-рекомендации недоступны."
+            message = replace(message, text=message.text + "\n\n" + explanation)
         channel = node.type.removeprefix("notify_")
         draft = NotificationDraft(channel, tuple(config.recipients), allowed_recipients(self.settings, channel), message)
         return Step(
@@ -285,7 +300,7 @@ class GraphExecution:
         for node in graph.nodes:
             step = self.steps[node.id]
             if node.type == "ai_report":
-                payload["llm"] = {"status": step.status, "error": error_payload(step.warning)}
+                payload["llm"] = {"status": step.status, "error": error_payload(step.warning), **(step.preview or {})}
             elif node.type == "ci_gate" and step.ci_verdict is not None:
                 payload["ci_gate"] = step.ci_verdict.model_dump()
             elif node.type in NOTIFIER_CONFIGS:

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, CircleAlert } from 'lucide-react';
 import { useEditorStore } from './store';
-import { browserTimeZone, scheduleSettings, type ScheduleDraft } from './defaults';
+import { browserTimeZone, hasScheduleFields, scheduleSettings, type ScheduleDraft } from './defaults';
 import { previewSchedule, type Frequency } from '../../shared/api/workflows';
 import { errorMessage } from '../../shared/api/client';
 
@@ -30,6 +30,7 @@ function allTimeZones(): string[] {
 }
 
 function describe(s: ScheduleDraft): string {
+  if (!hasScheduleFields(s)) return 'Заполните настройки расписания';
   if (s.frequency === 'daily') return `Каждый день в ${s.time}`;
   if (s.frequency === 'weekly') {
     const days = [...s.weekdays].sort();
@@ -78,12 +79,16 @@ export function ScheduleSettings() {
   }, [schedule.timezone]);
 
   // Live preview: the backend computes the next slots with the same code the scheduler uses.
-  const settingsKey = JSON.stringify(scheduleSettings(schedule));
+  const settingsKey = hasScheduleFields(schedule) ? JSON.stringify(scheduleSettings(schedule)) : null;
   useEffect(() => {
+    setRuns([]);
+    setError(null);
+    if (settingsKey === null) return;
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
         const result = await previewSchedule(JSON.parse(settingsKey), controller.signal);
+        if (controller.signal.aborted) return;
         setRuns(result.next_runs);
         setError(null);
       } catch (e) {
@@ -128,6 +133,7 @@ export function ScheduleSettings() {
         <label>
           День месяца
           <select value={schedule.day_of_month} onChange={e => setSchedule({ day_of_month: Number(e.target.value) })}>
+            {schedule.day_of_month === 0 && <option value={0} disabled>Выберите день</option>}
             {Array.from({ length: 31 }, (_, i) => i + 1).map(d => <option key={d} value={d}>{d}</option>)}
           </select>
         </label>

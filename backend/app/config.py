@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)
     ci_workflow_tokens: dict[UUID, SecretStr] = Field(default_factory=dict)
     credentials_encryption_key: SecretStr | None = None
+    llm_provider: Literal["ollama", "openai_compatible"] = "ollama"
+    llm_base_url: str = "http://127.0.0.1:11434"
+    llm_model: str = "qwen3.5:4b"
+    llm_api_key: SecretStr | None = None
+    llm_timeout_seconds: float = Field(default=90, gt=0, le=120)
 
     # Notifications. Secrets stay on the server and never enter workflow graphs.
     app_base_url: str = "http://localhost:5173"

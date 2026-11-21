@@ -437,6 +437,13 @@ def test_schedule_and_catalog_for_frontend(api):
     workflow = create_workflow(client, project, analysis_graph("schedule_trigger"))
     prefix = f"/api/workflows/{workflow}"
     assert not client.get(f"{prefix}/schedule").json()["enabled"]
+    draft_schedule = client.put(f"{prefix}/schedule", json={
+        "enabled": False, "time": "14:00", "timezone": "Europe/Moscow",
+    })
+    assert draft_schedule.status_code == 200, draft_schedule.text
+    saved_schedule = client.get(f"{prefix}/schedule").json()
+    assert saved_schedule["time"] == "14:00" and saved_schedule["next_run_at"] is None
+    assert saved_schedule["enabled"] is False
     # A scheduled workflow can also be started by hand ("run now").
     assert client.post(f"{prefix}/runs").status_code == 202
     first = client.put(f"{prefix}/schedule", json={"enabled": True, "time": "09:00", "timezone": "Europe/Moscow"})

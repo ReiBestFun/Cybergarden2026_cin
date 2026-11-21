@@ -44,6 +44,7 @@ type RecipientDelivery = {
 };
 type NodeDelivery = { channel?: string; status: string; error?: RunError | null; recipients?: RecipientDelivery[] };
 export type RunReport = {
+  llm?: { text?: string; error?: RunError | null } | null;
   status: RunStatus; summary: RunSummary;
   coverage: { status?: string; checks?: Record<string, ScanCheck> }; error: RunError | null;
   delivery?: Record<string, NodeDelivery> | null;
@@ -52,6 +53,13 @@ export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
 // Weekdays: 0 = Monday … 6 = Sunday.
 export type ScheduleSettings = {
   frequency: Frequency; time?: string; weekdays?: number[]; day_of_month?: number; cron?: string; timezone: string;
+};
+export type GeneratedWorkflow = {
+  name: string;
+  graph: ApiGraph;
+  schedule: Omit<Schedule, 'enabled' | 'next_run_at' | 'upcoming' | 'last_enqueued_at' | 'last_error'> | null;
+  repository_url: string | null;
+  issues: RunError[];
 };
 export type Schedule = {
   enabled: boolean; frequency: Frequency; time: string | null; weekdays: number[] | null; day_of_month: number | null;
@@ -81,6 +89,8 @@ export async function ensureProject(repositoryUrl: string, knownId?: string | nu
 }
 
 export const listWorkflows = (projectId: string) => api<Page<Workflow>>(`/api/projects/${projectId}/workflows?limit=200`);
+export const generateWorkflow = (description: string, timezone: string, signal: AbortSignal) =>
+  api<GeneratedWorkflow>('/api/workflows/generate', { method: 'POST', json: { description, timezone }, signal });
 export const getWorkflow = (id: string) => api<Workflow>(`/api/workflows/${id}`);
 export const createWorkflow = (projectId: string, name: string, graph: ApiGraph) =>
   api<Workflow>(`/api/projects/${projectId}/workflows`, { method: 'POST', json: { name, graph } });
@@ -94,7 +104,7 @@ export const issueCiToken = (id: string) => api<{ token: string }>(`/api/workflo
 export const startCiTest = (id: string, commitSha: string) =>
   api<{ id: string }>(`/api/workflows/${id}/ci-test`, { method: 'POST', json: { commit_sha: commitSha } });
 export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
-export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: true } & ScheduleSettings)) =>
+export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: boolean } & ScheduleSettings)) =>
   api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });
 export const previewSchedule = (settings: ScheduleSettings, signal?: AbortSignal) =>
   api<{ next_runs: string[] }>('/api/schedules/preview', { method: 'POST', json: settings, signal });

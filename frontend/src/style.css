@@ -459,91 +459,6 @@ button:disabled {
 }
 
 /* ============================================================
-   ЧАТ-ВИДЖЕТ
-   ============================================================ */
-
-.chat-widget {
-  position: absolute;
-  right: 284px;
-  bottom: 20px;
-  width: 325px;
-  background: white;
-  border: 1px solid #e2d5c8;
-  border-radius: 15px;
-  box-shadow: 0 12px 45px #71543d24;
-  overflow: hidden;
-  z-index: 10;
-}
-
-.chat-widget:not(.open) {
-  width: auto;
-}
-
-.chat-toggle {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 14px 16px;
-  border: 0;
-  background: #f4e5d7;
-  color: #76533d;
-  font-weight: 650;
-  font-size: 13px;
-}
-
-.chat-toggle svg:last-child {
-  margin-left: auto;
-}
-
-.chat-messages {
-  height: 230px;
-  overflow: auto;
-  padding: 15px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.chat-message {
-  max-width: 90%;
-  padding: 11px 12px;
-  border-radius: 12px;
-  background: #f8efe7;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.chat-message.user {
-  align-self: flex-end;
-  background: #f0dfcf;
-}
-
-.chat-input {
-  display: flex;
-  gap: 6px;
-  border-top: 1px solid #eaded2;
-  padding: 10px;
-}
-
-.chat-input input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  font-size: 12px;
-}
-
-.chat-input button {
-  background: #a96f47;
-  border: 0;
-  color: white;
-  border-radius: 8px;
-  padding: 9px;
-  display: flex;
-}
-
-/* ============================================================
    ТАБЛИЦЫ / КОД
    ============================================================ */
 
@@ -582,10 +497,6 @@ code {
     grid-template-columns: 175px minmax(0, 1fr) 220px;
   }
 
-  .chat-widget {
-    right: 235px;
-  }
-
   .toolbar-actions .btn {
     padding: 9px;
   }
@@ -616,11 +527,6 @@ code {
 
   .settings-panel {
     display: none;
-  }
-
-  .chat-widget {
-    right: 15px;
-    width: min(310px, 75vw);
   }
 
   .editor-toolbar {
@@ -690,49 +596,6 @@ code {
   padding: 20px;
 }
 
-/* ---------- Чат-виджет в правой панели ---------- */
-
-.chat-widget {
-  position: static;
-  right: auto;
-  bottom: auto;
-  width: auto;
-  flex: 0 0 44%;
-  min-height: 270px;
-  max-height: 52%;
-  display: flex;
-  flex-direction: column;
-  margin: 0 12px 12px;
-  border-radius: 14px;
-  box-shadow: 0 5px 22px #71543d14;
-}
-
-.chat-widget:not(.open) {
-  flex: 0 0 auto;
-  width: auto;
-  min-height: 0;
-}
-
-.chat-toggle {
-  flex: 0 0 auto;
-  background: #f3e5d8;
-  color: #815538;
-}
-
-.chat-messages {
-  flex: 1;
-  min-height: 100px;
-  height: auto;
-  overflow: auto;
-}
-
-.chat-input {
-  flex: 0 0 auto;
-}
-
-.chat-input input {
-  background: transparent;
-}
 
 /* ---------- Кнопки и ноды ---------- */
 
@@ -817,68 +680,8 @@ code {
     display: block;
   }
 
-  .chat-widget {
-    margin: 0 8px 8px;
-    max-height: 45%;
-  }
 }
 
-/* Компактный плавающий AI-чат */
-.chat-widget {
-  position: fixed !important;
-  right: 24px;
-  bottom: 24px;
-  top: auto !important;
-
-  width: 340px;
-  height: 52px;
-  max-height: none;
-
-  display: flex;
-  flex-direction: column;
-
-  background: #fffdfb;
-  border: 1px solid #e7ddd3;
-  border-radius: 14px;
-  box-shadow: 0 8px 28px rgba(57, 58, 64, 0.12);
-
-  overflow: hidden;
-  z-index: 100;
-}
-
-.chat-widget.open {
-  height: min(440px, calc(100vh - 100px));
-}
-
-.chat-header {
-  flex-shrink: 0;
-  min-height: 52px;
-  padding: 10px 14px;
-  cursor: pointer;
-}
-
-.chat-messages {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.chat-input {
-  flex-shrink: 0;
-}
-
-.chat-widget:not(.open) .chat-messages,
-.chat-widget:not(.open) .chat-input {
-  display: none;
-}
-
-.chat-toggle {
-  margin-left: auto;
-  border: none;
-  background: transparent;
-  color: #a96f47;
-  cursor: pointer;
-}
 /* ---------- Связка с API: статусы, уведомления, результаты ---------- */
 
 .node-status.succeeded { color: #55a181; }
@@ -931,6 +734,40 @@ code {
 .template-panel label { display: grid; gap: 4px; margin: 8px 0; }
 .template-panel input, .template-panel textarea, .template-panel select { width: 100%; }
 .editor-page > .notice { margin: 0 20px 10px; }
+
+.workflow-generator {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 100;
+  max-width: calc(100vw - 48px);
+}
+.workflow-generator.open {
+  width: 350px;
+  background: #fffdfb;
+  border: 1px solid #e7ddd3;
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(57, 58, 64, 0.12);
+}
+.workflow-generator.open .generator-toggle {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid #e7ddd3;
+}
+.generator-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px 14px;
+}
+.generator-form textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 8px;
+  font: inherit;
+  border: 1px solid #d6c9bf;
+  border-radius: 8px;
+}
+.generator-form p { margin: 0; }
 
 .tag.warn { background: #fef3c7; color: #92400e; }
 .tag.run-succeeded { background: #e7f4ef; color: #2f6b55; }

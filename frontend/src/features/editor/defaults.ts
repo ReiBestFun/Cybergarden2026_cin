@@ -12,8 +12,8 @@ const node = (id: string, kind: string, label: string, x: number, y: number): Fl
 const edge = (id: string, source: string, sourceHandle: string, target: string, targetHandle: string): Edge =>
   ({ id, source, sourceHandle, target, targetHandle, style: { stroke: '#a7a0b8', strokeWidth: 2 } });
 
-// A runnable graph that matches the backend contract.
-export const initialNodes: FlowNode[] = [
+// The analysis chain is used by the explicit CI/CD preset.
+const analysisNodes: FlowNode[] = [
   node('trigger', 'manual_trigger', 'Ручной запуск', 40, 200),
   node('repo', 'repository', 'Репозиторий', 320, 200),
   node('secrets', 'scan_secrets', 'Secrets', 620, 60),
@@ -22,7 +22,7 @@ export const initialNodes: FlowNode[] = [
   node('merge', 'merge_findings', 'Объединение находок', 920, 200),
 ];
 
-export const initialEdges: Edge[] = [
+const analysisEdges: Edge[] = [
   edge('e-trigger-repo', 'trigger', 'params', 'repo', 'params'),
   edge('e-repo-secrets', 'repo', 'snapshot', 'secrets', 'snapshot'),
   edge('e-repo-sca', 'repo', 'snapshot', 'sca', 'snapshot'),
@@ -37,10 +37,10 @@ export const ciPreset = {
   project: DEFAULT_REPOSITORY,
   nodes: [
     { ...node('trigger', 'ci_trigger', 'GitHub Actions', 40, 200), data: { kind: 'ci_trigger', label: 'GitHub Actions', config: { branch: 'main' } } },
-    ...initialNodes.slice(1),
+    ...analysisNodes.slice(1),
     node('gate', 'ci_gate', 'Порог CI', 1210, 200),
   ],
-  edges: [...initialEdges, edge('e-merge-gate', 'merge', 'bundle', 'gate', 'bundle')],
+  edges: [...analysisEdges, edge('e-merge-gate', 'merge', 'bundle', 'gate', 'bundle')],
 };
 
 export type Draft = {
@@ -74,6 +74,14 @@ export function scheduleSettings(draft: ScheduleDraft): ScheduleSettings {
   return { ...base, time: draft.time };
 }
 
+export function hasScheduleFields(draft: ScheduleDraft): boolean {
+  if (draft.frequency === 'cron') return !!draft.cron.trim();
+  if (!draft.time) return false;
+  if (draft.frequency === 'weekly') return draft.weekdays.length > 0;
+  if (draft.frequency === 'monthly') return draft.day_of_month > 0;
+  return true;
+}
+
 export function scheduleFromServer(s: Schedule, fallback: ScheduleDraft): ScheduleDraft {
   return {
     enabled: s.enabled,
@@ -96,7 +104,7 @@ export function getSaved(): Draft {
       }
     }
   } catch { /* corrupted draft */ }
-  return { nodes: initialNodes, edges: initialEdges, project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null };
+  return { nodes: [], edges: [], project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null };
 }
 
 export function saveDraft(draft: Draft) {

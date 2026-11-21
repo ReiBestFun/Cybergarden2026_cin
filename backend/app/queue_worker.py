@@ -5,6 +5,7 @@ import logging
 import signal
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
+from time import monotonic
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,7 +16,7 @@ from .db.session import make_engine
 from .integrations.repository import allowed_repository_urls
 from .workflows.execution import GraphExecution
 from .workflows.persistence import ClaimLost, RunProgress
-from .workflows.queue import claim_next, expire_stale_runs
+from .workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,14 @@ def _heartbeat(progress: RunProgress, stop: Event, interval: float) -> None:
                 return
         except SQLAlchemyError:
             log.warning("Could not renew claim for run %s", progress.claim.id)
+
+
+def tick_schedules(sessions: sessionmaker[Session]) -> int:
+    with sessions.begin() as db:
+        created = enqueue_due_schedules(db, datetime.now(UTC))
+    if created:
+        log.info("Enqueued %d scheduled runs", created)
+    return created
 
 
 def run_next(
@@ -77,8 +86,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 
+    next_tick = 0.0
     try:
         while not stop.is_set():
+            if monotonic() >= next_tick:
+                try:
+                    tick_schedules(sessions)
+                except SQLAlchemyError:
+                    log.error("Could not enqueue scheduled runs")
+                next_tick = monotonic() + settings.scheduler_poll_seconds
             try:
                 processed = run_next(sessions, settings, allowed)
             except SQLAlchemyError:

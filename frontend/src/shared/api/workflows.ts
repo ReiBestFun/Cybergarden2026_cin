@@ -35,7 +35,16 @@ export type Finding = {
   path: string; line: number | null; end_line: number | null; evidence: string; metadata: Record<string, string>;
 };
 export type RunReport = { status: RunStatus; summary: RunSummary; coverage: Record<string, JsonValue>; error: RunError | null };
-export type Schedule = { enabled: boolean; time: string | null; timezone: string | null; next_run_at: string | null };
+export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
+// Weekdays: 0 = Monday … 6 = Sunday.
+export type ScheduleSettings = {
+  frequency: Frequency; time?: string; weekdays?: number[]; day_of_month?: number; cron?: string; timezone: string;
+};
+export type Schedule = {
+  enabled: boolean; frequency: Frequency; time: string | null; weekdays: number[] | null; day_of_month: number | null;
+  cron: string | null; timezone: string | null; next_run_at: string | null; upcoming: string[];
+  last_enqueued_at: string | null; last_error: RunError | null;
+};
 
 export const isFinished = (status: RunStatus) => status !== 'queued' && status !== 'running';
 
@@ -66,8 +75,11 @@ export const updateWorkflow = (id: string, name: string, graph: ApiGraph) =>
   api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph } });
 export const validateWorkflow = (id: string) =>
   api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {} });
-export const setSchedule = (id: string, body: { enabled: boolean; time?: string; timezone?: string }) =>
+export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
+export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: true } & ScheduleSettings)) =>
   api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });
+export const previewSchedule = (settings: ScheduleSettings, signal?: AbortSignal) =>
+  api<{ next_runs: string[] }>('/api/schedules/preview', { method: 'POST', json: settings, signal });
 
 export const startRun = (workflowId: string) => api<{ id: string; status: 'queued' }>(`/api/workflows/${workflowId}/runs`, { method: 'POST', json: {} });
 export const getRun = (id: string) => api<RunDetail>(`/api/runs/${id}`);

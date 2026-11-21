@@ -13,14 +13,14 @@ from sqlalchemy import select
 
 from backend.app.analyzers.models import ScanError, Snapshot, Warning
 from backend.app.config import Settings
-from backend.app.db.models import FindingRow, NodeRun, ScanRun
+from backend.app.db.models import FindingRow, NodeRun, ScanRun, Schedule, Workflow
 from backend.app.integrations.repository import RepositorySnapshot, allowed_repository_urls, prepare_repository
 from backend.app.main import create_app
 from backend.app.queue_worker import run_next
 from backend.app.schemas.contracts import Graph
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
-from backend.app.workflows.queue import claim_next, expire_stale_runs
+from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 from backend.app.workflows.scheduling import next_daily_slot
 from backend.app.workflows.validation import validate_graph
 
@@ -138,11 +138,13 @@ def test_schedule_and_catalog_for_frontend(api):
     workflow = create_workflow(client, project, analysis_graph("schedule_trigger"))
     prefix = f"/api/workflows/{workflow}"
     assert not client.get(f"{prefix}/schedule").json()["enabled"]
-    assert client.post(f"{prefix}/runs").json()["error"]["code"] == "WRONG_TRIGGER"
+    # A scheduled workflow can also be started by hand ("run now").
+    assert client.post(f"{prefix}/runs").status_code == 202
     first = client.put(f"{prefix}/schedule", json={"enabled": True, "time": "09:00", "timezone": "Europe/Moscow"})
     assert first.status_code == 200, first.text
     settings = first.json()
-    assert settings["time"] == "09:00" and settings["next_run_at"]
+    assert settings["time"] == "09:00" and settings["frequency"] == "daily" and settings["next_run_at"]
+    assert len(settings["upcoming"]) == 3
     assert client.get(f"{prefix}/schedule").json() == settings
     assert client.put(f"{prefix}/schedule", json={"enabled": False}).json()["next_run_at"] is None
     client.put(f"{prefix}/schedule", json={"enabled": True, "time": "09:00", "timezone": "Europe/Moscow"}).raise_for_status()
@@ -289,3 +291,57 @@ def test_repository_loader_rejects_sources_outside_allowlist():
     ):
         pytest.fail("An unapproved source must be rejected before Git runs")
     assert rejected.value.warning.code == "REPOSITORY_NOT_ALLOWED"
+
+
+def test_schedule_frequencies_and_preview(api):
+    client, _ = api
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph("schedule_trigger"))
+    prefix = f"/api/workflows/{workflow}"
+    weekly = client.put(f"{prefix}/schedule", json={
+        "enabled": True, "frequency": "weekly", "time": "18:00", "weekdays": [4], "timezone": "Europe/Moscow",
+    }).json()
+    assert weekly["weekdays"] == [4] and weekly["day_of_month"] is None
+    assert all(datetime.fromisoformat(slot).astimezone(ZoneInfo("Europe/Moscow")).weekday() == 4 for slot in weekly["upcoming"])
+    cron = client.put(f"{prefix}/schedule", json={
+        "enabled": True, "frequency": "cron", "cron": "0 9 * * 1-5", "timezone": "UTC",
+    }).json()
+    assert cron["cron"] == "0 9 * * 1-5" and cron["time"] is None and cron["weekdays"] is None
+    bad = client.put(f"{prefix}/schedule", json={"enabled": True, "frequency": "weekly", "time": "09:00", "timezone": "UTC"})
+    assert bad.status_code == 422 and bad.json()["error"]["field"] == "weekdays"
+    preview = client.post("/api/schedules/preview", json={"frequency": "monthly", "time": "03:00", "day_of_month": 1, "timezone": "UTC"})
+    assert preview.status_code == 200 and len(preview.json()["next_runs"]) == 5
+    assert client.post("/api/schedules/preview", json={"frequency": "cron", "cron": "x", "timezone": "UTC"}).json()["error"]["code"] == "INVALID_CRON"
+
+
+def test_worker_enqueues_due_schedule_once(api):
+    client, sessions = api
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph("schedule_trigger"))
+    client.put(f"/api/workflows/{workflow}/schedule", json={
+        "enabled": True, "time": "09:00", "timezone": "UTC",
+    }).raise_for_status()
+    with sessions.begin() as db:
+        schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == UUID(workflow)))
+        slot = schedule.next_run_at
+    later = slot + timedelta(days=3, minutes=1)  # the worker was down for several slots
+    # The test database is shared, so count only this workflow's runs.
+    for _ in range(2):
+        with sessions.begin() as db:
+            enqueue_due_schedules(db, later)
+    with sessions.begin() as db:
+        schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == UUID(workflow)))
+        assert schedule.next_run_at > later and schedule.last_enqueued_at == later
+        runs = db.scalars(select(ScanRun).where(ScanRun.workflow_id == UUID(workflow))).all()
+        assert [(run.trigger, run.scheduled_for, run.status) for run in runs] == [("schedule", slot, "queued")]
+
+    # A broken graph is reported on the schedule instead of creating a failing run.
+    with sessions.begin() as db:
+        schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == UUID(workflow)))
+        schedule.next_run_at = later
+        db.get(Workflow, UUID(workflow)).graph_json = analysis_graph("manual_trigger")
+    with sessions.begin() as db:
+        enqueue_due_schedules(db, later + timedelta(minutes=1))
+        assert len(db.scalars(select(ScanRun).where(ScanRun.workflow_id == UUID(workflow))).all()) == 1
+        schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == UUID(workflow)))
+        assert schedule.last_error["code"] == "WRONG_TRIGGER"

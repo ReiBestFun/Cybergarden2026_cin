@@ -17,10 +17,11 @@ export function Editor() {
   useEffect(() => {
     const id = params.get('workflow');
     if (id) {
-      if (id !== workflowId) void loadWorkflow(id);
+      // Always re-read: the server copy (graph, schedule state) may have changed since the draft was saved.
+      void loadWorkflow(id);
       setParams({}, { replace: true });
     }
-  }, [params, workflowId, loadWorkflow, setParams]);
+  }, [params, loadWorkflow, setParams]);
 
   const [chatOpen, setChatOpen] = useState(false);
   const [message, setMessage] = useState('');

@@ -423,7 +423,8 @@ button:disabled {
   margin: 17px 0;
 }
 
-.settings-panel input {
+.settings-panel input,
+.settings-panel select {
   display: block;
   width: 100%;
   margin-top: 9px;
@@ -930,3 +931,30 @@ tr.clickable:hover td { background: #faf6f1; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ---------- Настройки расписания ---------- */
+
+.schedule-settings .field { margin: 17px 0; font-size: 12px; font-weight: 600; }
+.schedule-settings .field > label { margin: 0; }
+.schedule-settings .field > small { display: block; margin-top: 6px; font-weight: 400; }
+.schedule-settings input.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .02em; }
+.weekday-picker { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 7px; }
+.weekday-picker button {
+  padding: 7px 0; border: 1px solid #e3d9cf; border-radius: 8px; background: #fff;
+  font-size: 12px; font-weight: 600; color: #7d7169; cursor: pointer;
+}
+.weekday-picker button.active { background: #b5764c; border-color: #b5764c; color: #fff; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chips button {
+  padding: 4px 9px; border: 1px solid #e3d9cf; border-radius: 999px; background: #faf6f1;
+  font-size: 11px; color: #6b5f57; cursor: pointer;
+}
+.chips button:hover, .weekday-picker button:hover { border-color: #b5764c; }
+.schedule-preview {
+  display: grid; gap: 5px; margin: 14px 0 10px; padding: 11px 12px;
+  border-radius: 10px; background: #f0f7f3; color: #2f6b55; font-size: 12px;
+}
+.schedule-preview strong { display: flex; align-items: center; gap: 6px; }
+.schedule-preview.invalid { background: #fde8e3; color: #8a2f1c; }
+.error-text { display: flex; align-items: center; gap: 5px; color: #a3412c; }
+.schedule-server { display: grid; gap: 4px; font-size: 11px; }

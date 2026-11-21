@@ -2,9 +2,13 @@ import { Trash2 } from 'lucide-react';
 import { useEditorStore } from './store';
 import { useNodeTypesStore } from './nodeTypesStore';
 import { SchemaForm } from './SchemaForm';
+import { ScheduleSettings } from './ScheduleSettings';
+
+// Nodes whose settings are edited by a dedicated panel instead of the schema form.
+const CUSTOM_SETTINGS = new Set(['schedule_trigger']);
 
 export function SettingsPanel() {
-  const { nodes, selected, project, setProject, name, setName, schedule, setSchedule, updateConfig, renameSelected, removeSelected, run } = useEditorStore();
+  const { nodes, selected, project, setProject, name, setName, updateConfig, renameSelected, removeSelected, run } = useEditorStore();
   const selectedNode = nodes.find(n => n.id === selected);
   const definition = useNodeTypesStore(s => s.types.find(t => t.kind === selectedNode?.data.kind));
   const nodeRun = run?.nodes.find(n => n.node_id === selected);
@@ -31,23 +35,11 @@ export function SettingsPanel() {
             <input readOnly value={selectedNode.data.kind} />
           </label>
 
-          {definition && (
+          {definition && (Object.keys(definition.params_schema.properties ?? {}).length > 0 || !CUSTOM_SETTINGS.has(selectedNode.data.kind)) && (
             <SchemaForm schema={definition.params_schema} values={selectedNode.data.config ?? {}} onChange={updateConfig} />
           )}
 
-          {selectedNode.data.kind === 'schedule_trigger' && (
-            <>
-              <label>
-                Время ежедневного запуска
-                <input type="time" value={schedule.time} onChange={(e) => setSchedule({ ...schedule, time: e.target.value })} />
-              </label>
-              <label className="checkbox">
-                <input type="checkbox" checked={schedule.enabled} onChange={(e) => setSchedule({ ...schedule, enabled: e.target.checked })} />
-                Расписание включено
-              </label>
-              <p className="muted">Часовой пояс: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Применяется при сохранении.</p>
-            </>
-          )}
+          {selectedNode.data.kind === 'schedule_trigger' && <ScheduleSettings />}
 
           {nodeRun && (
             <div className="node-run">

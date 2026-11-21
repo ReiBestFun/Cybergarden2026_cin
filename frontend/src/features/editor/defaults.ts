@@ -1,5 +1,6 @@
 import type { Edge } from '@xyflow/react';
 import type { FlowNode } from './types';
+import type { Frequency, Schedule, ScheduleSettings } from '../../shared/api/workflows';
 
 export const DEFAULT_REPOSITORY = 'https://github.com/TBagirov/training';
 export const DEFAULT_NAME = 'Security check workflow';
@@ -37,8 +38,41 @@ export type Draft = {
   name: string;
   projectId: string | null;
   workflowId: string | null;
-  schedule?: { time: string; enabled: boolean };
+  schedule?: Partial<ScheduleDraft>;
 };
+
+// Local, editable schedule settings; all fields are kept so switching frequency loses nothing.
+export type ScheduleDraft = {
+  enabled: boolean; frequency: Frequency; time: string; weekdays: number[]; day_of_month: number; cron: string; timezone: string;
+};
+
+export const browserTimeZone = () => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+};
+
+export const defaultSchedule = (): ScheduleDraft => ({
+  enabled: true, frequency: 'daily', time: '09:00', weekdays: [0], day_of_month: 1, cron: '0 9 * * 1-5', timezone: browserTimeZone(),
+});
+
+export function scheduleSettings(draft: ScheduleDraft): ScheduleSettings {
+  const base = { frequency: draft.frequency, timezone: draft.timezone };
+  if (draft.frequency === 'cron') return { ...base, cron: draft.cron };
+  if (draft.frequency === 'weekly') return { ...base, time: draft.time, weekdays: draft.weekdays };
+  if (draft.frequency === 'monthly') return { ...base, time: draft.time, day_of_month: draft.day_of_month };
+  return { ...base, time: draft.time };
+}
+
+export function scheduleFromServer(s: Schedule, fallback: ScheduleDraft): ScheduleDraft {
+  return {
+    enabled: s.enabled,
+    frequency: s.frequency ?? 'daily',
+    time: s.time ?? fallback.time,
+    weekdays: s.weekdays?.length ? s.weekdays : fallback.weekdays,
+    day_of_month: s.day_of_month ?? fallback.day_of_month,
+    cron: s.cron ?? fallback.cron,
+    timezone: s.timezone ?? fallback.timezone,
+  };
+}
 
 export function getSaved(): Draft {
   try {

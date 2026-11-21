@@ -163,7 +163,8 @@ class GraphExecution:
         except ValidationError:
             self.progress.fail(Warning("INVALID_GRAPH", "Снимок графа имеет неверный формат."))
             return
-        if issues := validate_graph(graph, expected_trigger=f"{self.progress.claim.trigger}_trigger"):
+        expected = "schedule_trigger" if self.progress.claim.trigger == "schedule" else None
+        if issues := validate_graph(graph, expected_trigger=expected):
             self.progress.fail(Warning("INVALID_GRAPH", issues[0].message))
             return
 

@@ -38,12 +38,19 @@ class Workflow(Base):
 
 class Schedule(Base):
     __tablename__ = "schedules"
-    __table_args__ = (Index("ix_schedules_due", "next_run_at", postgresql_where=text("enabled")),)
+    __table_args__ = (
+        Index("ix_schedules_due", "next_run_at", postgresql_where=text("enabled")),
+        CheckConstraint("frequency IN ('daily', 'weekly', 'monthly', 'cron')", name="ck_schedule_frequency"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     workflow_id: Mapped[UUID] = mapped_column(ForeignKey("workflows.id"), unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
-    time: Mapped[local_time] = mapped_column(Time)
+    frequency: Mapped[str] = mapped_column(String(16), server_default=text("'daily'"))
+    time: Mapped[local_time | None] = mapped_column(Time)
+    weekdays: Mapped[list[int] | None] = mapped_column(JSONB(none_as_null=True))
+    day_of_month: Mapped[int | None] = mapped_column(Integer)
+    cron: Mapped[str | None] = mapped_column(String(120))
     timezone: Mapped[str | None] = mapped_column(String(128))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

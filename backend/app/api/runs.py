@@ -49,7 +49,8 @@ def _findings(run_id: UUID) -> Select[tuple[FindingRow]]:
 def create_run(workflow_id: UUID, db: Database, data: RunCreate | None = None) -> ScanRun:
     workflow = get_workflow(workflow_id, db, lock=True)
     graph = Graph.model_validate(workflow.graph_json)
-    if issues := validate_graph(graph, expected_trigger="manual_trigger"):
+    # "Run now" works for any trigger: a scheduled workflow can also be started by hand.
+    if issues := validate_graph(graph):
         raise graph_error(issues[0])
     project = get_project(workflow.project_id, db)
     ref = data.ref if data and data.ref is not None else project.default_ref

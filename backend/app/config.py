@@ -14,4 +14,5 @@ class Settings(BaseSettings):
     repository_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     scan_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     worker_poll_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
+    scheduler_poll_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)

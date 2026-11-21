@@ -106,17 +106,37 @@ class WorkflowRead(ReadModel):
     updated_at: datetime
 
 
-class ScheduleUpdate(Input):
-    enabled: bool
+Frequency = Literal["daily", "weekly", "monthly", "cron"]
+Weekday = Annotated[int, Field(ge=0, le=6)]  # 0 = Monday … 6 = Sunday
+
+
+class ScheduleSettings(Input):
+    frequency: Frequency = "daily"
     time: Annotated[str, StringConstraints(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = None
+    weekdays: Annotated[list[Weekday], Field(max_length=7)] | None = None
+    day_of_month: Annotated[int, Field(ge=1, le=31)] | None = None
+    cron: Annotated[str, StringConstraints(max_length=120)] | None = None
     timezone: Annotated[str, StringConstraints(min_length=1, max_length=128)] | None = None
+
+
+class ScheduleUpdate(ScheduleSettings):
+    enabled: bool
+
+
+class SchedulePreview(BaseModel):
+    next_runs: list[datetime]
 
 
 class ScheduleRead(BaseModel):
     enabled: bool = False
+    frequency: Frequency = "daily"
     time: str | None = None
+    weekdays: list[int] | None = None
+    day_of_month: int | None = None
+    cron: str | None = None
     timezone: str | None = None
     next_run_at: datetime | None = None
+    upcoming: list[datetime] = Field(default_factory=list)
     last_enqueued_at: datetime | None = None
     last_error: Error | None = None
 

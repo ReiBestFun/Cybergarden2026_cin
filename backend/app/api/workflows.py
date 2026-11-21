@@ -1,6 +1,5 @@
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter
 from sqlalchemy import select
@@ -9,10 +8,11 @@ from ..db.models import Schedule, Workflow
 from ..db.session import Database
 from ..nodes.catalog import CATALOG, CatalogRead
 from ..schemas.contracts import (
-    Graph, Page, ScheduleRead, ScheduleUpdate, ValidateWorkflow, ValidationResult,
+    Graph, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
     WorkflowCreate, WorkflowPatch, WorkflowRead,
 )
-from ..workflows.scheduling import next_daily_slot
+from ..workflows.scheduling import ScheduleSpecError, next_slot
+from ..workflows.schedules import apply_spec, preview, schedule_read, spec_from_settings
 from ..workflows.validation import validate_draft, validate_graph
 from .common import ApiError, PageQuery, graph_error, page
 from .projects import get_project
@@ -86,21 +86,24 @@ def validate_workflow(workflow_id: UUID, db: Database, data: ValidateWorkflow | 
     return ValidationResult(valid=not issues, issues=issues)
 
 
-def _schedule_read(schedule: Schedule | None) -> ScheduleRead:
-    if schedule is None:
-        return ScheduleRead()
-    return ScheduleRead(
-        enabled=schedule.enabled, time=schedule.time.isoformat(timespec="minutes") if schedule.time else None,
-        timezone=schedule.timezone, next_run_at=schedule.next_run_at,
-        last_enqueued_at=schedule.last_enqueued_at, last_error=schedule.last_error,
-    )
-
-
 @router.get("/workflows/{workflow_id}/schedule", response_model=ScheduleRead)
 def get_schedule(workflow_id: UUID, db: Database) -> ScheduleRead:
     get_workflow(workflow_id, db)
     schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id))
-    return _schedule_read(schedule)
+    return schedule_read(schedule)
+
+
+def _spec(data: ScheduleSettings):
+    try:
+        return spec_from_settings(data)
+    except ScheduleSpecError as error:
+        raise ApiError(422, error.code, error.message, field=error.field) from None
+
+
+@router.post("/schedules/preview", response_model=SchedulePreview)
+def preview_schedule(data: ScheduleSettings) -> SchedulePreview:
+    _spec(data)
+    return SchedulePreview(next_runs=preview(data))
 
 
 @router.put("/workflows/{workflow_id}/schedule", response_model=ScheduleRead)
@@ -112,26 +115,19 @@ def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database) -> Sched
             schedule.enabled = False
             schedule.next_run_at = None
             db.commit()
-        return _schedule_read(schedule)
+        return schedule_read(schedule)
 
-    if data.time is None or data.timezone is None:
-        raise ApiError(422, "SCHEDULE_SETTINGS_REQUIRED", "Для расписания нужны время и часовой пояс.")
-    try:
-        zone = ZoneInfo(data.timezone)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise ApiError(422, "INVALID_TIMEZONE", "Укажите часовой пояс IANA.", field="timezone") from None
+    spec = _spec(data)
     graph = Graph.model_validate(workflow.graph_json)
     if issues := validate_graph(graph, expected_trigger="schedule_trigger"):
         raise graph_error(issues[0])
-    local_time = time.fromisoformat(data.time)
     if schedule is None:
         schedule = Schedule(workflow_id=workflow_id)
         db.add(schedule)
-    if not schedule.enabled or schedule.time != local_time or schedule.timezone != data.timezone or schedule.next_run_at is None:
-        schedule.next_run_at = next_daily_slot(local_time, zone, datetime.now(UTC))
+    changed = apply_spec(schedule, spec)
+    if changed or not schedule.enabled or schedule.next_run_at is None:
+        schedule.next_run_at = next_slot(spec, datetime.now(UTC))
     schedule.enabled = True
-    schedule.time = local_time
-    schedule.timezone = data.timezone
     schedule.last_error = None
     db.commit()
-    return _schedule_read(schedule)
+    return schedule_read(schedule)

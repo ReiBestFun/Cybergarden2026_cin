@@ -1,16 +1,30 @@
 import json
+import smtplib
 import threading
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from email import message_from_bytes, policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 
-from backend.app.analyzers.models import Finding
+from backend.app.analyzers.models import Finding, Snapshot
+from backend.app.config import Settings
+from backend.app.db.models import NotificationDelivery, ScanRun
 from backend.app.devtools.mail_sink import SmtpSink
+from backend.app.integrations.repository import RepositorySnapshot, allowed_repository_urls
+from backend.app.notification_worker import process_next
 from backend.app.notifications import EmailChannel, NotifierError, TelegramChannel, build_message
+from backend.app.notifications.base import DeliveryError
+from backend.app.notifications.queue import claim_delivery, expire_deliveries, finish_delivery
+from backend.app.queue_worker import run_next
 from backend.app.reports import RunReport
 from backend.app.schemas.contracts import Graph
+from backend.app.workflows import execution
 from backend.app.workflows.validation import validate_draft, validate_graph
+from backend.tests.test_api import api, enqueue_for_worker
 
 TOKEN = "123456:TEST-token-value"
 
@@ -35,6 +49,8 @@ def test_message_has_summary_and_masked_json():
     findings = json.loads(attachment.content)["findings"]
     assert [item["class"] for item in findings] == ["password", "sql-injection"]
     assert build_message(report(), run_id="r", repository="x", app_base_url="", attach_json=False).attachments == ()
+    link_only = build_message(report(), run_id="r", repository="x", app_base_url="https://reports.example.org", max_attachment_bytes=1)
+    assert not link_only.attachments and "приложен" not in link_only.text and "https://reports.example.org/results?run=r" in link_only.text
 
 
 class _FakeTelegram(BaseHTTPRequestHandler):
@@ -48,8 +64,12 @@ class _FakeTelegram(BaseHTTPRequestHandler):
             status, payload = 401, {"ok": False, "description": "Unauthorized"}
         elif b"-100404" in body:
             status, payload = 400, {"ok": False, "description": "Bad Request: chat not found"}
+        elif method == "sendDocument" and b"-100429" in body and sum(
+            entry[1] == "sendDocument" and b"-100429" in entry[2] for entry in _FakeTelegram.calls
+        ) == 1:
+            status, payload = 429, {"ok": False, "parameters": {"retry_after": 42}}
         else:
-            status, payload = 200, {"ok": True, "result": {}}
+            status, payload = 200, {"ok": True, "result": {"message_id": len(_FakeTelegram.calls)}}
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -118,6 +138,27 @@ def test_email_requires_server_settings():
     assert error.value.code == "SMTP_NOT_CONFIGURED"
 
 
+@pytest.mark.parametrize(("failure", "outcome"), [
+    (smtplib.SMTPDataError(451, b"temporary"), "retry"),
+    (smtplib.SMTPDataError(554, b"permanent"), "failed"),
+    (smtplib.SMTPServerDisconnected("confirmation missing"), "unknown"),
+])
+def test_email_worker_distinguishes_data_rejection_from_missing_confirmation(monkeypatch, failure, outcome):
+    class Connection:
+        def send_message(self, *args, **kwargs):
+            raise failure
+
+        def close(self):
+            pass
+
+    channel = EmailChannel("127.0.0.1", security="none", sender="cyberflow@localhost")
+    monkeypatch.setattr(channel, "_connect", Connection)
+    message = build_message(report(), run_id="run-id", repository="repo", app_base_url="http://app")
+    with pytest.raises(DeliveryError) as error:
+        channel.send_one("dev@example.org", message, delivery_id="notification-id")
+    assert error.value.outcome == outcome
+
+
 def _graph(*notifiers):
     nodes = [
         {"id": "t", "type": "manual_trigger", "position": {"x": 0, "y": 0}},
@@ -148,3 +189,101 @@ def test_notifiers_connect_to_merged_findings_and_validate_recipients():
     assert [issue.field for issue in validate_graph(empty)] == ["config.recipients"]
     bad = _graph(("notify_email", {"recipients": ["not-an-address"]}), ("notify_telegram", {"recipients": ["hello world"]}))
     assert {issue.code for issue in validate_draft(bad)} == {"INVALID_CONFIG"} and len(validate_draft(bad)) == 2
+
+
+def _prepare_sources(monkeypatch):
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("b" * 40, {"App.kt": 'val password = "fixture-auth-83"'}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+
+
+def test_worker_delivers_email_and_retries_only_telegram_attachment(api, telegram_api, monkeypatch):
+    client, sessions = api
+    _prepare_sources(monkeypatch)
+    graph = _graph(
+        ("notify_email", {"recipients": ["dev1@example.org", "outside@example.org", "dev1@EXAMPLE.ORG"]}),
+        ("notify_telegram", {"recipients": ["-100429"]}),
+    )
+    run_id = enqueue_for_worker(api, graph.model_dump())
+    path = f"/api/runs/{run_id}"
+    received = []
+    with SmtpSink(0, lambda sender, recipients, data: received.append((sender, recipients, data))) as sink:
+        sink.start()
+        settings = Settings(
+            smtp_host="127.0.0.1", smtp_port=sink.server_address[1], smtp_security="none",
+            smtp_from="cyberflow@localhost", notify_email_recipients=["dev1@example.org"],
+            telegram_bot_token=TOKEN, telegram_api_base=telegram_api, notify_telegram_recipients=["-100429"],
+        )
+        assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+        assert client.get(path).json()["status"] == "succeeded"
+        assert not received and not _FakeTelegram.calls
+        for _ in range(3):
+            assert process_next(sessions, settings)
+        assert not process_next(sessions, settings)
+        delivery = client.get(path + "/report").json()["delivery"]
+        assert delivery["n0"]["status"] == "partial"
+        assert {item["status"] for item in delivery["n0"]["recipients"]} == {"accepted", "failed"}
+        blocked = next(item for item in delivery["n0"]["recipients"] if item["status"] == "failed")
+        assert blocked["error_code"] == "RECIPIENT_NOT_ALLOWED"
+        pending, = delivery["n1"]["recipients"]
+        assert pending["phase"] == "attachment" and pending["status"] == "queued"
+        assert pending["error_code"] == "TELEGRAM_RATE_LIMIT" and pending["message_id"]
+        with sessions.begin() as db:
+            row = db.get(NotificationDelivery, UUID(pending["id"]))
+            assert row.next_attempt_at > row.updated_at + timedelta(seconds=40)
+            row.next_attempt_at = datetime.now(UTC)
+        assert process_next(sessions, settings)
+        assert not process_next(sessions, settings)
+        sink.shutdown()
+
+    [(_, recipients, message)] = received
+    assert recipients == ["dev1@example.org"]
+    assert b"fixture-auth-83" not in message
+    email = message_from_bytes(message, policy=policy.default)
+    assert list(email.iter_attachments())
+    assert [method for _, method, _ in _FakeTelegram.calls] == ["sendMessage", "sendDocument", "sendDocument"]
+    report_response = client.get(path + "/report")
+    assert "dev1@example.org" not in report_response.text and "-100429" not in report_response.text
+    delivered, = report_response.json()["delivery"]["n1"]["recipients"]
+    assert delivered["status"] == "accepted" and delivered["attachment_id"] != delivered["message_id"]
+    assert client.get(path).json()["status"] == "succeeded"
+
+
+def test_expired_delivery_stays_unknown_and_cannot_be_taken_again(api, monkeypatch):
+    client, sessions = api
+    _prepare_sources(monkeypatch)
+    graph = _graph(("notify_email", {"recipients": ["dev@example.org"]}))
+    run_id = enqueue_for_worker(api, graph.model_dump())
+    settings = Settings(notify_email_recipients=["dev@example.org"])
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    now = datetime.now(UTC)
+    with sessions.begin() as db:
+        claim = claim_delivery(db, now, lease_seconds=1)
+        assert claim is not None
+        with sessions.begin() as other:
+            assert claim_delivery(other, now, lease_seconds=1) is None
+    with sessions.begin() as db:
+        expire_deliveries(db, now + timedelta(seconds=2))
+        assert claim_delivery(db, now + timedelta(seconds=2), lease_seconds=1) is None
+        assert not finish_delivery(db, claim, provider_id="late", max_attempts=4)
+    report = client.get(f"/api/runs/{run_id}/report").json()
+    assert report["status"] == "succeeded" and report["delivery"]["n0"]["status"] == "unknown"
+
+
+def test_delivery_requires_finished_report_and_cancels_failed_run(api, monkeypatch):
+    client, sessions = api
+    _prepare_sources(monkeypatch)
+    graph = _graph(("notify_email", {"recipients": ["dev@example.org"]}))
+    run_id = enqueue_for_worker(api, graph.model_dump())
+    settings = Settings(notify_email_recipients=["dev@example.org"])
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    with sessions.begin() as db:
+        db.get(ScanRun, run_id).status = "running"
+    assert not process_next(sessions, settings)
+    with sessions.begin() as db:
+        db.get(ScanRun, run_id).status = "failed"
+    assert not process_next(sessions, settings)
+    report = client.get(f"/api/runs/{run_id}/report").json()
+    assert report["delivery"]["n0"]["status"] == "cancelled"

@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
 from ..db.models import FindingRow, NodeRun, ScanRun
 from ..db.session import Database
+from ..nodes.catalog import NOTIFIER_CONFIGS
+from ..notifications.queue import delivery_summary
 from ..reports import NodeResult, RunReport, readable_report, submission_json
 from ..schemas.contracts import (
     FindingRead, Graph, NodeRunRead, Page, RunCreate, RunDetail, RunQueued,
@@ -84,17 +86,36 @@ def get_run(run_id: UUID, db: Database) -> RunDetail:
         node.node_id: node
         for node in db.scalars(select(NodeRun).where(NodeRun.run_id == run_id))
     }
+    delivered = delivery_summary(db, run_id) if any(node.type in NOTIFIER_CONFIGS for node in graph.nodes) else {}
+    details = []
+    for node in graph.nodes:
+        if node.id not in nodes:
+            continue
+        detail = NodeRunRead.model_validate(nodes[node.id])
+        if node.id in delivered:
+            detail.output_preview = (detail.output_preview or {}) | delivered[node.id]
+        details.append(detail)
     return RunDetail(
         **RunRead.model_validate(run).model_dump(),
         graph_snapshot=graph,
-        nodes=[NodeRunRead.model_validate(nodes[node.id]) for node in graph.nodes if node.id in nodes],
+        nodes=details,
+        delivery=(((run.report or {}).get("delivery") or {}) | delivered) or None,
     )
 
 
-def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str) -> Iterator[str]:
+def _stream_finished(run: RunDetail, wait_for_delivery: bool) -> bool:
+    if run.status in {"queued", "running"}:
+        return False
+    return not wait_for_delivery or not any(
+        delivery.get("recipients") and delivery.get("status") in {"queued", "sending"}
+        for delivery in (run.delivery or {}).values() if isinstance(delivery, dict)
+    )
+
+
+def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, *, wait_for_delivery: bool = False) -> Iterator[str]:
     previous = run.model_dump_json()
     yield f"retry: 1500\nevent: run\ndata: {previous}\n\n"
-    if run.status not in {"queued", "running"}:
+    if _stream_finished(run, wait_for_delivery):
         return
     with connect(dsn, autocommit=True, connect_timeout=5) as listener:
         listener.execute(sql.SQL("LISTEN {}").format(sql.Identifier(f"cyberflow_run_{run.id.hex}")))
@@ -106,20 +127,20 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str) -> It
             if current != previous:
                 yield f"event: run\ndata: {current}\n\n"
                 previous = current
-            if run.status not in {"queued", "running"}:
+            if _stream_finished(run, wait_for_delivery):
                 return
             if not list(listener.notifies(timeout=10, stop_after=1)):
                 yield ": heartbeat\n\n"
 
 
 @router.get("/runs/{run_id}/events")
-def stream_run(run_id: UUID, request: Request) -> StreamingResponse:
+def stream_run(run_id: UUID, request: Request, wait_for_delivery: bool = False) -> StreamingResponse:
     sessions = request.app.state.session_factory
     with sessions() as db:
         initial = get_run(run_id, db)
     dsn = make_url(request.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     return StreamingResponse(
-        _run_events(initial, sessions, dsn), media_type="text/event-stream",
+        _run_events(initial, sessions, dsn, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
@@ -149,9 +170,10 @@ def get_report(run_id: UUID, db: Database) -> RunReportRead:
         summary = RunSummary(total=sum(counts.values()), high_count=counts.get("high", 0), critical_count=counts.get("critical", 0))
     else:
         summary = RunSummary.model_validate(run.summary)
+    delivery = (payload.get("delivery") or {}) | delivery_summary(db, run_id)
     return RunReportRead(
         status=run.status, summary=summary, coverage=payload.get("coverage", {}),
-        llm=payload.get("llm"), delivery=payload.get("delivery"), error=run.error,
+        llm=payload.get("llm"), delivery=delivery or None, error=run.error,
     )
 
 

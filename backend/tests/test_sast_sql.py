@@ -136,3 +136,47 @@ def test_spring_data_repository_calls_are_resolved():
     result = scan_sast(Snapshot(SHA, {"src/web/OwnerController.kt": CONTROLLER, "src/store/OwnerRepository.kt": repository}))
     assert result.findings == ()
     assert result.coverage.status == "complete" and not result.warnings
+
+
+def test_jdbc_client_follows_shorter_path_after_depth_limit():
+    source = """
+        @RestController
+        class Search(private val jdbc: JdbcClient) {
+            @GetMapping("/long")
+            fun long(@RequestParam term: String) = levelOne(term)
+            @GetMapping("/short")
+            fun short(@RequestParam term: String) = shared(term)
+            fun levelOne(term: String) = levelTwo(term)
+            fun levelTwo(term: String) = shared(term)
+            fun shared(term: String) = query(term)
+            fun query(term: String) = jdbc.sql("SELECT id FROM items WHERE lookup = '$term'").query()
+        }
+    """
+    assert len(sql_lines({"Search.kt": source})) == 1
+    safe = source.replace("lookup = '$term'", "lookup = :term").replace(".query()", '.param("term", term).query()')
+    assert sql_lines({"Search.kt": safe}) == []
+
+
+def test_actuator_requires_both_exposure_and_public_access():
+    config = """
+management:
+  endpoints:
+    web:
+      exposure:
+        include: [health, env]
+"""
+    security = """
+        class Security {
+            fun chain(http: HttpSecurity) = http.authorizeHttpRequests { rules ->
+                rules.requestMatchers("/actuator/**").permitAll()
+                rules.anyRequest().authenticated()
+            }
+        }
+    """
+    def finding_classes(config, security):
+        result = scan_sast(Snapshot(SHA, {"application.yml": config, "Security.kt": security}))
+        return {finding.metadata["class"] for finding in result.findings}
+
+    assert finding_classes(config, security) == {"actuator-exposure"}
+    assert finding_classes(config.replace("health, env", "health"), security) == set()
+    assert finding_classes(config, security.replace("permitAll", "authenticated")) == set()

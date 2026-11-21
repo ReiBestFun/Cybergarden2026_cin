@@ -141,6 +141,66 @@ def test_snapshot_rejects_bad_sha_and_skips_links_binary_and_oversized_files(tmp
     }
 
 
+def test_sca_gradle_alias_and_distinct_versions_per_configuration():
+    snapshot = Snapshot(SHA, {
+        "app/build.gradle.kts": 'dependencies { implementation(libs.demo.asset) }',
+        "gradle/libs.versions.toml": """
+[versions]
+asset = "1.2"
+[libraries]
+demo-asset = { module = "demo:asset", version.ref = "asset" }
+""",
+        "app/gradle.lockfile": "demo:asset:1.5=compileClasspath\ndemo:asset:1.7=runtimeClasspath\n",
+    })
+    result = scan_sca(snapshot, catalog())
+    assert result.coverage.status == "complete"
+    assert [(item.metadata["version"], item.metadata["configurations"]) for item in result.findings] == [
+        ("1.5", "compileClasspath"),
+    ]
+
+
+def test_sca_explains_unresolved_coordinates_and_location():
+    result = scan_sca(Snapshot(SHA, {
+        "build.gradle.kts": 'dependencies {\n    implementation("demo:asset:1.+")\n}',
+    }), catalog())
+    warning, = result.warnings
+    assert warning.code == "UNRESOLVED_VERSION"
+    assert warning.path == "build.gradle.kts" and warning.line == 2
+    assert "demo:asset" in warning.message and "implementation" in warning.message
+
+
+def test_sca_distinguishes_missing_files_and_bad_json(tmp_path):
+    with pytest.raises(ScanError) as missing:
+        VulnerabilityCatalog.from_file(tmp_path / "missing.json")
+    assert missing.value.warning.code == "SCA_CATALOG_NOT_FOUND"
+    broken = tmp_path / "broken.json"
+    broken.write_text('{\n"x": }', encoding="utf-8")
+    with pytest.raises(ScanError) as malformed:
+        VulnerabilityCatalog.from_file(broken)
+    assert malformed.value.warning.code == "SCA_CATALOG_INVALID"
+    assert malformed.value.warning.line == 2
+    with pytest.raises(ScanError) as build:
+        scan_sca(Snapshot(SHA, {"Sample.kt": "val id = 1"}), catalog())
+    assert build.value.warning.code == "SCA_BUILD_FILE_MISSING"
+
+
+def test_secrets_detects_spring_defaults_json_and_toml_without_false_positives():
+    result = scan_secrets(Snapshot(SHA, {
+        "Settings.kt": r'''
+          @Value("\@{spring.datasource.password:fixture-spring-44}")
+          val db: String = ""
+          val paginationToken = "temporary-page-marker"
+        '''.replace("@{", "$" + "{"),
+        "config.json": '{\n  "apiKey": "fixture-json-45"\n}',
+        "config.toml": '[auth]\npassword = "fixture-toml-46"\n',
+        ".env": "SERVICE_TOKEN=@{SERVICE_TOKEN:-}\n".replace("@{", "$" + "{"),
+    }))
+    assert {(item.path, item.metadata["class"]) for item in result.findings} == {
+        ("Settings.kt", "secret-fallback"), ("config.json", "api-key"), ("config.toml", "password"),
+    }
+    assert all(item.evidence == "***" and "fixture-" not in str(item) for item in result.findings)
+
+
 @pytest.mark.parametrize(("owner_argument", "affected"), [("principal.name", False), ("owner", True)])
 def test_sast_distinguishes_authenticated_owner_from_request_argument(owner_argument, affected):
     snapshot = Snapshot(SHA, {
@@ -183,7 +243,8 @@ def test_worker_keeps_other_results_when_catalog_fails(tmp_path):
     assert tuple(saved) == report.nodes
     assert report.status == "partial"
     assert [node.status for node in report.nodes] == ["succeeded", "failed", "succeeded"]
-    assert report.nodes[1].warning.code == "INVALID_CATALOG"
+    assert report.nodes[1].warning.code == "SCA_CATALOG_INVALID"
+    assert report.nodes[1].warning.field == "formatVersion"
     assert report.summary.total == report.summary.high_count == 2
     exported = submission_json(report)
     assert {item["category"] for item in json.loads(exported)["findings"]} == {"SECRET", "SAST"}

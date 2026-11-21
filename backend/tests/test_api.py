@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, Lock
 from typing import get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
-from backend.app.analyzers.models import ScanError, Snapshot, Warning
+from backend.app.analyzers.models import Coverage, ScanError, ScanResult, Snapshot, Warning
 from backend.app.api import runs as runs_api
 from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
@@ -28,8 +28,9 @@ from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
 from backend.app.main import create_app
-from backend.app.notifications.base import Delivery
+from backend.app import notification_worker
 from backend.app.queue_worker import run_next
+from backend.app.reports import NodeResult
 from backend.app.schemas.contracts import Graph
 from backend.app.schemas.credentials import CredentialKind
 from backend.app.workflows import execution
@@ -137,8 +138,8 @@ def test_ci_webhook_exact_sha_and_verdict(api, monkeypatch, tmp_path, threshold,
     if coverage == "partial":
         run_scan = execution.run_scan
 
-        def partial_scan(*args):
-            scanned = run_scan(*args)
+        def partial_scan(*args, **kwargs):
+            scanned = run_scan(*args, **kwargs)
             result = scanned.result
             return replace(scanned, result=replace(result, coverage=replace(result.coverage, status="partial")))
 
@@ -299,6 +300,8 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
     project_id = create_project(client)
     settings = client.app.state.settings
     settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
+    settings.notify_telegram_recipients = [recipient] if kind == "telegram" else []
+    settings.notify_email_recipients = [recipient] if kind == "smtp" else []
     route = f"/api/projects/{project_id}/credentials"
     value = {"secret": "synthetic-old"}
     if kind == "smtp":
@@ -318,9 +321,17 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
         yield RepositorySnapshot(Snapshot.from_directory(tmp_path, "a" * 40), None)
 
     class ChannelStub:
-        def send(self, recipients, message):
-            assert recipients == [recipient]
-            return [Delivery(recipient, "sent")]
+        def send_text(self, actual, text):
+            assert actual == recipient
+            return "message-id"
+
+        def send_attachment(self, actual, attachment):
+            assert actual == recipient
+            return "attachment-id"
+
+        def send_one(self, actual, message, **kwargs):
+            assert actual == recipient
+            return "email-id"
 
     def telegram(token, **kwargs):
         assert token == "synthetic-new"
@@ -331,11 +342,17 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
         return ChannelStub()
 
     monkeypatch.setattr(execution, "prepare_repository", prepare)
-    monkeypatch.setattr(execution, "TelegramChannel", telegram)
-    monkeypatch.setattr(execution, "EmailChannel", smtp)
+    monkeypatch.setattr(notification_worker, "TelegramChannel", telegram)
+    monkeypatch.setattr(notification_worker, "EmailChannel", smtp)
     assert run_next(sessions, settings, None)
+    assert client.get(f"/api/runs/{run_id}").json()["delivery"]["notify"]["status"] == "queued"
+    assert notification_worker.process_next(sessions, settings)
+    if kind == "telegram":
+        assert notification_worker.process_next(sessions, settings)
     result = client.get(f"/api/runs/{run_id}")
     assert result.json()["status"] == "succeeded"
+    assert result.json()["delivery"]["notify"]["status"] == "accepted"
+    assert '"status":"accepted"' in client.get(f"/api/runs/{run_id}/events?wait_for_delivery=true").text
     assert "synthetic-" not in result.text and "demo-user" not in result.text
 
 
@@ -510,7 +527,8 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
     assert detail["commit_sha"] == "b" * 40
     steps = {step["node_id"]: step for step in detail["nodes"]}
     assert steps["scan"]["status"] == "succeeded"
-    assert steps["sca"]["error"]["code"] == "INVALID_CATALOG"
+    assert steps["sca"]["error"]["code"] == "SCA_CATALOG_MISSING"
+    assert "SCA_CATALOG_PATH" in steps["sca"]["error"]["hint"]
     assert steps["if"]["active_output_ports"] == ["true"]
     assert steps["branch"]["status"] == "skipped" and steps["branch"]["error"]["code"] == "INACTIVE_BRANCH"
     findings = client.get(f"{base}/findings").json()["items"]
@@ -540,6 +558,52 @@ def test_queue_worker_reports_repository_failure(api, monkeypatch):
     assert detail["error"]["code"] == "REPOSITORY_FETCH_FAILED"
     statuses = {node["node_id"]: node["status"] for node in detail["nodes"]}
     assert statuses == {"entry": "succeeded", "source": "failed", "scan": "skipped", "merge": "failed"}
+
+
+def test_queue_worker_runs_ready_scans_in_parallel_and_waits_for_them(api, monkeypatch):
+    client, sessions = api
+    graph = analysis_graph()
+    graph["nodes"] += [node("sca", "scan_sca"), node("sast", "scan_sast")]
+    graph["edges"] += [
+        edge("snapshot-sca", "source", "snapshot", "sca", "snapshot"),
+        edge("snapshot-sast", "source", "snapshot", "sast", "snapshot"),
+        edge("sca-results", "sca", "result", "merge", "results"),
+        edge("sast-results", "sast", "result", "merge", "results"),
+    ]
+    started = []
+    active = 0
+    peak = 0
+    mutex = Lock()
+    first_two = Barrier(2)
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("b" * 40, {}), None)
+
+    def inspect(category, snapshot, catalog, timeout, **kwargs):
+        nonlocal active, peak
+        with mutex:
+            started.append(category)
+            ordinal = len(started)
+            active += 1
+            peak = max(peak, active)
+        if ordinal <= 2:
+            first_two.wait(timeout=5)
+        with mutex:
+            active -= 1
+        return NodeResult(category, "succeeded", ScanResult(category, (), (), Coverage("complete", category, 1, 0)))
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    monkeypatch.setattr(execution, "run_scan", inspect)
+    run_id = enqueue_for_worker(api, graph)
+    settings = Settings(scan_parallelism=2)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    assert set(started) == {"secrets", "sca", "sast"}
+    assert peak == 2 and active == 0
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["status"] == "succeeded"
+    checks = client.get(f"/api/runs/{run_id}/report").json()["coverage"]["checks"]
+    assert set(checks) == {"scan", "sca", "sast"}
 
 
 def test_queue_claims_are_exclusive_and_expired_workers_cannot_write(api):

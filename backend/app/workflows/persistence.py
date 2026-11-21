@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 from sqlalchemy import select, update
@@ -5,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Finding, Warning
 from ..db.models import FindingRow, NodeRun, ScanRun
+from ..notifications.queue import NotificationDraft, enqueue_notification
 from ..schemas.contracts import NodeStatus, RunStatus
 from .queue import ClaimedRun, fail_run
 
@@ -14,7 +16,7 @@ class ClaimLost(Exception):
 
 
 def error_payload(warning: Warning | None) -> dict | None:
-    return {"code": warning.code, "message": warning.message} if warning else None
+    return {key: value for key, value in asdict(warning).items() if value is not None} if warning else None
 
 
 class RunProgress:
@@ -66,6 +68,7 @@ class RunProgress:
         warning: Warning | None = None,
         findings: tuple[Finding, ...] = (),
         sha: str | None = None,
+        notification: NotificationDraft | None = None,
     ) -> None:
         with self.sessions.begin() as db:
             run = self._lock(db)
@@ -81,6 +84,8 @@ class RunProgress:
                 node.input_preview = input_preview
             node.error = error_payload(warning)
             node.finished_at = now
+            if notification is not None:
+                enqueue_notification(db, node, notification)
             for finding in findings:
                 db.add(FindingRow(
                     run_id=run.id, node_run_id=node.id, rule_id=finding.rule_id, category=finding.category,

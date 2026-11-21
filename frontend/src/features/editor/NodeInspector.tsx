@@ -24,7 +24,8 @@ export function NodeInspector({ node }: { node: NodeRun }) {
           onClick={() => setActive(key)}>{label}{key === 'error' && node.error ? ' •' : ''}</button>)}
       </div>
       {active === 'error' && node.error ? (
-        <div className="notice error"><span>{node.error.message} <code>{node.error.code}</code></span></div>
+        <div className="notice error"><span>{node.error.message} <code>{node.error.code}</code>
+          {node.error.hint && <p>{node.error.hint}</p>}</span></div>
       ) : data && !noInputs ? <pre tabIndex={0}>{JSON.stringify(data, null, 2)}</pre>
         : <p className="muted">{noInputs ? 'У запуска этой ноды нет входящих связей.' : messages[active]}</p>}
     </section>

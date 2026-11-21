@@ -14,7 +14,10 @@ export type Workflow = { id: string; project_id: string; name: string; graph: Ap
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
 export type NodeStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
-export type RunError = { code: string; message: string; node_id?: string | null; field?: string | null };
+export type RunError = {
+  code: string; message: string; node_id?: string | null; field?: string | null;
+  path?: string | null; line?: number | null; hint?: string | null;
+};
 export type RunSummary = { total: number; high_count: number; critical_count: number };
 
 export type Run = {
@@ -27,14 +30,24 @@ export type NodeRun = {
   active_output_ports: string[]; input_preview: Record<string, JsonValue> | null;
   output_preview: Record<string, JsonValue> | null; error: RunError | null;
 };
-export type RunDetail = Run & { graph_snapshot: ApiGraph; nodes: NodeRun[] };
+export type RunDetail = Run & { graph_snapshot: ApiGraph; nodes: NodeRun[]; delivery?: RunReport['delivery'] };
 
 export type Finding = {
   id: string; node_run_id: string; rule_id: string; category: 'secrets' | 'sca' | 'sast';
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; title: string; description: string; remediation: string;
   path: string; line: number | null; end_line: number | null; evidence: string; metadata: Record<string, string>;
 };
-export type RunReport = { status: RunStatus; summary: RunSummary; coverage: Record<string, JsonValue>; error: RunError | null };
+type ScanCheck = { category: Finding['category']; status: NodeStatus; warnings: RunError[] };
+type RecipientDelivery = {
+  id?: string; recipient: string; status: string; phase?: 'message' | 'attachment'; attempts?: number;
+  message_id?: string | null; attachment_id?: string | null; error_code?: string | null; error?: string | null;
+};
+type NodeDelivery = { channel?: string; status: string; error?: RunError | null; recipients?: RecipientDelivery[] };
+export type RunReport = {
+  status: RunStatus; summary: RunSummary;
+  coverage: { status?: string; checks?: Record<string, ScanCheck> }; error: RunError | null;
+  delivery?: Record<string, NodeDelivery> | null;
+};
 export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
 // Weekdays: 0 = Monday … 6 = Sunday.
 export type ScheduleSettings = {

@@ -6,7 +6,7 @@ import { NodeInspector } from '../features/editor/NodeInspector';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
 import { watchRun } from '../shared/api/runEvents';
-import { exportUrl, isFinished, listFindings, type Finding, type RunDetail } from '../shared/api/workflows';
+import { exportUrl, getReport, isFinished, listFindings, type Finding, type RunDetail, type RunReport } from '../shared/api/workflows';
 
 // The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
 const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
@@ -19,6 +19,11 @@ const CATEGORY_LABEL: Record<string, string> = { secrets: 'SECRET', sca: 'SCA', 
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частичное покрытие', failed: 'ошибка' };
 const CI_LABEL: Record<string, string> = {
   passed: 'Проверка CI пройдена', blocked: 'CI заблокирован по критичности', error: 'Проверка CI завершилась ошибкой',
+};
+const DELIVERY_LABEL: Record<string, string> = {
+  queued: 'в очереди', sending: 'отправляется', accepted: 'принято провайдером',
+  sent: 'отправлено', succeeded: 'отправлено', failed: 'ошибка отправки',
+  partial: 'частичная отправка', unknown: 'результат неизвестен', skipped: 'пропущено', cancelled: 'отменено',
 };
 
 function findingName(f: Finding) {
@@ -34,6 +39,7 @@ export function Results() {
   const [params] = useSearchParams();
   const runId = params.get('run') ?? getLastRunId();
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [report, setReport] = useState<RunReport | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [category, setCategory] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -44,18 +50,26 @@ export function Results() {
   useEffect(() => {
     if (!runId) return;
     const controller = new AbortController();
+    let loadingReport = false;
     setRun(null);
+    setReport(null);
     setSelected('');
     setError(null);
     setFindings([]);
     setReconnecting(false);
-    void watchRun(runId, controller.signal, setRun, setReconnecting).then(async run => {
-      if (run.status === 'failed' || controller.signal.aborted) return;
-      const page = await listFindings(runId);
-      if (!controller.signal.aborted) setFindings(page.items);
-    }).catch(error => {
+    const handleError = (error: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(error));
-    });
+    };
+    void watchRun(runId, controller.signal, detail => {
+      setRun(detail);
+      if (!isFinished(detail.status) || loadingReport) return;
+      loadingReport = true;
+      void Promise.all([detail.status === 'failed' ? null : listFindings(runId), getReport(runId)]).then(([page, report]) => {
+        if (controller.signal.aborted) return;
+        if (page) setFindings(page.items);
+        setReport(report);
+      }).catch(handleError);
+    }, setReconnecting, true).catch(handleError);
     return () => controller.abort();
   }, [runId]);
 
@@ -64,6 +78,8 @@ export function Results() {
   const inspected = run?.nodes.find(node => node.node_id === selected);
   const gate = run?.nodes.find(node => node.type === 'ci_gate')?.output_preview;
   const decision = typeof gate?.decision === 'string' ? gate.decision : null;
+  const checks = Object.entries(report?.coverage.checks ?? {}).filter(([, check]) => check.warnings.length);
+  const deliveries = Object.entries(run?.delivery ?? report?.delivery ?? {});
 
   return (
     <div className="page">
@@ -86,10 +102,61 @@ export function Results() {
       {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
       {error && <div className="notice error">{error}</div>}
       {reconnecting && <div className="notice info" role="status">Восстанавливаем поток событий…</div>}
-      {run?.error && <div className="notice error">{run.error.message}</div>}
       {finished && decision && CI_LABEL[decision] && (
         <div className={`notice ${decision === 'passed' ? 'success' : 'error'}`}>
           {CI_LABEL[decision]}{typeof gate?.threshold === 'string' && <> · порог {gate.threshold}</>}
+        </div>
+      )}
+
+      {run?.error && (
+        <div className="notice error">
+          {run.error.message}{run.error.hint && <p>{run.error.hint}</p>}
+        </div>
+      )}
+
+      {checks.length > 0 && (
+        <div className="panel">
+          <h3>Диагностика проверок</h3>
+          {checks.map(([id, check]) => (
+            <section key={id}>
+              <h4>{CATEGORY_LABEL[check.category]}</h4>
+              <ul>
+                {check.warnings.map((warning, index) => (
+                  <li key={warning.code + '-' + index}>
+                    {warning.message}{' '}
+                    {warning.path && <code>{warning.path}{warning.line ? ':' + warning.line : ''}</code>}
+                    {!warning.path && warning.field && <code>{warning.field}</code>}
+                    {warning.hint && <p className="muted">{warning.hint}</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {deliveries.length > 0 && (
+        <div className="panel">
+          <h3>Доставка оповещений</h3>
+          {deliveries.map(([nodeId, delivery]) => (
+            <section key={nodeId}>
+              <h4>{delivery.channel === 'email' ? 'Почта' : delivery.channel === 'telegram' ? 'Telegram' : nodeId}</h4>
+              <p>{DELIVERY_LABEL[delivery.status] ?? delivery.status}</p>
+              {delivery.error && <p className="muted">{delivery.error.message}</p>}
+              {delivery.recipients && (
+                <ul>
+                  {delivery.recipients.map((item, index) => (
+                    <li key={item.id ?? index}>
+                      <code>{item.recipient}</code>{' · '}
+                      {DELIVERY_LABEL[item.status] ?? item.status}
+                      {item.phase === 'attachment' && ' · этап: вложение'}
+                      {item.error && <p className="muted">{item.error}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          ))}
         </div>
       )}
 

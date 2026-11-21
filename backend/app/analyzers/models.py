@@ -18,6 +18,9 @@ class Warning:
     code: str
     message: str
     path: str | None = None
+    line: int | None = None
+    field: str | None = None
+    hint: str | None = None
 
 
 class ScanError(Exception):
@@ -82,6 +85,13 @@ class Snapshot:
     sha: str
     files: dict[str, str] = field(repr=False)
     skipped: tuple[Warning, ...] = ()
+
+    def select(self, accepts: Callable[[PurePosixPath], bool]) -> Snapshot:
+        return Snapshot(
+            self.sha,
+            {path: data for path, data in self.files.items() if accepts(PurePosixPath(path))},
+            tuple(warning for warning in self.skipped if warning.path is None or accepts(PurePosixPath(warning.path))),
+        )
 
     @classmethod
     def from_directory(

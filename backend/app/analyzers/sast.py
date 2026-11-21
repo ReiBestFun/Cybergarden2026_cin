@@ -46,9 +46,41 @@ _SENSITIVE = re.compile(
     r"\b(?:(?:customer|user|account|tenant|owner)_?(?:id|address|number)|"
     r"password|email|email_address|phone|phone_number|ssn)\b", re.IGNORECASE
 )
-_SQL_START = re.compile(r"^\s*(?:select|insert|update|delete|with)\b", re.IGNORECASE)
+_SQL_START = re.compile(r"^\s*(?:select|insert|update|delete|with|from)\b", re.IGNORECASE)
 _JDBC_METHODS = {"query", "queryForList", "queryForObject", "queryForMap", "update", "execute"}
 _JDBC_TYPES = {"JdbcTemplate", "NamedParameterJdbcTemplate", "JdbcOperations", "NamedParameterJdbcOperations"}
+# APIs that execute a query passed as their first argument: (receiver types, methods).
+_SQL_SINKS: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
+    (frozenset(_JDBC_TYPES), frozenset(_JDBC_METHODS)),
+    (frozenset({"EntityManager", "Session", "StatelessSession"}),
+     frozenset({"createQuery", "createNativeQuery", "createSQLQuery"})),
+    (frozenset({"Statement"}), frozenset({"executeQuery", "executeUpdate", "executeLargeUpdate", "execute", "addBatch"})),
+    (frozenset({"Connection"}), frozenset({"prepareStatement", "prepareCall", "nativeSQL"})),
+)
+# Values of these types cannot carry SQL syntax, so they do not propagate injection.
+_SAFE_TYPES = frozenset({
+    "Int", "Long", "Short", "Byte", "Double", "Float", "Boolean", "Char", "UInt", "ULong",
+    "UUID", "BigInteger", "BigDecimal", "LocalDate", "LocalDateTime", "LocalTime", "Instant",
+    "OffsetDateTime", "ZonedDateTime", "Duration",
+})
+# Handler parameters that Spring fills from the framework, not from the HTTP request.
+_FRAMEWORK_TYPES = frozenset({
+    "Model", "ModelMap", "MutableMap", "Map", "BindingResult", "Errors", "WebDataBinder", "SessionStatus",
+    "RedirectAttributes", "HttpServletRequest", "HttpServletResponse", "ServletRequest", "ServletResponse",
+    "HttpSession", "WebRequest", "NativeWebRequest", "ServerWebExchange", "ServerHttpRequest", "ServerHttpResponse",
+    "Principal", "Authentication", "Locale", "TimeZone", "ZoneId", "UriComponentsBuilder", "Pageable", "Sort",
+    "InputStream", "OutputStream", "Reader", "Writer",
+})
+# Calls whose result type is known without type inference.
+_FACTORY_TYPES = {
+    "createStatement": "Statement", "createEntityManager": "EntityManager",
+    "openSession": "Session", "getCurrentSession": "Session", "openStatelessSession": "StatelessSession",
+    "getConnection": "Connection",
+}
+_SPRING_DATA_REPOSITORIES = frozenset({
+    "Repository", "CrudRepository", "PagingAndSortingRepository", "JpaRepository", "ListCrudRepository",
+    "ReactiveCrudRepository", "CoroutineCrudRepository",
+})
 _FUNCTION_SCOPE = frozenset({"function_declaration", "class_declaration"})
 
 
@@ -119,6 +151,32 @@ class Function:
     inputs: frozenset[str]
     principal: frozenset[str]
     guarded: bool
+    property_types: dict[str, str]
+    # Parameters Spring binds from the request when the function is a handler (annotated or not).
+    request_parameters: frozenset[str]
+    # Parameters whose declared type cannot carry SQL syntax.
+    scalar_parameters: frozenset[str]
+
+    def receiver_type(self, receiver: Node) -> str:
+        name = re.sub(r"^this\.", "", kt.text(receiver)).rstrip("!?")
+        if local := self._local_type(name):
+            return local
+        return self.parameter_types.get(name) or self.property_types.get(name, "")
+
+    def _local_type(self, name: str) -> str:
+        """Type of a local variable: declared explicitly or produced by a known factory call."""
+        for declaration in kt.walk(self.body, "property_declaration", stop=_FUNCTION_SCOPE):
+            variable = kt.child(declaration, "variable_declaration")
+            identifier = kt.child(variable, "identifier") if variable is not None else None
+            if identifier is None or kt.text(identifier) != name:
+                continue
+            if declared := _type(variable):
+                return declared
+            value = kt.property_value(declaration)
+            factory = kt.call(value[1]) if value else None
+            if factory is not None and factory.name in _FACTORY_TYPES:
+                return _FACTORY_TYPES[factory.name]
+        return ""
 
     def calls(self) -> Iterator[tuple[Node, kt.Call]]:
         for node in kt.walk(self.body, "call_expression", stop=_FUNCTION_SCOPE):
@@ -156,9 +214,10 @@ def _request_mapping(node: Node) -> Iterator[tuple[str, str]]:
 
 def _index(
     path: str, source: kt.KotlinFile
-) -> tuple[list[Function], list[Route]]:
+) -> tuple[list[Function], list[Route], dict[str, list[str]]]:
     functions: list[Function] = []
     routes: list[Route] = []
+    supertypes: dict[str, list[str]] = {}
     package_node = kt.child(source.root, "package_header")
     package_name = kt.child(package_node, "qualified_identifier") if package_node else None
     package = kt.text(package_name) if package_name else ""
@@ -186,6 +245,17 @@ def _index(
             name, kind = kt.child(param, "identifier"), _type(param)
             if name is not None and kind:
                 fields[kt.text(name)] = qualify(kind)
+        properties = {}
+        for node in kt.children(class_body):
+            variable = kt.child(node, "variable_declaration") if node.type == "property_declaration" else None
+            name = kt.child(variable, "identifier") if variable is not None else None
+            if name is not None and (kind := _type(variable)):
+                properties[kt.text(name)] = qualify(kind)
+        specifiers = kt.child(declaration, "delegation_specifiers")
+        if specifiers is not None:
+            supertypes[qualify(kt.text(class_name))] = [
+                qualify(_type(specifier)) for specifier in kt.children(specifiers) if _type(specifier)
+            ]
         for node in kt.children(class_body):
             if node.type != "function_declaration":
                 continue
@@ -194,6 +264,7 @@ def _index(
                 continue
             params = _parameter_list(node)
             guarded = bool(_AUTH_ANNOTATIONS & (annotations | {name for name, _ in _annotations(node)}))
+            handler = bool(annotations & {"RestController", "Controller"}) and any(True for _ in _request_mapping(node))
             function = Function(
                 path, source, node, body, qualify(kt.text(class_name)), kt.text(name), tuple(params),
                 fields | {key: qualify(kind) for key, (kind, _) in params.items()},
@@ -202,6 +273,14 @@ def _index(
                           if _unqualified(qualify(kind)) in {"Principal", "Authentication"}
                           or "AuthenticationPrincipal" in modifiers),
                 guarded,
+                fields | properties,
+                frozenset(
+                    key for key, (kind, modifiers) in params.items()
+                    if handler and (modifiers & _WEB_INPUTS or (
+                        not modifiers and _unqualified(qualify(kind)) not in _FRAMEWORK_TYPES
+                    ))
+                ),
+                frozenset(key for key, (kind, _) in params.items() if _unqualified(kind) in _SAFE_TYPES),
             )
             functions.append(function)
             if annotations & {"RestController", "Controller"}:
@@ -209,7 +288,7 @@ def _index(
                     for method, subpath in _request_mapping(node):
                         route_path = "/" + "/".join(part.strip("/") for part in (parent_path, subpath) if part.strip("/"))
                         routes.append(Route(method if method != "*" else parent_method, route_path, function))
-    return functions, routes
+    return functions, routes, supertypes
 
 
 def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
@@ -222,12 +301,17 @@ def _finding(kind: str, function: Function, node: Node, last: Node | None = None
     )
 
 
-def _sql_calls(function: Function) -> Iterator[tuple[Node, kt.Call, Node, str]]:
+def _sql_calls(function: Function, *, all_sinks: bool = False) -> Iterator[tuple[Node, kt.Call, Node, str]]:
+    """Yield query calls whose first argument is SQL text; JDBC only unless all_sinks."""
+    sinks = _SQL_SINKS if all_sinks else _SQL_SINKS[:1]
     for node, call in function.calls():
-        if call.name not in _JDBC_METHODS or call.receiver is None or not call.args:
+        if call.receiver is None or not call.args:
             continue
-        receiver = function.parameter_types.get(kt.text(call.receiver), "")
-        if _unqualified(receiver) not in _JDBC_TYPES:
+        receiver = _unqualified(
+            function.receiver_type(call.receiver) if all_sinks
+            else function.parameter_types.get(kt.text(call.receiver), "")
+        )
+        if not any(receiver in types and call.name in methods for types, methods in sinks):
             continue
         sql = function.source.resolve(call.args[0])
         content = kt.string_content(sql)
@@ -236,6 +320,60 @@ def _sql_calls(function: Function) -> Iterator[tuple[Node, kt.Call, Node, str]]:
             content = next(iter(pieces), "")
         if content and _SQL_START.match(content):
             yield node, call, sql, content
+
+
+def _sql_finding(function: Function, node: Node, sql: Node) -> Finding:
+    # A query built in a local variable is reported from its construction to the executing call.
+    inside_call = node.start_byte <= sql.start_byte < node.end_byte
+    in_function = function.body.start_byte <= sql.start_byte < function.body.end_byte
+    if in_function and not inside_call and sql.start_byte < node.start_byte:
+        return _finding("sql-injection", function, sql, node)
+    return _finding("sql-injection", function, node)
+
+
+def _resolved_calls(
+    caller: Function, index: dict[tuple[str, str], list[Function]], implementations: dict[str, list[str]]
+) -> Iterator[tuple[kt.Call, Function]]:
+    """Calls with a statically known target, following interfaces to their implementing classes."""
+    for _, call in caller.calls():
+        owner = caller.owner if call.receiver is None else caller.receiver_type(call.receiver)
+        if not owner:
+            continue
+        for kind in (owner, *implementations.get(owner, ())):
+            for function in index.get((kind, call.name), []):
+                if len(function.parameters) == len(call.args):
+                    yield call, function
+
+
+def _sql_injection_findings(
+    functions: list[Function], index: dict[tuple[str, str], list[Function]], implementations: dict[str, list[str]],
+) -> list[Finding]:
+    """Follow request values from handlers through up to three calls into query APIs."""
+    found: dict[tuple[str, int], Finding] = {}
+    seen: set[tuple[int, frozenset[str]]] = set()
+
+    def visit(function: Function, tainted: frozenset[str], depth: int) -> None:
+        tainted = tainted - function.scalar_parameters
+        key = (function.node.id, tainted)
+        if not tainted or key in seen:
+            return
+        seen.add(key)
+        for node, _, sql, _ in _sql_calls(function, all_sinks=True):
+            if _uses_names(function.source, sql, tainted):
+                finding = _sql_finding(function, node, sql)
+                found.setdefault((finding.path, finding.line), finding)
+        if depth >= 3:
+            return
+        for call, target in _resolved_calls(function, index, implementations):
+            passed = frozenset(
+                name for arg, name in zip(call.args, target.parameters)
+                if _uses_names(function.source, arg, tainted)
+            )
+            visit(target, passed, depth + 1)
+
+    for function in functions:
+        visit(function, function.inputs | function.request_parameters, 0)
+    return list(found.values())
 
 
 def _uses_names(source: kt.KotlinFile, node: Node, names: frozenset[str], depth: int = 0) -> bool:
@@ -528,25 +666,37 @@ def _object_findings(
             yield _finding("object-authorization", function, node)
 
 
+def _spring_data(kind: str, supertypes: dict[str, list[str]], depth: int = 0) -> bool:
+    """Spring Data generates parameterized queries for repository interfaces without custom code."""
+    return depth < 5 and any(
+        _unqualified(parent) in _SPRING_DATA_REPOSITORIES or _spring_data(parent, supertypes, depth + 1)
+        for parent in supertypes.get(kind, [])
+    )
+
+
 def scan_sast(snapshot: Snapshot) -> ScanResult:
     scan = Scan(snapshot, lambda path: path.suffix == ".kt")
     findings: list[Finding] = []
     functions: list[Function] = []
     routes: list[Route] = []
     index: dict[tuple[str, str], list[Function]] = {}
+    supertypes: dict[str, list[str]] = {}
     for path, data in scan.files.items():
         source = kt.KotlinFile(data)
         if source.root.has_error:
             scan.skip(path, "KOTLIN_PARSE_ERROR", "Файл Kotlin разобран частично.")
-        current_functions, current_routes = _index(path, source)
+        current_functions, current_routes, current_supertypes = _index(path, source)
         functions.extend(current_functions)
         routes.extend(current_routes)
+        supertypes.update(current_supertypes)
         for function in current_functions:
             index.setdefault((function.owner, function.name), []).append(function)
-            for node, _, sql, _ in _sql_calls(function):
-                if _uses_names(function.source, sql, function.inputs):
-                    findings.append(_finding("sql-injection", function, node))
             findings.extend(_tls_findings(function))
+    implementations: dict[str, list[str]] = {}
+    for kind, parents in supertypes.items():
+        for parent in parents:
+            implementations.setdefault(parent, []).append(kind)
+    findings.extend(_sql_injection_findings(functions, index, implementations))
 
     rules, cors = _security(functions, scan)
     if cors:
@@ -561,11 +711,14 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
                 findings.append(_finding("route-authorization", rule.function, rule.node))
         if handler.inputs:
             findings.extend(_object_findings(route, connections, scan))
+            resolved = {call.name for call, _ in _resolved_calls(handler, index, implementations)}
             if not connections and any(
                 call.receiver is not None and kt.text(call.receiver) in handler.parameter_types
-                and _unqualified(handler.parameter_types[kt.text(call.receiver)]) not in _JDBC_TYPES
+                and _unqualified(handler.parameter_types[kt.text(call.receiver)]) not in _JDBC_TYPES | _FRAMEWORK_TYPES
+                and call.name not in resolved
+                and not _spring_data(handler.parameter_types[kt.text(call.receiver)], supertypes)
                 and any(_uses_names(handler.source, arg, handler.inputs) for arg in call.args)
                 for _, call in handler.calls()
             ):
                 scan.warn(Warning("UNRESOLVED_CALL", "Не удалось связать обработчик с вызываемым методом.", handler.path), incomplete=True)
-    return scan.result("sast", "Правила Kotlin, JDBC и Spring Security", findings)
+    return scan.result("sast", "Правила Kotlin, JDBC, JPA и Spring Security", findings)

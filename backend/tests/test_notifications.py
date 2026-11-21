@@ -27,6 +27,7 @@ from backend.app.notifications.queue import claim_delivery, expire_deliveries, f
 from backend.app.queue_worker import run_next
 from backend.app.reports import RunReport
 from backend.app.schemas.contracts import Graph
+from backend.app.telegram_link_worker import consume_start
 from backend.app.workflows import execution
 from backend.app.workflows.validation import validate_draft, validate_graph
 from backend.tests.test_api import ORIGIN, api, create_project, create_workflow, enqueue_for_worker, login
@@ -67,6 +68,14 @@ class _FakeTelegram(BaseHTTPRequestHandler):
         _FakeTelegram.calls.append((self.path, method, body))
         if TOKEN not in self.path:
             status, payload = 401, {"ok": False, "description": "Unauthorized"}
+        elif method in {"getMe", "getChat", "getChatMember", "getChatAdministrators"}:
+            answers = {
+                "getMe": {"id": 111, "username": "cyberflow_bot"},
+                "getChat": {"id": -1008765, "type": "channel"},
+                "getChatMember": {"status": "administrator", "can_post_messages": True},
+                "getChatAdministrators": [{"user": {"id": 1234567}}],
+            }
+            status, payload = 200, {"ok": True, "result": answers[method]}
         elif b"-100404" in body:
             status, payload = 400, {"ok": False, "description": "Bad Request: chat not found"}
         elif method == "sendDocument" and b"-100429" in body and sum(
@@ -116,6 +125,71 @@ def test_telegram_rejects_missing_or_bad_token(telegram_api):
     with pytest.raises(NotifierError) as bad:
         TelegramChannel("999:wrong", api_base=telegram_api).send(["-1001"], message)
     assert bad.value.code == "TELEGRAM_UNAUTHORIZED" and "999:wrong" not in bad.value.message
+
+
+@pytest.mark.parametrize("group", [False, True])
+def test_telegram_link_and_verification(api, telegram_api, group):
+    client, sessions = api
+    settings = client.app.state.settings
+    settings.telegram_bot_token = SecretStr(TOKEN)
+    settings.telegram_api_base = telegram_api
+    base = "/api/telegram-destinations"
+    stale = client.post(base + "/links", json={"group_chat": group}).raise_for_status().json()
+    link = client.post(base + "/links", json={"group_chat": group}).raise_for_status().json()
+    assert client.get(base + "/links/" + stale["id"]).status_code == 404
+    prefix = "https://t.me/cyberflow_bot?" + ("startgroup" if group else "start") + "="
+    assert link["url"].startswith(prefix)
+    status = base + "/links/" + link["id"]
+    assert client.get(status).raise_for_status().json() is None
+    chat = {"id": -43210, "type": "group", "title": "Команда"} if group else {
+        "id": 1234567, "type": "private", "username": "test_user",
+    }
+    message = {"chat": chat, "from": {"id": 1234567, "is_bot": False}, "text": "/start " + link["url"][len(prefix):]}
+    with sessions.begin() as db:
+        consume_start(db, {**message, "text": "/start " + stale["url"][len(prefix):]}, settings, "cyberflow_bot")
+        consume_start(db, {**message, "forward_origin": {"type": "user"}}, settings, "cyberflow_bot")
+    assert client.get(status).json() is None
+    for _ in range(2):
+        with sessions.begin() as db:
+            consume_start(db, message, settings, "cyberflow_bot")
+    result = client.get(status).raise_for_status().json()
+    assert result["chat_id"] == str(chat["id"]) and result["verified_at"] is None
+    assert len(client.get(base).json()["items"]) == 1
+    dest = base + "/" + result["id"]
+    client.post(dest + "/challenge").raise_for_status()
+    sent = json.loads(_FakeTelegram.calls[-1][2])
+    code = re.search(r"\d{8}", sent["text"]).group()
+    assert client.post(dest + "/verify", json={"code": code}).raise_for_status().json()["verified_at"]
+    channel = client.post(base + "/public", json={"username": "@team_alerts"})
+    if group:
+        assert channel.status_code == 409
+    else:
+        assert channel.raise_for_status().json()["chat_id"] == "-1008765"
+        assert channel.json()["verified_at"]
+
+
+def test_telegram_link_expiry_owner_and_chat_type(api, telegram_api, monkeypatch):
+    from backend.app.db.models import TelegramLink
+    client, sessions = api
+    settings = client.app.state.settings
+    settings.telegram_bot_token = SecretStr(TOKEN)
+    settings.telegram_api_base = telegram_api
+    base = "/api/telegram-destinations"
+    link = client.post(base + "/links", json={}).raise_for_status().json()
+    status = base + "/links/" + link["id"]
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get(status).status_code == 404
+    message = {"text": "/start " + link["url"].split("=")[1], "from": {"is_bot": False, "id": 5}}
+    with sessions.begin() as db:
+        consume_start(db, {**message, "chat": {"type": "group", "id": -123}}, settings, "cyberflow_bot")
+        attempt = db.scalar(select(TelegramLink).where(TelegramLink.id == UUID(link["id"])))
+        assert attempt.token_hash and attempt.destination_id is None
+        attempt.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    with sessions.begin() as db:
+        consume_start(db, {**message, "chat": {"type": "private", "id": 5}}, settings, "cyberflow_bot")
+    assert client.get(status).status_code == 410
+    assert client.get(base).json()["items"] == []
 
 
 def test_email_reaches_all_recipients_privately():

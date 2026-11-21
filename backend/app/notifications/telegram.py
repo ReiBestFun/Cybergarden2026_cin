@@ -23,7 +23,7 @@ class TelegramChannel:
         self._base = f"{api_base.rstrip('/')}/bot{token}/"
         self._timeout = timeout
 
-    def _call(self, method: str, data: bytes, content_type: str) -> str | None:
+    def _request(self, method: str, data: bytes, content_type: str):
         request = urllib.request.Request(self._base + method, data=data, headers={"Content-Type": content_type})
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
@@ -46,7 +46,13 @@ class TelegramChannel:
             raise _unknown()
         if not payload.get("ok", False):
             raise _telegram_error(payload.get("error_code"), payload, self._token)
-        result = payload.get("result")
+        return payload.get("result")
+
+    def lookup(self, method: str, **params):
+        return self._request(method, json.dumps(params).encode(), "application/json")
+
+    def _call(self, method: str, data: bytes, content_type: str) -> str | None:
+        result = self._request(method, data, content_type)
         message_id = result.get("message_id") if isinstance(result, dict) else None
         return str(message_id) if type(message_id) is int else None
 

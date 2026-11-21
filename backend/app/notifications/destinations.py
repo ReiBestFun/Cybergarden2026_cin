@@ -1,6 +1,7 @@
 """Owner-scoped membership checks for saved Telegram destinations."""
 
 from collections.abc import Iterable
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import select
@@ -8,6 +9,10 @@ from sqlalchemy.orm import Session
 
 from ..db.encryption import StorageCipher, require_cipher
 from ..db.models import TelegramDestination
+
+
+def link_token_hash(token: str) -> str:
+    return sha256(token.encode("ascii")).hexdigest()
 
 
 def telegram_chat_key(cipher: StorageCipher, owner_id: UUID, chat_id: str) -> str:

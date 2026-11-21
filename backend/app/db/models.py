@@ -143,6 +143,17 @@ class TelegramDestination(Base):
     challenge_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
+class TelegramLink(Base):
+    __tablename__ = "telegram_links"
+
+    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    id: Mapped[UUID] = mapped_column(unique=True)
+    token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    group_chat: Mapped[bool] = mapped_column(Boolean)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    destination_id: Mapped[UUID | None] = mapped_column(ForeignKey("telegram_destinations.id", ondelete="SET NULL"))
+
+
 class TelegramChallengeLimit(Base):
     __tablename__ = "telegram_challenge_limits"
 

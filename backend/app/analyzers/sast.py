@@ -9,10 +9,10 @@ from typing import Iterator
 
 import yaml
 from tree_sitter import Node
-from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from . import kotlin as kt
 from .models import Finding, Scan, ScanResult, Severity, Snapshot, Warning
+from .spring_settings import spring_settings
 
 _RULES: dict[str, tuple[Severity, str, str, str]] = {
     "sql-injection": (
@@ -99,6 +99,10 @@ _ACTUATOR_METHODS = {
 
 def accepts_sast_source(path: PurePosixPath) -> bool:
     return path.suffix == ".kt" or path.name in _SPRING_CONFIGURATION
+
+
+def accepts_spring_source(path: PurePosixPath) -> bool:
+    return accepts_sast_source(path) or bool(re.fullmatch(r"application-.+\.(?:properties|ya?ml)", path.name))
 
 
 def _short(node: Node) -> str:
@@ -474,58 +478,46 @@ class AccessRule:
         return re.fullmatch(pattern, route.path) is not None
 
 
-def _spring_configuration(path: str, content: str) -> Iterator[dict[str, str]]:
-    if path.endswith(".properties"):
-        values = {}
-        for line in content.splitlines():
-            if match := re.fullmatch(r"\s*([\w.-]+)\s*[:=]\s*(.*?)\s*", line):
-                values[match[1]] = match[2]
-        yield values
-        return
-
-    def flatten(node, prefix: str = "", depth: int = 0) -> Iterator[tuple[str, str]]:
-        if depth > 8:
-            return
-        if isinstance(node, MappingNode):
-            for key, value in node.value:
-                if isinstance(key, ScalarNode):
-                    key_path = f"{prefix}.{key.value}" if prefix else key.value
-                    if key_path == "management" or key_path.startswith("management."):
-                        yield from flatten(value, key_path, depth + 1)
-        elif isinstance(node, SequenceNode) and all(isinstance(item, ScalarNode) for item in node.value):
-            yield prefix, ",".join(item.value for item in node.value)
-        elif isinstance(node, ScalarNode):
-            yield prefix, node.value
-
-    for document in yaml.compose_all(content, Loader=yaml.SafeLoader):
-        yield dict(flatten(document))
-
-
-def _actuator_findings(scan: Scan, rules: list[AccessRule]) -> Iterator[Finding]:
+def _actuator_access(properties: dict[str, str], rules: list[AccessRule]) -> Iterator[Finding]:
     if not rules:
         return
+    include = set(map(str.strip, properties.get("management.endpoints.web.exposure.include", "").split(",")))
+    exclude = set(map(str.strip, properties.get("management.endpoints.web.exposure.exclude", "").split(",")))
+    base_path = properties.get("management.endpoints.web.base-path", "/actuator").rstrip("/")
+    if not base_path.startswith("/") or "*" in exclude or properties.get("management.server.port"):
+        return
+    for endpoint, method in _ACTUATOR_METHODS.items():
+        if endpoint in exclude or ("*" not in include and endpoint not in include):
+            continue
+        if (
+            properties.get(f"management.endpoint.{endpoint}.enabled") == "false"
+            or properties.get(f"management.endpoint.{endpoint}.access") == "none"
+        ):
+            continue
+        route = Route(method, f"{base_path}/{endpoint}", rules[0].function)
+        access = next((rule for rule in rules if rule.matches(route)), None)
+        if access and access.action == "permitAll":
+            yield _finding("actuator-exposure", access.function, access.node)
+
+
+def _config_findings(scan: Scan, rules: list[AccessRule], *, check_error_responses: bool) -> Iterator[Finding]:
+    if not rules and not check_error_responses:
+        return
     for path, content in scan.files.items():
-        if PurePosixPath(path).name not in _SPRING_CONFIGURATION:
+        if path.endswith(".kt"):
             continue
         try:
-            for properties in _spring_configuration(path, content):
-                include = set(map(str.strip, properties.get("management.endpoints.web.exposure.include", "").split(",")))
-                exclude = set(map(str.strip, properties.get("management.endpoints.web.exposure.exclude", "").split(",")))
-                base_path = properties.get("management.endpoints.web.base-path", "/actuator").rstrip("/")
-                if not base_path.startswith("/") or "*" in exclude or properties.get("management.server.port"):
-                    continue
-                for endpoint, method in _ACTUATOR_METHODS.items():
-                    if endpoint in exclude or ("*" not in include and endpoint not in include):
-                        continue
-                    if (
-                        properties.get(f"management.endpoint.{endpoint}.enabled") == "false"
-                        or properties.get(f"management.endpoint.{endpoint}.access") == "none"
-                    ):
-                        continue
-                    route = Route(method, f"{base_path}/{endpoint}", rules[0].function)
-                    access = next((rule for rule in rules if rule.matches(route)), None)
-                    if access and access.action == "permitAll":
-                        yield _finding("actuator-exposure", access.function, access.node)
+            for settings in spring_settings(path, content):
+                properties = {key: value for key, (value, _) in settings.items()}
+                yield from _actuator_access(properties, rules)
+                if check_error_responses and properties.get("server.error.include-stacktrace", "").lower() == "always":
+                    line = settings["server.error.include-stacktrace"][1]
+                    yield Finding(
+                        "sast.error-stacktrace", "sast", "medium", "Стек исключения в ответе сервера",
+                        "Spring Boot настроен передавать стек исключения в ответах об ошибках.",
+                        "Установите server.error.include-stacktrace=never.",
+                        path, line, line, "server.error.include-stacktrace", {"class": "error-stacktrace"},
+                    )
         except (yaml.YAMLError, RecursionError):
             scan.skip(path, "SPRING_CONFIG_PARSE_ERROR", "Не удалось проверить конфигурацию Spring Boot.")
 
@@ -747,14 +739,9 @@ def _spring_data(kind: str, supertypes: dict[str, list[str]], depth: int = 0) ->
     )
 
 
-def scan_sast(snapshot: Snapshot) -> ScanResult:
-    scan = Scan(snapshot, accepts_sast_source)
-    if scan.files and not any(path.endswith(".kt") for path in scan.files):
-        scan.warn(Warning("NO_KOTLIN_SOURCES", "В снимке нет доступных файлов Kotlin."), incomplete=True)
-    findings: list[Finding] = []
+def _index_snapshot(scan: Scan) -> tuple[list[Function], list[Route], dict[str, list[str]]]:
     functions: list[Function] = []
     routes: list[Route] = []
-    index: dict[tuple[str, str], list[Function]] = {}
     supertypes: dict[str, list[str]] = {}
     for path, data in scan.files.items():
         if not path.endswith(".kt"):
@@ -766,19 +753,42 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
         functions.extend(current_functions)
         routes.extend(current_routes)
         supertypes.update(current_supertypes)
-        for function in current_functions:
-            index.setdefault((function.owner, function.name), []).append(function)
-            findings.extend(_tls_findings(function))
+    return functions, routes, supertypes
+
+
+def _spring_security_findings(
+    scan: Scan, functions: list[Function], routes: list[Route], *, check_error_responses: bool,
+) -> tuple[list[AccessRule], list[Finding]]:
+    rules, cors = _security(functions, scan)
+    findings = list(_config_findings(scan, rules, check_error_responses=check_error_responses))
+    if cors:
+        findings.extend(_cors_findings(functions, routes, rules, scan))
+    return rules, findings
+
+
+def scan_spring_config(snapshot: Snapshot) -> ScanResult:
+    scan = Scan(snapshot, accepts_spring_source)
+    functions, routes, _ = _index_snapshot(scan)
+    _, findings = _spring_security_findings(scan, functions, routes, check_error_responses=True)
+    return scan.result("sast", "Настройки Spring Boot, Actuator и CORS", findings)
+
+
+def scan_sast(snapshot: Snapshot) -> ScanResult:
+    scan = Scan(snapshot, accepts_sast_source)
+    if scan.files and not any(path.endswith(".kt") for path in scan.files):
+        scan.warn(Warning("NO_KOTLIN_SOURCES", "В снимке нет доступных файлов Kotlin."), incomplete=True)
+    functions, routes, supertypes = _index_snapshot(scan)
+    rules, findings = _spring_security_findings(scan, functions, routes, check_error_responses=False)
+    index: dict[tuple[str, str], list[Function]] = {}
+    for function in functions:
+        index.setdefault((function.owner, function.name), []).append(function)
+        findings.extend(_tls_findings(function))
     implementations: dict[str, list[str]] = {}
     for kind, parents in supertypes.items():
         for parent in parents:
             implementations.setdefault(parent, []).append(kind)
     findings.extend(_sql_injection_findings(functions, index, implementations))
 
-    rules, cors = _security(functions, scan)
-    findings.extend(_actuator_findings(scan, rules))
-    if cors:
-        findings.extend(_cors_findings(functions, routes, rules, scan))
     for route in routes:
         handler = route.function
         connections = list(_direct_calls(handler, index))

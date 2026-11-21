@@ -121,6 +121,7 @@ CATALOG = {node.type: node for node in (
     definition("scan_secrets", "Secrets", "Найти встроенные секреты.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sca", "SCA", "Сопоставить зависимости с учебным справочником.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),
+    definition("scan_spring_config", "Конфигурация Spring Boot", "Проверить настройки Actuator, CORS и ответов об ошибках.", (SNAPSHOT,), (RESULT,)),
     definition("scan_password_hashing", "Хеширование паролей", "Найти быстрые хеши паролей в Kotlin.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sensitive_logging", "Утечки в логи", "Найти передачу паролей, токенов и Authorization в логгер Kotlin.", (SNAPSHOT,), (RESULT,)),
     definition("merge_findings", "Объединение находок", "Собрать результаты анализаторов.",

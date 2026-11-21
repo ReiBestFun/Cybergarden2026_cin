@@ -719,6 +719,46 @@ def test_api_rejects_invalid_condition_groups(api, change, code):
     assert client.patch(url, json={"graph": graph}).status_code == 422
 
 
+@pytest.mark.parametrize("with_sast", [False, True])
+def test_spring_config_node_exports_each_finding_once(api, monkeypatch, with_sast):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_spring_config")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    if with_sast:
+        graph["nodes"].append(node("sast", "scan_sast"))
+        graph["edges"] += [
+            edge("source-sast", "source", "snapshot", "sast", "snapshot"),
+            edge("sast-merge", "sast", "result", "merge", "results"),
+        ]
+    snapshot = Snapshot("8" * 40, {
+        "Security.kt": """class Security {
+    fun chain(http: HttpSecurity) = http.authorizeHttpRequests { rules ->
+        rules.requestMatchers("/actuator/**").permitAll()
+        rules.anyRequest().authenticated()
+    }
+}""",
+        "application.yml": "management.endpoints.web.exposure.include: [health, env]\nserver.error.include-stacktrace: always",
+    })
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(snapshot, None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    base = f"/api/runs/{run_id}"
+    assert client.get(base).json()["status"] == "succeeded"
+    assert client.get(f"{base}/report").json()["summary"]["total"] == 2
+    findings = client.get(f"{base}/export").json()["findings"]
+    assert sorted((f["class"], f["severity"], f["path"], f["line"]) for f in findings) == [
+        ("actuator-exposure", "HIGH", "Security.kt", 3),
+        ("error-stacktrace", "MEDIUM", "application.yml", 2),
+    ]
+
+
 def test_queue_worker_reports_repository_failure(api, monkeypatch):
     client, sessions = api
 

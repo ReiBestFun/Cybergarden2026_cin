@@ -10,6 +10,11 @@ from typing import Literal
 from .analyzers.models import Category, Finding, ScanResult, Warning, finding_key, safe_path
 
 _CATEGORIES = {"secrets": "SECRET", "sca": "SCA", "sast": "SAST"}
+_VERDICTS = {
+    "confirmed": "Подтверждено",
+    "needs_review": "Нужна проверка",
+    "false_positive": "Ложное срабатывание",
+}
 
 
 @dataclass(frozen=True)
@@ -100,6 +105,14 @@ def _cell(value: str) -> str:
     return value.replace("|", "&#124;").replace("[", "&#91;").replace("]", "&#93;").replace(chr(96), "&#96;")
 
 
+def _warning_text(warning: Warning) -> str:
+    location = warning.path or warning.field or ""
+    if warning.path and warning.line is not None:
+        location += f":{warning.line}"
+    text = warning.message + (f" ({location})" if location else "")
+    return _cell(f"{text} {warning.hint}" if warning.hint else text)
+
+
 def readable_report(report: RunReport) -> str:
     status = {"succeeded": "Проверка завершена", "partial": "Проверка завершена частично", "failed": "Проверка не выполнена"}
     lines = ["# Отчёт статического анализа", ""]
@@ -117,10 +130,9 @@ def readable_report(report: RunReport) -> str:
                 f"файлов просмотрено {coverage.files_scanned}, пропущено {coverage.files_skipped}. {coverage.scope}."
             )
             for warning in result.warnings:
-                path = f" ({_cell(warning.path)})" if warning.path else ""
-                lines.append(f"  - {warning.message}{path}")
+                lines.append(f"  - {_warning_text(warning)}")
         else:
-            message = node.warning.message if node.warning else "Проверка пропущена."
+            message = _warning_text(node.warning) if node.warning else "Проверка пропущена."
             lines.append(f"- **{category}** — {message}")
     if not report.findings:
         if report.status == "succeeded":
@@ -130,8 +142,8 @@ def readable_report(report: RunReport) -> str:
         return "\n".join(lines) + "\n"
 
     lines.extend((
-        "", "| Категория | Критичность | Находка | Место | Исправление |",
-        "|---|---|---|---|---|",
+        "", "| Категория | Критичность | Находка | Место | Дополнительная проверка | Исправление |",
+        "|---|---|---|---|---|---|",
     ))
     for finding in report.findings:
         location = finding.path
@@ -145,6 +157,8 @@ def readable_report(report: RunReport) -> str:
                 location += f"–{min(finding.end_line, finding.line + 14)}"
             if finding.category == "secrets":
                 detail += " Значение скрыто."
-        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, finding.remediation)
+        verification = finding.verification
+        verdict = f"{_VERDICTS[verification.status]}. {verification.message}" if verification else "—"
+        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, verdict, finding.remediation)
         lines.append("| " + " | ".join(map(_cell, cells)) + " |")
     return "\n".join(lines) + "\n"

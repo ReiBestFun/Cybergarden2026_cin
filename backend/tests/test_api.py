@@ -1,7 +1,12 @@
 import os
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from secrets import randbits
+from threading import Barrier, Lock
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -11,20 +16,27 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.app.analyzers.models import ScanError, Snapshot, Warning
+from backend.app.analyzers.models import Coverage, ScanError, ScanResult, Snapshot, Warning
+from backend.app.api import auth
 from backend.app.config import Settings
 from backend.app.db.models import FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.integrations.github_actions import security_workflow
+from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
 from backend.app.main import create_app
 from backend.app.queue_worker import run_next
+from backend.app.reports import NodeResult
 from backend.app.schemas.contracts import Graph
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
 from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 from backend.app.workflows.scheduling import next_daily_slot
 from backend.app.workflows.validation import validate_graph
+
+ORIGIN = "http://localhost:5173"
+TEST_KEY = urlsafe_b64encode(b"fixture-only-encryption-key-2026").decode()
 
 
 def node(node_id, kind, config=None):
@@ -60,11 +72,116 @@ def test_graph_validation_types_ports_and_cycles():
     assert {"UNKNOWN_PORT", "WRONG_TRIGGER", "GRAPH_CYCLE", "MISSING_INPUT", "UNREACHABLE_NODE", "INVALID_CONFIG"} <= codes
 
 
+def ci_graph(threshold="CRITICAL"):
+    graph = analysis_graph("ci_trigger")
+    graph["nodes"].append(node("gate", "ci_gate", {"threshold": threshold}))
+    graph["edges"].append(edge("merge-gate", "merge", "bundle", "gate", "bundle"))
+    return graph
+
+
+def test_github_actions_template_and_gate_config():
+    import yaml
+
+    workflow_id = UUID(int=1)
+    for mode, runner in [("local", ["self-hosted", "Windows", "cyberflow"]), ("hosted", "ubuntu-latest")]:
+        workflow = yaml.load(security_workflow(workflow_id, "release/demo", mode), Loader=yaml.BaseLoader)
+        assert workflow["on"]["push"]["branches"] == ["release/demo"]
+        assert workflow["permissions"] == {}
+        job = workflow["jobs"]["cyberflow"]
+        assert job["runs-on"] == runner
+        assert job["steps"][0]["env"]["CYBERFLOW_TOKEN"] == "${{ secrets.CYBERFLOW_TOKEN }}"
+    assert validate_graph(Graph.model_validate(ci_graph()), expected_trigger="ci_trigger") == []
+    assert validate_graph(Graph.model_validate(ci_graph("LOW")))[0].code == "INVALID_CONFIG"
+    assert validate_graph(Graph.model_validate(analysis_graph("ci_trigger")))[0].code == "CI_GATE_REQUIRED"
+
+
+@pytest.mark.parametrize(("threshold", "coverage", "outcome"), [
+    ("CRITICAL", "complete", "passed"), ("HIGH", "complete", "blocked"),
+    ("CRITICAL", "partial", "error"), ("HIGH", "partial", "blocked"), ("HIGH", "failed", "error"),
+])
+def test_ci_webhook_exact_sha_and_verdict(api, monkeypatch, tmp_path, threshold, coverage, outcome):
+    client, sessions = api
+    workflow_id = create_workflow(client, create_project(client), ci_graph(threshold))
+    settings = client.app.state.settings
+    settings.ci_workflow_tokens = Settings(ci_workflow_tokens={workflow_id: "ci-test-token"}).ci_workflow_tokens
+    headers = {"Authorization": "Bearer ci-test-token"}
+    endpoint = f"/api/hooks/{workflow_id}"
+    sha = "a" * 40
+    payload = {"repository_url": "https://github.com/TBagirov/training", "commit_sha": sha, "request_id": "123-1"}
+    assert client.get(f"/api/workflows/{workflow_id}/security.yml").status_code == 200
+    assert client.post(endpoint, json=payload).status_code == 401
+    assert client.post(endpoint, headers=headers, json={**payload, "commit_sha": "main"}).status_code == 422
+    assert client.post(endpoint, headers=headers, json={**payload, "repository_url": "https://github.com/other/source"}).status_code == 403
+
+    response = client.post(endpoint, headers=headers, json=payload)
+    assert response.status_code == 202, response.text
+    assert client.post(endpoint, headers=headers, json=payload).json() == response.json()
+    assert client.post(endpoint, headers=headers, json={**payload, "commit_sha": "b" * 40}).status_code == 409
+    status_url = f"{endpoint}/runs/{response.json()['id']}"
+    assert client.get(status_url).status_code == 401
+    assert client.get(status_url, headers=headers).json()["gate"] is None
+
+    (tmp_path / "Service.kt").write_text('val importPassword = "synthetic-ci-not-a-real-password"\n', encoding="utf-8")
+
+    @contextmanager
+    def prepare(url, ref, **kwargs):
+        assert url == payload["repository_url"] and ref == sha
+        if coverage == "failed":
+            raise ScanError(Warning("REPOSITORY_FETCH_FAILED", "Тестовый сбой."))
+        yield RepositorySnapshot(Snapshot.from_directory(tmp_path, sha), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepare)
+    if coverage == "partial":
+        run_scan = execution.run_scan
+
+        def partial_scan(*args, **kwargs):
+            scanned = run_scan(*args, **kwargs)
+            result = scanned.result
+            return replace(scanned, result=replace(result, coverage=replace(result.coverage, status="partial")))
+
+        monkeypatch.setattr(execution, "run_scan", partial_scan)
+    assert run_next(sessions, settings, None)
+    status = client.get(status_url, headers=headers).json()
+    assert status["gate"]["decision"] == outcome
+    if coverage != "failed":
+        assert status["commit_sha"] == sha
+        assert status["report_url"].endswith(response.json()["id"])
+
+
 def test_allow_any_repository_switch():
     strict = repository_allowlist(["https://github.com/TBagirov/training"], allow_any=False)
     assert is_repository_allowed("https://github.com/tbagirov/TRAINING", strict)
     assert not is_repository_allowed("https://github.com/other/project", strict)
     assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
+
+
+def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
+    client, sessions = api
+    workflow_id = create_workflow(client, create_project(client), ci_graph())
+    editor = f"/api/workflows/{workflow_id}"
+    hook = f"/api/hooks/{workflow_id}"
+    sha = "a" * 40
+    response = client.post(f"{editor}/ci-test", json={"commit_sha": sha})
+    assert response.status_code == 202
+    run_id = response.json()["id"]
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["trigger"] == "ci" and run["source_snapshot"]["ref"] == sha
+    (tmp_path / "Service.kt").write_text('val serviceName = "demo"\n', encoding="utf-8")
+
+    @contextmanager
+    def prepare(url, ref, **kwargs):
+        yield RepositorySnapshot(Snapshot.from_directory(tmp_path, ref), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepare)
+    assert run_next(sessions, client.app.state.settings, None)
+    token_response = client.post(f"{editor}/ci-token", json={})
+    assert token_response.headers["cache-control"] == "no-store"
+    old_headers = {"Authorization": f"Bearer {token_response.json()['token']}"}
+    status_endpoint = f"{hook}/runs/{run_id}"
+    assert client.get(status_endpoint, headers=old_headers).json()["gate"]["decision"] == "passed"
+    token = client.post(f"{editor}/ci-token", json={}).json()["token"]
+    assert client.get(status_endpoint, headers=old_headers).status_code == 401
+    assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
 
 def test_daily_schedule_skips_nonexistent_local_time():
@@ -78,19 +195,35 @@ def api(monkeypatch):
     if not url:
         pytest.skip("Set TEST_DATABASE_URL to a dedicated PostgreSQL test database")
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", TEST_KEY)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     # Tests use the strict allowlist regardless of a developer's local .env.
-    app = create_app(Settings(database_url=url, allow_any_repository=False))
-    with TestClient(app) as client:
+    app = create_app(Settings(
+        database_url=url, allow_any_repository=False, app_base_url=ORIGIN,
+        github_client_id="fixture-github-app", github_client_secret="fixture-github-secret",
+    ))
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        login(client, monkeypatch, randbits(48) + 1)
         yield client, app.state.session_factory
+
+
+def login(client, monkeypatch, identity, *, name="Пользователь", login_name="test-user", next_path="/"):
+    monkeypatch.setattr(auth, "fetch_identity", lambda *args: GitHubIdentity(identity, login_name, name, None))
+    start = client.get("/api/auth/github/start", params={"next": next_path}, follow_redirects=False)
+    assert start.status_code == 303, start.text
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    callback = client.get("/api/auth/github/callback", params={"code": "fixture-code", "state": query["state"][0]}, follow_redirects=False)
+    assert callback.status_code == 303 and "cyberflow_session" in callback.headers["set-cookie"]
+    return callback
 
 
 def create_project(client):
     response = client.post("/api/projects", json={
         "name": "Учебный проект", "repository_url": "https://github.com/TBagirov/training.git",
     })
-    assert response.status_code == 201, response.text
+    assert response.status_code in {200, 201}, response.text
     return response.json()["id"]
 
 
@@ -185,6 +318,7 @@ def test_persisted_findings_are_filtered_and_exported(api):
     assert page["total"] == 1
     assert page["items"][0]["metadata"] == {"class": "password"}
     assert page["items"][0]["evidence"] == "***"
+    assert page["items"][0]["verification"] is None
     assert client.get(f"{base}/findings?category=sca").json()["total"] == 0
     assert client.get(f"{base}/report").json()["summary"]["high_count"] == 1
     export = client.get(f"{base}/export")
@@ -238,17 +372,23 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
     assert detail["commit_sha"] == "b" * 40
     steps = {step["node_id"]: step for step in detail["nodes"]}
     assert steps["scan"]["status"] == "succeeded"
-    assert steps["sca"]["error"]["code"] == "INVALID_CATALOG"
+    assert steps["sca"]["error"]["code"] == "SCA_CATALOG_MISSING"
+    assert "SCA_CATALOG_PATH" in steps["sca"]["error"]["hint"]
     assert steps["if"]["active_output_ports"] == ["true"]
     assert steps["branch"]["status"] == "skipped" and steps["branch"]["error"]["code"] == "INACTIVE_BRANCH"
     findings = client.get(f"{base}/findings").json()["items"]
     assert [(item["category"], item["evidence"]) for item in findings] == [("secrets", "***")]
+    assert findings[0]["verification"]["status"] == "confirmed"
+    assert findings[0]["verification"]["code"] == "SECRET_LITERAL"
+    assert "verification" not in findings[0]["metadata"]
     report = client.get(f"{base}/report").json()
     assert report["summary"]["total"] == 1
     assert report["coverage"]["status"] == "partial"
     markdown = client.get(f"{base}/export?format=markdown").text
     assert "**SECRET** — полное покрытие" in markdown
     assert "**SCA** — Для SCA требуется справочник Maven." in markdown
+    assert "Подтверждено" in markdown
+    assert "verification" not in client.get(f"{base}/export").json()["findings"][0]
     for url in (base, f"{base}/findings", f"{base}/report", f"{base}/export?format=markdown"):
         assert "fixture-pass-98" not in client.get(url).text
 
@@ -268,6 +408,52 @@ def test_queue_worker_reports_repository_failure(api, monkeypatch):
     assert detail["error"]["code"] == "REPOSITORY_FETCH_FAILED"
     statuses = {node["node_id"]: node["status"] for node in detail["nodes"]}
     assert statuses == {"entry": "succeeded", "source": "failed", "scan": "skipped", "merge": "failed"}
+
+
+def test_queue_worker_runs_ready_scans_in_parallel_and_waits_for_them(api, monkeypatch):
+    client, sessions = api
+    graph = analysis_graph()
+    graph["nodes"] += [node("sca", "scan_sca"), node("sast", "scan_sast")]
+    graph["edges"] += [
+        edge("snapshot-sca", "source", "snapshot", "sca", "snapshot"),
+        edge("snapshot-sast", "source", "snapshot", "sast", "snapshot"),
+        edge("sca-results", "sca", "result", "merge", "results"),
+        edge("sast-results", "sast", "result", "merge", "results"),
+    ]
+    started = []
+    active = 0
+    peak = 0
+    mutex = Lock()
+    first_two = Barrier(2)
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("b" * 40, {}), None)
+
+    def inspect(category, snapshot, catalog, timeout, **kwargs):
+        nonlocal active, peak
+        with mutex:
+            started.append(category)
+            ordinal = len(started)
+            active += 1
+            peak = max(peak, active)
+        if ordinal <= 2:
+            first_two.wait(timeout=5)
+        with mutex:
+            active -= 1
+        return NodeResult(category, "succeeded", ScanResult(category, (), (), Coverage("complete", category, 1, 0)))
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    monkeypatch.setattr(execution, "run_scan", inspect)
+    run_id = enqueue_for_worker(api, graph)
+    settings = Settings(scan_parallelism=2)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    assert set(started) == {"secrets", "sca", "sast"}
+    assert peak == 2 and active == 0
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["status"] == "succeeded"
+    checks = client.get(f"/api/runs/{run_id}/report").json()["coverage"]["checks"]
+    assert set(checks) == {"scan", "sca", "sast"}
 
 
 def test_queue_claims_are_exclusive_and_expired_workers_cannot_write(api):

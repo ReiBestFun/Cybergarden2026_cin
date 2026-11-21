@@ -3,15 +3,27 @@ from collections import Counter, defaultdict, deque
 
 from pydantic import ValidationError
 
-from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, ConditionConfig, ConditionDraft
+from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
 from ..schemas.contracts import Graph, Issue, Node
 
 _ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast"}
-_TRIGGERS = {"manual_trigger", "schedule_trigger"}
+_TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
 
 
 def _config_error(node: Node, *, draft: bool) -> Issue | None:
     config = node.config
+    if node.type == "ci_gate":
+        try:
+            CiGateConfig.model_validate(config)
+        except ValidationError:
+            return Issue(code="INVALID_CONFIG", message="Выберите порог CRITICAL или HIGH.", node_id=node.id, field="config.threshold")
+        return None
+    if node.type == "ci_trigger":
+        try:
+            CiTriggerConfig.model_validate(config)
+        except ValidationError:
+            return Issue(code="INVALID_CONFIG", message="Проверьте имя ветки.", node_id=node.id, field="config.branch")
+        return None
     if node.type == "condition":
         allowed = {"field", "operator", "value"}
         try:
@@ -85,7 +97,7 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
             issues.append(Issue(code="REQUIRED_NODE_COUNT", message=f"Требуется одна нода {kind}."))
     if not _ANALYZERS & counts.keys():
         issues.append(Issue(code="ANALYZER_REQUIRED", message="Подключите хотя бы один анализатор."))
-    for kind in ("ai_report",):
+    for kind in ("ai_report", "ci_gate"):
         if counts[kind] > 1:
             issues.append(Issue(code="NODE_LIMIT", message=f"Допускается одна нода {kind}."))
 
@@ -151,4 +163,14 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
                     pending.append(target_id)
         for node_id in nodes.keys() - reachable:
             issues.append(Issue(code="UNREACHABLE_NODE", message="Нода недостижима из триггера.", node_id=node_id))
+    if counts["ci_trigger"] == 1 and not issues:
+        if counts["ci_gate"] != 1:
+            return [Issue(code="CI_GATE_REQUIRED", message="Добавьте ноду «Порог CI».")]
+        merge = next(node for node in nodes.values() if node.type == "merge_findings")
+        gate = next(node for node in nodes.values() if node.type == "ci_gate")
+        if gate.id not in outgoing[merge.id]:
+            return [Issue(code="CI_GATE_INPUT", message="Подключите порог CI напрямую к объединению находок.", node_id=gate.id)]
+        for node in nodes.values():
+            if node.type in _ANALYZERS and merge.id not in outgoing[node.id]:
+                issues.append(Issue(code="CI_SCAN_INPUT", message="Подключите анализатор к объединению находок.", node_id=node.id))
     return issues

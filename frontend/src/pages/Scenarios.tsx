@@ -35,9 +35,14 @@ export function Scenarios() {
           <h1>Мои сценарии</h1>
           <p className="muted">Создавайте и управляйте автоматическими проверками безопасности</p>
         </div>
-        <button className="btn primary" onClick={() => { newWorkflow(); nav('/editor'); }}>
-          <Plus size={16} /> Новый сценарий
-        </button>
+        <div className="toolbar-actions">
+          <button className="btn primary" onClick={() => { newWorkflow('ci'); nav('/editor'); }}>
+            <Plus size={16} /> Готовый сценарий CI/CD
+          </button>
+          <button className="btn secondary" onClick={() => { newWorkflow(); nav('/editor'); }}>
+            Новый сценарий
+          </button>
+        </div>
       </div>
       {error && <div className="notice error">{error}</div>}
       <div className="summary-grid">

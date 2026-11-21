@@ -4,7 +4,7 @@ import type { Frequency, Schedule, ScheduleSettings } from '../../shared/api/wor
 
 export const DEFAULT_REPOSITORY = 'https://github.com/TBagirov/training';
 export const DEFAULT_NAME = 'Security check workflow';
-const DRAFT_KEY = 'cyberflow.workflow.v2';
+export const TRAINING_CI_SHA = 'fe1fcbe212669783480666b9b60147c8a8c6eef4';
 
 const node = (id: string, kind: string, label: string, x: number, y: number): FlowNode =>
   ({ id, type: 'flowNode', position: { x, y }, data: { kind, label, config: {} } });
@@ -31,14 +31,15 @@ export const initialEdges: Edge[] = [
   edge('e-sast-merge', 'sast', 'result', 'merge', 'results'),
 ];
 
-export type Draft = {
-  nodes: FlowNode[];
-  edges: Edge[];
-  project: string;
-  name: string;
-  projectId: string | null;
-  workflowId: string | null;
-  schedule?: Partial<ScheduleDraft>;
+export const ciPreset = {
+  name: 'CI/CD · Учебный репозиторий',
+  project: DEFAULT_REPOSITORY,
+  nodes: [
+    { ...node('trigger', 'ci_trigger', 'GitHub Actions', 40, 200), data: { kind: 'ci_trigger', label: 'GitHub Actions', config: { branch: 'main' } } },
+    ...initialNodes.slice(1),
+    node('gate', 'ci_gate', 'Порог CI', 1210, 200),
+  ],
+  edges: [...initialEdges, edge('e-merge-gate', 'merge', 'bundle', 'gate', 'bundle')],
 };
 
 // Local, editable schedule settings; all fields are kept so switching frequency loses nothing.
@@ -50,8 +51,8 @@ export const browserTimeZone = () => {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
 };
 
-export const defaultSchedule = (): ScheduleDraft => ({
-  enabled: true, frequency: 'daily', time: '09:00', weekdays: [0], day_of_month: 1, cron: '0 9 * * 1-5', timezone: browserTimeZone(),
+export const defaultSchedule = (timezone = browserTimeZone()): ScheduleDraft => ({
+  enabled: true, frequency: 'daily', time: '09:00', weekdays: [0], day_of_month: 1, cron: '0 9 * * 1-5', timezone,
 });
 
 export function scheduleSettings(draft: ScheduleDraft): ScheduleSettings {
@@ -74,26 +75,6 @@ export function scheduleFromServer(s: Schedule, fallback: ScheduleDraft): Schedu
   };
 }
 
-export function getSaved(): Draft {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (Array.isArray(p.nodes) && Array.isArray(p.edges)) {
-        return { project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null, ...p };
-      }
-    }
-  } catch { /* corrupted draft */ }
-  return { nodes: initialNodes, edges: initialEdges, project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null };
-}
-
-export function saveDraft(draft: Draft) {
-  try {
-    const nodes = draft.nodes.map(n => ({ ...n, data: { ...n.data, status: undefined } }));
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...draft, nodes }));
-  } catch { /* storage unavailable */ }
-}
-
-const LAST_RUN_KEY = 'cyberflow.lastRunId';
-export const getLastRunId = () => { try { return localStorage.getItem(LAST_RUN_KEY); } catch { return null; } };
-export const setLastRunId = (id: string) => { try { localStorage.setItem(LAST_RUN_KEY, id); } catch { /* ignore */ } };
+let lastRunId: string | null = null;
+export const getLastRunId = () => lastRunId;
+export const setLastRunId = (id: string) => { lastRunId = id; };

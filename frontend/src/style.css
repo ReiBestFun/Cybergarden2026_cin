@@ -918,6 +918,14 @@ code {
 .notice.success { background: #e7f4ef; color: #2f6b55; }
 .notice.info { background: #fdf3e2; color: #7a5520; }
 .notice a { font-weight: 600; color: inherit; }
+
+.ci-setup { margin-bottom: 16px; max-height: 38vh; overflow: auto; flex-shrink: 0; }
+.ci-test-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.ci-test-controls label { display: grid; gap: 4px; width: min(100%, 430px); }
+.ci-test-controls input, .ci-setup textarea { width: 100%; font-family: monospace; }
+.ci-setup details { margin-top: 12px; }
+.ci-setup summary { cursor: pointer; width: fit-content; }
+.ci-setup textarea { display: block; margin: 8px 0; }
 .editor-page > .notice { margin: 0 20px 10px; }
 
 .tag.warn { background: #fef3c7; color: #92400e; }
@@ -1107,4 +1115,70 @@ tr.clickable:hover td { background: #faf6f1; }
 .editor-chat-area .chat-input input {
   flex: 1;
   min-width: 0;
+}
+
+/* ---------- Вход и личный кабинет ---------- */
+
+.login-screen {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(ellipse at 50% 0%, #f2e3d5, #f9f7f1 60%);
+}
+
+.login-card {
+  width: min(100%, 440px);
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+  padding: clamp(22px, 6vw, 40px);
+  margin: 0;
+}
+
+.login-card h1 { font-size: clamp(27px, 8vw, 34px); letter-spacing: -.8px; margin: 0; }
+.login-card p { margin: 0; }
+.login-card > .muted { font-size: 15px; color: #6c625b; }
+.btn { text-decoration: none; }
+.account-nav-footer { display: grid; justify-items: start; gap: 9px; min-width: 0; }
+.account-nav-footer span { overflow-wrap: anywhere; color: #6c625b; }
+
+.account-form { display: grid; gap: 16px; }
+.account-form > .btn { justify-self: start; }
+.account-form h2 { margin: 0; font-size: 20px; }
+.account-form p { margin: 0; }
+.account-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 14px;
+}
+.account-form label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+.account-form input, .account-form select, .account-form textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid #dfd4c8;
+  border-radius: 9px;
+  color: inherit;
+  background: #fdfbf7;
+  font: inherit;
+}
+.account-form textarea { resize: vertical; }
+.account-inline-form { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.account-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.account-row h3 { margin: 0; }
+.account-row p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.profile-identity { display: flex; align-items: center; gap: 13px; }
+.profile-identity img { border-radius: 50%; }
+.editor-template { margin: 0 16px 12px; }
+.telegram-picker { min-width: 0; margin: 12px 0; padding: 10px; border: 1px solid #dfd4c8; border-radius: 9px; }
+.telegram-picker legend { font-weight: 650; font-size: 12px; }
+.telegram-picker a { display: block; margin-top: 9px; }
+
+@media (max-width: 760px) {
+  .app-shell { flex-direction: column; }
+  .app-nav { width: 100%; padding: 12px 15px; gap: 10px; border-right: 0; border-bottom: 1px solid #e7ddd3; }
+  .nav-links, .account-nav-footer { display: flex; flex-wrap: wrap; align-items: center; }
+  .nav-links a { padding: 7px; }
+  .page { padding: 18px; }
 }

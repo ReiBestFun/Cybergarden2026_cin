@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Download } from 'lucide-react';
 import { getLastRunId } from '../features/editor/defaults';
 import { errorMessage } from '../shared/api/client';
-import { exportUrl, getRun, listFindings, type Finding, type RunDetail } from '../shared/api/workflows';
+import { exportUrl, getReport, getRun, listFindings, type Finding, type FindingVerification, type RunDetail, type RunReport } from '../shared/api/workflows';
 
 // The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
 const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
@@ -13,7 +13,18 @@ const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
   low: { background: '#e0f2fe', color: '#075985' },
 };
 const CATEGORY_LABEL: Record<string, string> = { secrets: 'SECRET', sca: 'SCA', sast: 'SAST' };
+const VERIFICATION_LABEL: Record<FindingVerification['status'], string> = {
+  confirmed: 'Подтверждено', needs_review: 'Нужна проверка', false_positive: 'Ложное срабатывание',
+};
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частичное покрытие', failed: 'ошибка' };
+const CI_LABEL: Record<string, string> = {
+  passed: 'Проверка CI пройдена', blocked: 'CI заблокирован по критичности', error: 'Проверка CI завершилась ошибкой',
+};
+const DELIVERY_LABEL: Record<string, string> = {
+  queued: 'в очереди', sending: 'отправляется', accepted: 'принято провайдером',
+  sent: 'отправлено', succeeded: 'отправлено', failed: 'ошибка отправки',
+  partial: 'частичная отправка', unknown: 'результат неизвестен', skipped: 'пропущено', cancelled: 'отменено',
+};
 
 function findingName(f: Finding) {
   if (f.category === 'sca') {
@@ -28,22 +39,44 @@ export function Results() {
   const [params] = useSearchParams();
   const runId = params.get('run') ?? getLastRunId();
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [report, setReport] = useState<RunReport | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [category, setCategory] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!runId) return;
+    setRun(null);
+    setReport(null);
+    setFindings([]);
+    setError(null);
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    const refreshDelivery = async () => {
+      try {
+        const details = await getReport(runId);
+        if (!cancelled) showReport(details);
+      } catch (e) {
+        if (!cancelled) setError(errorMessage(e));
+      }
+    };
+    const showReport = (details: RunReport) => {
+      setReport(details);
+      if (Object.values(details.delivery ?? {}).some(item => item.status === 'queued' || item.status === 'sending')) {
+        timer = setTimeout(refreshDelivery, 1500);
+      }
+    };
     const load = async () => {
       try {
         const detail = await getRun(runId);
         if (cancelled) return;
         setRun(detail);
         if (detail.status === 'queued' || detail.status === 'running') { timer = setTimeout(load, 1500); return; }
-        const page = await listFindings(runId);
-        if (!cancelled) setFindings(page.items);
+        const [page, details] = await Promise.all([listFindings(runId), getReport(runId)]);
+        if (!cancelled) {
+          setFindings(page.items);
+          showReport(details);
+        }
       } catch (e) {
         if (!cancelled) setError(errorMessage(e));
       }
@@ -54,6 +87,10 @@ export function Results() {
 
   const shown = category ? findings.filter(f => f.category === category) : findings;
   const finished = run && run.status !== 'queued' && run.status !== 'running';
+  const gate = run?.nodes.find(node => node.type === 'ci_gate')?.output_preview;
+  const decision = typeof gate?.decision === 'string' ? gate.decision : null;
+  const checks = Object.entries(report?.coverage.checks ?? {}).filter(([, check]) => check.warnings.length);
+  const deliveries = Object.entries(report?.delivery ?? {});
 
   return (
     <div className="page">
@@ -75,7 +112,63 @@ export function Results() {
 
       {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
       {error && <div className="notice error">{error}</div>}
-      {run?.error && <div className="notice error">{run.error.message}</div>}
+      {finished && decision && CI_LABEL[decision] && (
+        <div className={`notice ${decision === 'passed' ? 'success' : 'error'}`}>
+          {CI_LABEL[decision]}{typeof gate?.threshold === 'string' && <> · порог {gate.threshold}</>}
+        </div>
+      )}
+
+      {run?.error && (
+        <div className="notice error">
+          {run.error.message}{run.error.hint && <p>{run.error.hint}</p>}
+        </div>
+      )}
+
+      {checks.length > 0 && (
+        <div className="panel">
+          <h3>Диагностика проверок</h3>
+          {checks.map(([id, check]) => (
+            <section key={id}>
+              <h4>{CATEGORY_LABEL[check.category]}</h4>
+              <ul>
+                {check.warnings.map((warning, index) => (
+                  <li key={warning.code + '-' + index}>
+                    {warning.message}{' '}
+                    {warning.path && <code>{warning.path}{warning.line ? ':' + warning.line : ''}</code>}
+                    {!warning.path && warning.field && <code>{warning.field}</code>}
+                    {warning.hint && <p className="muted">{warning.hint}</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {deliveries.length > 0 && (
+        <div className="panel">
+          <h3>Доставка оповещений</h3>
+          {deliveries.map(([nodeId, delivery]) => (
+            <section key={nodeId}>
+              <h4>{delivery.channel === 'email' ? 'Почта' : delivery.channel === 'telegram' ? 'Telegram' : nodeId}</h4>
+              <p>{DELIVERY_LABEL[delivery.status] ?? delivery.status}</p>
+              {delivery.error && <p className="muted">{delivery.error.message}</p>}
+              {delivery.recipients && (
+                <ul>
+                  {delivery.recipients.map((item, index) => (
+                    <li key={item.id ?? index}>
+                      <code>{item.recipient}</code>{' · '}
+                      {DELIVERY_LABEL[item.status] ?? item.status}
+                      {item.phase === 'attachment' && ' · этап: вложение'}
+                      {item.error && <p className="muted">{item.error}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          ))}
+        </div>
+      )}
 
       {run?.summary && (
         <div className="summary-grid">
@@ -101,7 +194,7 @@ export function Results() {
           {shown.length ? (
             <table>
               <thead>
-                <tr><th>Категория</th><th>Находка</th><th>Критичность</th><th>Путь</th><th>Строка</th></tr>
+                <tr><th>Категория</th><th>Находка</th><th>Критичность</th><th>Путь</th><th>Строка</th><th>Дополнительная проверка</th></tr>
               </thead>
               <tbody>
                 {shown.map((f) => (
@@ -111,6 +204,12 @@ export function Results() {
                     <td><span className="tag" style={SEVERITY_STYLE[f.severity]}>{f.severity.toUpperCase()}</span></td>
                     <td><code>{f.path}</code></td>
                     <td>{f.line ?? '—'}{f.end_line && f.end_line !== f.line ? `–${f.end_line}` : ''}</td>
+                    <td>
+                      {f.verification ? <>
+                        {VERIFICATION_LABEL[f.verification.status]}<br />
+                        <small className="muted">{f.verification.message}</small>
+                      </> : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>

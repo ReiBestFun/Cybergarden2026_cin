@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+import tomllib
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Iterator
 
@@ -21,7 +24,11 @@ _RULES: dict[str, tuple[Severity, str]] = {
     "recoverable-token": ("medium", "Секрет собирается из строковых литералов"),
 }
 _CREDENTIAL_PREFIX = re.compile(r"^(?:Bearer|Basic)\s+", re.IGNORECASE)
-_ENV_REFERENCE = re.compile(r"^\$(?:\{(?P<name>[A-Za-z_]\w*)(?::(?P<fallback>[^}]*))?\}|[A-Za-z_]\w*)$")
+_ENV_REFERENCE = re.compile(r"^\$(?:\{(?P<name>[\w.-]+)(?::(?P<fallback>[^}]*))?\}|[A-Za-z_]\w*)$")
+_DOTENV_REFERENCE = re.compile(r"^\$(?:\{(?P<name>[A-Za-z_]\w*)(?::?-(?P<fallback>[^}]*))?\}|[A-Za-z_]\w*)$")
+_SPRING_VALUE = re.compile(r"@(?:(?:field|param|get|set):\s*)?(?:org\.springframework\.beans\.factory\.annotation\.)?Value\s*\(")
+_TOML_TABLE = re.compile(r"^\s*\[([\w.-]+)\]\s*(?:#.*)?$")
+_TOML_KEY = re.compile(r"^\s*([\w.-]+)\s*=")
 _PLACEHOLDER = re.compile(
     r"(?:<[^>]+>|\*+|x{3,}|(?:your|replace|insert|put|set)[-_ ].*|"
     r"(?:placeholder|example|dummy|sample)(?:[-_ ].*)?|changeme|change[-_ ]me|redacted|todo)",
@@ -34,14 +41,16 @@ _KEY_FORMAT = re.compile(
 _KEY_VALUE = re.compile(r"^\s*(?:export\s+)?([\w.-]+)\s*[:=]\s*(.*?)\s*$")
 
 
-def _accepts(path: PurePosixPath) -> bool:
-    return path.suffix in {".kt", ".kts", ".yaml", ".yml", ".properties", ".env"} or (
+def accepts_secrets_source(path: PurePosixPath) -> bool:
+    return path.suffix in {".kt", ".kts", ".yaml", ".yml", ".properties", ".env", ".json", ".toml"} or (
         path.name == ".env" or path.name.startswith(".env.")
     )
 
 
 def _role(name: str) -> str | None:
     normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+    if normalized.endswith(("paginationtoken", "pagetoken", "continuationtoken")):
+        return None
     if normalized.endswith(("password", "passwd")):
         return "password"
     if normalized.endswith(("apikey", "accesskey")):
@@ -134,10 +143,21 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
             role = "recoverable-token"
         return _finding(role, path, kotlin.line(anchor), kotlin.end_line(anchor))
 
+    for annotation in kotlin.walk(source.root, "annotation"):
+        if not _SPRING_VALUE.match(kotlin.text(annotation)):
+            continue
+        for literal in kotlin.walk(annotation, "string_literal"):
+            value = kotlin.string_content(literal)
+            if value is not None:
+                placeholder = value.replace(r"\$", "$", 1)
+                finding = _configuration_finding(path, (), placeholder, kotlin.line(literal), kotlin.end_line(literal))
+                if finding:
+                    yield finding
+
     for node in kotlin.walk(source.root, "property_declaration"):
         value = kotlin.property_value(node)
         if value is not None and (finding := check(value[1], _role(value[0]), node)):
-            yield finding
+            yield replace(finding, metadata=finding.metadata | {"property_offset": str(node.start_byte)})
 
     for node in kotlin.walk(source.root, "assignment"):
         left, right = (node.child_by_field_name(side) for side in ("left", "right"))
@@ -176,14 +196,14 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
 
 
 def _configuration_finding(
-    path: str, keys: tuple[str, ...], value: str, start: int, end: int
+    path: str, keys: tuple[str, ...], value: str, start: int, end: int, *, dotenv: bool = False
 ) -> Finding | None:
     value = value.strip()
     role = _role(keys[-1]) if keys else None
     if len(keys) >= 2 and keys[-1].lower() in {"value", "default"}:
         role = _role(keys[-2])
     stripped = _CREDENTIAL_PREFIX.sub("", value).strip()
-    reference = _ENV_REFERENCE.fullmatch(stripped)
+    reference = (_DOTENV_REFERENCE if dotenv else _ENV_REFERENCE).fullmatch(stripped)
     if reference:
         fallback = reference["fallback"]
         name = reference["name"]
@@ -233,11 +253,46 @@ def _properties_entries(content: str, *, dotenv: bool) -> Iterator[tuple[tuple[s
             yield tuple(match[1].split(".")), value, index, index
 
 
+def _toml_entries(content: str) -> Iterator[tuple[tuple[str, ...], str, int, int]]:
+    document = tomllib.loads(content)
+    section: tuple[str, ...] | None = ()
+    for index, entry in enumerate(content.splitlines(), 1):
+        if table := _TOML_TABLE.fullmatch(entry):
+            section = tuple(table[1].split("."))
+            continue
+        if entry.lstrip().startswith("["):
+            section = None
+        if section is None or not (match := _TOML_KEY.match(entry)):
+            continue
+        keys = (*section, *match[1].split("."))
+        value = document
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        if type(value) in {str, int}:
+            yield keys, str(value), index, index
+
+
+def _configuration_entries(name: PurePosixPath, content: str) -> Iterator[tuple[tuple[str, ...], str, int, int]]:
+    extension = name.suffix
+    if extension == ".json":
+        json.loads(content)
+    if extension in {".yaml", ".yml", ".json"}:
+        return _yaml_entries(content)
+    if extension == ".toml":
+        return _toml_entries(content)
+    return _properties_entries(content, dotenv=_is_dotenv(name))
+
+
+def _is_dotenv(name: PurePosixPath) -> bool:
+    return name.name.startswith(".env") or name.suffix == ".env"
+
+
 def scan_secrets(snapshot: Snapshot) -> ScanResult:
-    scan = Scan(snapshot, _accepts)
+    scan = Scan(snapshot, accepts_secrets_source)
     findings = []
     for path, content in scan.files.items():
-        extension = PurePosixPath(path).suffix
+        name = PurePosixPath(path)
+        extension = name.suffix
         if extension in {".kt", ".kts"}:
             source = kotlin.KotlinFile(content)
             if source.root.has_error:
@@ -245,13 +300,22 @@ def scan_secrets(snapshot: Snapshot) -> ScanResult:
             findings.extend(_kotlin_findings(path, source))
             continue
         try:
-            entries = (
-                _yaml_entries(content) if extension in {".yaml", ".yml"}
-                else _properties_entries(content, dotenv=PurePosixPath(path).name.startswith(".env") or extension == ".env")
-            )
-            for keys, value, start, end in entries:
-                if finding := _configuration_finding(path, keys, value, start, end):
+            dotenv = _is_dotenv(name)
+            for keys, value, start, end in _configuration_entries(name, content):
+                if finding := _configuration_finding(path, keys, value, start, end, dotenv=dotenv):
                     findings.append(finding)
-        except (yaml.YAMLError, RecursionError):
-            scan.skip(path, "YAML_PARSE_ERROR", "Не удалось полностью разобрать YAML.")
+        except tomllib.TOMLDecodeError:
+            scan.skip(path, "TOML_PARSE_ERROR", "Не удалось полностью разобрать TOML.")
+        except (ValueError, RecursionError):
+            if extension == ".json":
+                scan.skip(path, "JSON_PARSE_ERROR", "Не удалось полностью разобрать JSON.")
+            elif extension == ".toml":
+                scan.skip(path, "TOML_PARSE_ERROR", "Не удалось полностью разобрать TOML.")
+            else:
+                scan.skip(path, "CONFIG_PARSE_ERROR", "Конфигурация превышает допустимую глубину.")
+        except yaml.YAMLError:
+            if extension == ".json":
+                scan.skip(path, "JSON_PARSE_ERROR", "Не удалось определить расположение значений в JSON.")
+            else:
+                scan.skip(path, "YAML_PARSE_ERROR", "Не удалось полностью разобрать YAML.")
     return scan.result("secrets", "Исходники Kotlin и текстовые конфигурации", findings)

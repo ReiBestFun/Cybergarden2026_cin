@@ -32,6 +32,20 @@ class NotifierError(Exception):
         self.message = message
 
 
+class DeliveryError(NotifierError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        outcome: Literal["failed", "retry", "unknown"] = "failed",
+        retry_after: int | None = None,
+    ):
+        super().__init__(code, message)
+        self.outcome = outcome
+        self.retry_after = retry_after
+
+
 class Channel(Protocol):
     name: str
 

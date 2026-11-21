@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
-from .api import projects, runs, workflows
+from .api import auth, ci, destinations, projects, runs, templates, workflows
 from .api.common import ApiError
 from .config import Settings
 from .db.session import Database, make_engine
@@ -18,7 +18,7 @@ from .schemas.contracts import ErrorResponse
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url, settings.data_encryption_key)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -28,12 +28,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine.dispose()
 
     app = FastAPI(title="AI Security Workflow", lifespan=lifespan)
+    app.state.settings = settings
     app.state.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     app.state.allowed_repositories = repository_allowlist(settings.allowed_repositories, settings.allow_any_repository)
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.frontend_origins,
-        allow_methods=["GET", "POST", "PATCH", "PUT"], allow_headers=["Content-Type"],
+        allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+        allow_headers=["Content-Type"],
     )
+
+    @app.middleware("http")
+    async def private_api(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     @app.exception_handler(ApiError)
     async def handle_api_error(_: Request, error: ApiError) -> JSONResponse:
@@ -58,9 +68,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.execute(text("SELECT 1"))
         return {"status": "ok", "db": "ok"}
 
+    api.include_router(auth.router)
     api.include_router(projects.router)
     api.include_router(workflows.router)
     api.include_router(runs.router)
+    api.include_router(ci.router)
+    api.include_router(templates.router)
+    api.include_router(destinations.router)
     app.include_router(api)
     return app
 

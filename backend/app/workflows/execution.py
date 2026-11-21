@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from graphlib import TopologicalSorter
@@ -10,11 +11,12 @@ from pydantic import ValidationError
 
 from ..analyzers.models import Category, ScanError, Warning, finding_key
 from ..config import Settings
-from ..integrations.repository import Allowlist, RepositorySnapshot, prepare_repository
-from ..nodes.catalog import NOTIFIER_CONFIGS, ConditionConfig
-from ..notifications import Channel, EmailChannel, NotifierError, TelegramChannel, build_message
+from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
+from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
+from ..notifications import build_message
+from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
-from ..schemas.contracts import Edge, Graph, Node
+from ..schemas.contracts import CiVerdict, Edge, Graph, Node
 from ..worker import run_scan
 from .persistence import RunProgress, error_payload
 from .validation import validate_graph
@@ -35,10 +37,23 @@ class Step:
     warning: Warning | None = None
     scan: NodeResult | None = None
     bundle: RunReport | None = None
+    notification: NotificationDraft | None = None
 
 
 def _coverage_status(report: RunReport) -> str:
     return {"succeeded": "complete", "partial": "partial", "failed": "unavailable"}[report.status]
+
+
+def evaluate_ci_gate(config: CiGateConfig, bundle: RunReport) -> CiVerdict:
+    summary = bundle.summary
+    count = summary.critical_count + (summary.high_count if config.threshold == "HIGH" else 0)
+    if count:
+        decision, reason = "blocked", "THRESHOLD_REACHED"
+    elif bundle.status != "succeeded":
+        decision, reason = "error", "SCAN_INCOMPLETE"
+    else:
+        decision, reason = "passed", "CHECKS_PASSED"
+    return CiVerdict(decision=decision, reason=reason, threshold=config.threshold, findings_at_threshold=count)
 
 
 def _condition_branch(config: ConditionConfig, bundle: RunReport) -> str:
@@ -78,7 +93,7 @@ class GraphExecution:
     def __init__(self, progress: RunProgress, settings: Settings, allowed: Allowlist):
         self.progress = progress
         self.settings = settings
-        self.allowed = allowed
+        self.allowed = allowed_repository_urls(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
         self.source = progress.claim.source
         self.prepared: RepositorySnapshot | None = None
         self.steps: dict[str, Step] = {}
@@ -93,21 +108,25 @@ class GraphExecution:
         return edge.source_port in self.steps[edge.source].ports
 
     def _execute_node(self, node: Node, edges: list[Edge], resources: ExitStack) -> Step:
-        if node.type in {"manual_trigger", "schedule_trigger"}:
+        if node.type in {"manual_trigger", "schedule_trigger", "ci_trigger"}:
             return Step(ports=("params",), preview={"trigger": self.progress.claim.trigger, "ref": self.source.get("ref")})
         if node.type == "repository":
             url, ref = self.source.get("repository_url"), self.source.get("ref")
             if not isinstance(url, str) or not isinstance(ref, str):
                 raise ScanError(Warning("INVALID_SOURCE", "В запуске отсутствуют параметры репозитория."))
-            self.prepared = resources.enter_context(prepare_repository(
+            prepared = resources.enter_context(prepare_repository(
                 url, ref, allowed=self.allowed, timeout=self.settings.repository_timeout_seconds,
                 catalog_path=self.settings.sca_catalog_path,
             ))
+            if self.progress.claim.trigger == "ci" and prepared.snapshot.sha != ref:
+                raise ScanError(Warning("CI_SHA_MISMATCH", "Полученный коммит не совпадает с SHA из CI."))
+            self.prepared = prepared
             return Step(ports=("snapshot",), preview={"commit_sha": self.sha, "files": len(self.prepared.snapshot.files)})
         if node.type in SCANS:
             assert self.prepared is not None
             outcome = run_scan(
                 SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
+                run_id=str(self.progress.claim.id),
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
@@ -122,21 +141,14 @@ class GraphExecution:
             assert bundle is not None
             branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle)
             return Step(ports=(branch,), preview={"branch": branch}, bundle=bundle)
+        if node.type == "ci_gate":
+            bundle = self.steps[edges[0].source].bundle
+            assert bundle is not None
+            gate = evaluate_ci_gate(CiGateConfig.model_validate(node.config), bundle)
+            return Step(preview=gate.model_dump())
         if node.type in NOTIFIER_CONFIGS:
             return self._notify(node, edges)
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
-
-    def _channel(self, kind: str) -> Channel:
-        settings = self.settings
-        if kind == "notify_telegram":
-            token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
-            return TelegramChannel(token, api_base=settings.telegram_api_base, timeout=settings.notify_timeout_seconds)
-        return EmailChannel(
-            settings.smtp_host, port=settings.smtp_port, security=settings.smtp_security,
-            username=settings.smtp_username,
-            password=settings.smtp_password.get_secret_value() if settings.smtp_password else None,
-            sender=settings.smtp_from, timeout=settings.notify_timeout_seconds,
-        )
 
     def _notify(self, node: Node, edges: list[Edge]) -> Step:
         bundle = next((self.steps[edge.source].bundle for edge in edges if self._active(edge)), None)
@@ -146,24 +158,19 @@ class GraphExecution:
         message = build_message(
             bundle, run_id=str(self.progress.claim.id), repository=str(self.source.get("repository_url", "")),
             app_base_url=self.settings.app_base_url, attach_json=config.attach_json,
+            max_attachment_bytes=self.settings.notify_max_attachment_bytes,
         )
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
-        try:
-            deliveries = self._channel(node.type).send(list(config.recipients), message)
-        except NotifierError as error:
-            raise ScanError(Warning(error.code, error.message)) from None
-        failed = [item for item in deliveries if item.status == "failed"]
-        preview = {
-            "channel": node.type.removeprefix("notify_"),
-            "sent": len(deliveries) - len(failed), "failed": len(failed),
-            "attachments": [item.filename for item in message.attachments],
-            "recipients": [asdict(item) for item in deliveries],
-        }
-        if failed:
-            warning = Warning("DELIVERY_FAILED", f"Не доставлено {len(failed)} из {len(deliveries)}: {failed[0].error}")
-            return Step("failed", preview=preview, warning=warning)
-        return Step(ports=("delivery",), preview=preview)
+        channel = node.type.removeprefix("notify_")
+        restricted = channel == "email" or self.settings.notify_telegram_recipients
+        allowed = allowed_recipients(self.settings, channel) if restricted else None
+        draft = NotificationDraft(channel, tuple(config.recipients), allowed, message)
+        return Step(
+            ports=("delivery",),
+            preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},
+            notification=draft,
+        )
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]
@@ -197,6 +204,7 @@ class GraphExecution:
         self.progress.finish_node(
             node.id, step.status, ports=list(step.ports), preview=step.preview, warning=step.warning,
             findings=tuple(findings), sha=self.sha if node.type == "repository" and self.sha else None,
+            notification=step.notification,
         )
 
     def execute(self) -> None:
@@ -205,7 +213,7 @@ class GraphExecution:
         except ValidationError:
             self.progress.fail(Warning("INVALID_GRAPH", "Снимок графа имеет неверный формат."))
             return
-        expected = "schedule_trigger" if self.progress.claim.trigger == "schedule" else None
+        expected = {"schedule": "schedule_trigger", "ci": "ci_trigger"}.get(self.progress.claim.trigger)
         if issues := validate_graph(graph, expected_trigger=expected):
             self.progress.fail(Warning("INVALID_GRAPH", issues[0].message))
             return
@@ -216,12 +224,22 @@ class GraphExecution:
         nodes = {node.id: node for node in graph.nodes}
         order = TopologicalSorter({
             node_id: [edge.source for edge in incoming[node_id]] for node_id in nodes
-        }).static_order()
+        })
+        order.prepare()
 
-        with ExitStack() as resources:
-            for node_id in order:
-                node = nodes[node_id]
-                self._record(node, self._run_node(node, incoming[node_id], resources))
+        with ExitStack() as resources, ThreadPoolExecutor(max_workers=self.settings.scan_parallelism) as pool:
+            while order.is_active():
+                ready = order.get_ready()
+                scans = {
+                    node_id: pool.submit(self._run_node, nodes[node_id], incoming[node_id], resources)
+                    for node_id in ready if nodes[node_id].type in SCANS
+                }
+                for node_id in ready:
+                    node = nodes[node_id]
+                    scan = scans.get(node_id)
+                    step = scan.result() if scan is not None else self._run_node(node, incoming[node_id], resources)
+                    self._record(node, step)
+                    order.done(node_id)
 
         report = merge_findings(self.sha, tuple(self.scans.values()))
         status = report.status
@@ -230,7 +248,7 @@ class GraphExecution:
         if merged.status == "failed":
             status = "failed"
             failure = next((step.warning for step in self.steps.values() if step.status == "failed"), _NO_RESULTS)
-        elif any(step.status == "failed" for step in self.steps.values()):
+        elif any(self.steps[node.id].status == "failed" for node in graph.nodes if node.type not in NOTIFIER_CONFIGS):
             status = "partial"
         payload = {"coverage": {
             "status": _coverage_status(report),
@@ -240,8 +258,11 @@ class GraphExecution:
             step = self.steps[node.id]
             if node.type == "ai_report":
                 payload["llm"] = {"status": step.status, "error": error_payload(step.warning)}
+            elif node.type == "ci_gate" and step.preview is not None:
+                payload["ci_gate"] = step.preview
             elif node.type in NOTIFIER_CONFIGS:
                 payload.setdefault("delivery", {})[node.id] = {
-                    "status": step.status, "error": error_payload(step.warning), **(step.preview or {}),
+                    "status": "queued" if step.notification else step.status, "error": error_payload(step.warning),
+                    "channel": node.type.removeprefix("notify_"),
                 }
         self.progress.finish_run(status, asdict(report.summary), payload, failure)

@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from ..notifications.email import ADDRESS
 from ..notifications.telegram import CHAT_ID
 
-from ..schemas.contracts import Input
+from ..schemas.contracts import CiThreshold, Input, Ref
 
 FIELD = Literal["summary.total", "summary.high_count", "summary.critical_count", "coverage.status"]
 OPERATOR = Literal["eq", "ne", "gt", "gte", "lt", "lte", "matches"]
@@ -24,6 +24,14 @@ class ConditionDraft(Input):
     value: OPERAND | None = None
 
 
+class CiGateConfig(Input):
+    threshold: CiThreshold = Field(default="CRITICAL", title="Блокировать начиная с")
+
+
+class CiTriggerConfig(Input):
+    branch: Ref | None = Field(default=None, title="Ветка", description="По умолчанию используется ветка проекта.")
+
+
 ChatId = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CHAT_ID.pattern)]
 EmailAddress = Annotated[str, StringConstraints(strip_whitespace=True, max_length=254, pattern=ADDRESS.pattern)]
 
@@ -40,7 +48,7 @@ class EmailConfig(Input):
     recipients: Annotated[list[EmailAddress], Field(
         min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
     )]
-    subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = Field(
+    subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200, pattern=r"^[^\r\n]*$")] | None = Field(
         default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
     )
     attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
@@ -96,12 +104,15 @@ DELIVERY = Port(id="delivery", type="delivery")
 CATALOG = {node.type: node for node in (
     definition("manual_trigger", "Ручной запуск", "Поставить запуск в очередь по кнопке.", (), (PARAMS,)),
     definition("schedule_trigger", "Расписание", "Поставить запуск в очередь по расписанию.", (), (PARAMS,)),
+    definition("ci_trigger", "GitHub Actions", "Проверить коммит, полученный из CI.", (), (PARAMS,), CiTriggerConfig),
     definition("repository", "Репозиторий", "Подготовить исходники и зафиксировать коммит.", (PARAMS,), (SNAPSHOT,)),
     definition("scan_secrets", "Secrets", "Найти встроенные секреты.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sca", "SCA", "Сопоставить зависимости с учебным справочником.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),
     definition("merge_findings", "Объединение находок", "Собрать результаты анализаторов.",
                (Port(id="results", type="scan_result", multiple=True),), (BUNDLE,)),
+    definition("ci_gate", "Порог CI", "Вернуть решение в CI по критичности находок и полноте анализа.",
+               (BUNDLE,), (), CiGateConfig),
     definition("condition", "IF / ELSE", "Выбрать ветку по сводке или покрытию.", (BUNDLE,),
                (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionConfig),
     definition("ai_report", "AI-отчёт", "Подготовить рекомендации по сохранённым находкам.", (BUNDLE,), (REPORT,)),

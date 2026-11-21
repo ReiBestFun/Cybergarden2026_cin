@@ -6,8 +6,10 @@ from fastapi import APIRouter, Query, Response
 from sqlalchemy import Select, func, select
 
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
-from ..db.models import FindingRow, NodeRun, ScanRun
+from ..db.models import FindingRow, NodeRun, Project, ScanRun
 from ..db.session import Database
+from ..nodes.catalog import NOTIFIER_CONFIGS
+from ..notifications.queue import delivery_summary
 from ..reports import NodeResult, RunReport, readable_report, submission_json
 from ..schemas.contracts import (
     FindingRead, Graph, NodeRunRead, Page, RunCreate, RunDetail, RunQueued,
@@ -15,6 +17,7 @@ from ..schemas.contracts import (
 )
 from ..workflows.queue import enqueue_manual_run
 from ..workflows.validation import validate_graph
+from .auth import CurrentUser
 from .common import ApiError, Pagination, graph_error, page
 from .projects import get_project
 from .workflows import get_workflow
@@ -32,8 +35,10 @@ class FindingFilters(Pagination):
     severity: Severity | None = None
 
 
-def _get_run(run_id: UUID, db: Database) -> ScanRun:
-    run = db.get(ScanRun, run_id)
+def _get_run(run_id: UUID, db: Database, owner_id: UUID) -> ScanRun:
+    run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
+        ScanRun.id == run_id, Project.owner_id == owner_id,
+    ))
     if run is None:
         raise ApiError(404, "RUN_NOT_FOUND", "Запуск не найден.")
     return run
@@ -41,18 +46,18 @@ def _get_run(run_id: UUID, db: Database) -> ScanRun:
 
 def _findings(run_id: UUID) -> Select[tuple[FindingRow]]:
     return select(FindingRow).where(FindingRow.run_id == run_id).order_by(
-        FindingRow.path, FindingRow.line.nulls_last(), FindingRow.id
+        FindingRow.category, FindingRow.line.nulls_last(), FindingRow.id
     )
 
 
 @router.post("/workflows/{workflow_id}/runs", status_code=202, response_model=RunQueued)
-def create_run(workflow_id: UUID, db: Database, data: RunCreate | None = None) -> ScanRun:
-    workflow = get_workflow(workflow_id, db, lock=True)
+def create_run(workflow_id: UUID, db: Database, user: CurrentUser, data: RunCreate | None = None) -> ScanRun:
+    workflow = get_workflow(workflow_id, db, user.id, lock=True)
     graph = Graph.model_validate(workflow.graph_json)
     # "Run now" works for any trigger: a scheduled workflow can also be started by hand.
     if issues := validate_graph(graph):
         raise graph_error(issues[0])
-    project = get_project(workflow.project_id, db)
+    project = get_project(workflow.project_id, db, user.id)
     ref = data.ref if data and data.ref is not None else project.default_ref
     run = enqueue_manual_run(db, project, workflow, graph, ref)
     db.commit()
@@ -60,8 +65,8 @@ def create_run(workflow_id: UUID, db: Database, data: RunCreate | None = None) -
 
 
 @router.get("/projects/{project_id}/runs", response_model=Page[RunRead])
-def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Query()]) -> dict:
-    get_project(project_id, db)
+def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Query()], user: CurrentUser) -> dict:
+    get_project(project_id, db, user.id)
     statement = select(ScanRun).where(ScanRun.project_id == project_id)
     if filters.status is not None:
         statement = statement.where(ScanRun.status == filters.status)
@@ -72,23 +77,32 @@ def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Que
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
-def get_run(run_id: UUID, db: Database) -> RunDetail:
-    run = _get_run(run_id, db)
+def get_run(run_id: UUID, db: Database, user: CurrentUser) -> RunDetail:
+    run = _get_run(run_id, db, user.id)
     graph = Graph.model_validate(run.graph_snapshot)
     nodes = {
         node.node_id: node
         for node in db.scalars(select(NodeRun).where(NodeRun.run_id == run_id))
     }
+    delivered = delivery_summary(db, run_id) if any(node.type in NOTIFIER_CONFIGS for node in graph.nodes) else {}
+    details = []
+    for node in graph.nodes:
+        if node.id not in nodes:
+            continue
+        detail = NodeRunRead.model_validate(nodes[node.id])
+        if node.id in delivered:
+            detail.output_preview = (detail.output_preview or {}) | delivered[node.id]
+        details.append(detail)
     return RunDetail(
         **RunRead.model_validate(run).model_dump(),
         graph_snapshot=graph,
-        nodes=[NodeRunRead.model_validate(nodes[node.id]) for node in graph.nodes if node.id in nodes],
+        nodes=details,
     )
 
 
 @router.get("/runs/{run_id}/findings", response_model=Page[FindingRead])
-def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()]) -> dict:
-    _get_run(run_id, db)
+def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()], user: CurrentUser) -> dict:
+    _get_run(run_id, db, user.id)
     statement = _findings(run_id)
     if filters.category is not None:
         statement = statement.where(FindingRow.category == filters.category)
@@ -98,8 +112,8 @@ def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters,
 
 
 @router.get("/runs/{run_id}/report", response_model=RunReportRead)
-def get_report(run_id: UUID, db: Database) -> RunReportRead:
-    run = _get_run(run_id, db)
+def get_report(run_id: UUID, db: Database, user: CurrentUser) -> RunReportRead:
+    run = _get_run(run_id, db, user.id)
     payload = run.report or {}
     if run.summary is None:
         statement = (
@@ -111,9 +125,10 @@ def get_report(run_id: UUID, db: Database) -> RunReportRead:
         summary = RunSummary(total=sum(counts.values()), high_count=counts.get("high", 0), critical_count=counts.get("critical", 0))
     else:
         summary = RunSummary.model_validate(run.summary)
+    delivery = (payload.get("delivery") or {}) | delivery_summary(db, run_id)
     return RunReportRead(
         status=run.status, summary=summary, coverage=payload.get("coverage", {}),
-        llm=payload.get("llm"), delivery=payload.get("delivery"), error=run.error,
+        llm=payload.get("llm"), delivery=delivery or None, error=run.error,
     )
 
 
@@ -121,18 +136,19 @@ def get_report(run_id: UUID, db: Database) -> RunReportRead:
     "/runs/{run_id}/export", response_class=Response,
     responses={200: {"content": {"application/json": {}, "text/markdown": {}}, "description": "Файл отчёта"}},
 )
-def export_run(run_id: UUID, db: Database, format: Literal["json", "markdown"] = "json") -> Response:
-    run = _get_run(run_id, db)
+def export_run(run_id: UUID, db: Database, user: CurrentUser, format: Literal["json", "markdown"] = "json") -> Response:
+    run = _get_run(run_id, db, user.id)
     if run.status in {"queued", "running"}:
         raise ApiError(409, "REPORT_NOT_READY", "Запуск ещё выполняется.")
     if run.status == "failed":
         raise ApiError(409, "REPORT_UNAVAILABLE", "Для этого запуска отчёт недоступен.")
-    rows = tuple(db.scalars(_findings(run_id)))
+    rows = sorted(db.scalars(_findings(run_id)), key=lambda row: (row.path, row.line is None, row.line or 0, row.id))
     findings = tuple(
         Finding(
             rule_id=row.rule_id, category=row.category, severity=row.severity, title=row.title,
             description=row.description, remediation=row.remediation, path=row.path, line=row.line,
-            end_line=row.end_line, evidence=row.evidence, metadata=row.details,
+            end_line=row.end_line, evidence=row.evidence, metadata=row.finding_metadata,
+            verification=row.verification,
         )
         for row in rows
     )

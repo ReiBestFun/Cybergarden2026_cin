@@ -11,6 +11,7 @@ from typing import Callable, Literal
 
 Category = Literal["secrets", "sca", "sast"]
 Severity = Literal["info", "low", "medium", "high", "critical"]
+VerificationStatus = Literal["confirmed", "needs_review", "false_positive"]
 
 
 @dataclass(frozen=True)
@@ -18,12 +19,22 @@ class Warning:
     code: str
     message: str
     path: str | None = None
+    line: int | None = None
+    field: str | None = None
+    hint: str | None = None
 
 
 class ScanError(Exception):
     def __init__(self, warning: Warning):
         super().__init__(warning.message)
         self.warning = warning
+
+
+@dataclass(frozen=True)
+class FindingVerification:
+    status: VerificationStatus
+    code: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -39,6 +50,7 @@ class Finding:
     end_line: int | None
     evidence: str
     metadata: dict[str, str]
+    verification: FindingVerification | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +94,13 @@ class Snapshot:
     sha: str
     files: dict[str, str] = field(repr=False)
     skipped: tuple[Warning, ...] = ()
+
+    def select(self, accepts: Callable[[PurePosixPath], bool]) -> Snapshot:
+        return Snapshot(
+            self.sha,
+            {path: data for path, data in self.files.items() if accepts(PurePosixPath(path))},
+            tuple(warning for warning in self.skipped if warning.path is None or accepts(PurePosixPath(warning.path))),
+        )
 
     @classmethod
     def from_directory(

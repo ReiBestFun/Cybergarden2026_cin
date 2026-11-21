@@ -47,12 +47,14 @@ type BackendCheckType = {
 const CATEGORIES: Record<string, string> = {
   manual_trigger: 'Запуск',
   schedule_trigger: 'Запуск',
+  ci_trigger: 'Запуск',
   repository: 'Источники',
   scan_secrets: 'Анализаторы',
   scan_sca: 'Анализаторы',
   scan_sast: 'Анализаторы',
   merge_findings: 'Логика',
   condition: 'Логика',
+  ci_gate: 'Логика',
   ai_report: 'AI',
   notify_telegram: 'Уведомления',
   notify_email: 'Уведомления',
@@ -86,11 +88,17 @@ const port = (id: string, type: string, multiple = false): Port => ({ id, type, 
 const MOCK_CHECK_TYPES: BackendCheckType[] = [
   { type: 'manual_trigger', label: 'Ручной запуск', description: 'Поставить запуск в очередь по кнопке.', inputs: [], outputs: [port('params', 'run_params')], config_schema: {} },
   { type: 'schedule_trigger', label: 'Расписание', description: 'Поставить запуск в очередь по расписанию.', inputs: [], outputs: [port('params', 'run_params')], config_schema: {} },
+  { type: 'ci_trigger', label: 'GitHub Actions', description: 'Проверить коммит, полученный из CI.', inputs: [], outputs: [port('params', 'run_params')], config_schema: { properties: {
+    branch: { type: 'string', title: 'Ветка', description: 'По умолчанию используется ветка проекта.' },
+  } } },
   { type: 'repository', label: 'Репозиторий', description: 'Подготовить исходники и зафиксировать коммит.', inputs: [port('params', 'run_params')], outputs: [port('snapshot', 'snapshot')], config_schema: {} },
   { type: 'scan_secrets', label: 'Secrets', description: 'Найти встроенные секреты.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'scan_sca', label: 'SCA', description: 'Сопоставить зависимости с учебным справочником.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'scan_sast', label: 'SAST', description: 'Проверить Kotlin и конфигурацию безопасности.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'merge_findings', label: 'Объединение находок', description: 'Собрать результаты анализаторов.', inputs: [port('results', 'scan_result', true)], outputs: [port('bundle', 'findings_bundle')], config_schema: {} },
+  { type: 'ci_gate', label: 'Порог CI', description: 'Вернуть решение в CI по критичности находок и полноте анализа.', inputs: [port('bundle', 'findings_bundle')], outputs: [], config_schema: { properties: {
+    threshold: { type: 'string', title: 'Блокировать начиная с', enum: ['CRITICAL', 'HIGH'], default: 'CRITICAL' },
+  } } },
   { type: 'condition', label: 'IF / ELSE', description: 'Выбрать ветку по сводке или покрытию.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('true', 'findings_bundle'), port('false', 'findings_bundle')], config_schema: { type: 'object', required: ['field', 'operator', 'value'], properties: {
     field: { type: 'string', enum: ['summary.total', 'summary.high_count', 'summary.critical_count', 'coverage.status'] },
     operator: { type: 'string', enum: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'matches'] },

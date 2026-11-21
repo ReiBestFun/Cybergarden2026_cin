@@ -1,4 +1,4 @@
-import { api, apiUrl } from './client';
+import { api, apiFile, apiUrl } from './client';
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
@@ -14,11 +14,14 @@ export type Workflow = { id: string; project_id: string; name: string; graph: Ap
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
 export type NodeStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
-export type RunError = { code: string; message: string; node_id?: string | null; field?: string | null };
+export type RunError = {
+  code: string; message: string; node_id?: string | null; field?: string | null;
+  path?: string | null; line?: number | null; hint?: string | null;
+};
 export type RunSummary = { total: number; high_count: number; critical_count: number };
 
 export type Run = {
-  id: string; project_id: string; workflow_id: string; trigger: 'manual' | 'schedule'; status: RunStatus;
+  id: string; project_id: string; workflow_id: string; trigger: 'manual' | 'schedule' | 'ci'; status: RunStatus;
   source_snapshot: Record<string, string>; commit_sha: string | null; created_at: string;
   started_at: string | null; finished_at: string | null; summary: RunSummary | null; error: RunError | null;
 };
@@ -29,12 +32,29 @@ export type NodeRun = {
 };
 export type RunDetail = Run & { graph_snapshot: ApiGraph; nodes: NodeRun[] };
 
+export type FindingVerification = {
+  status: 'confirmed' | 'needs_review' | 'false_positive';
+  code: string;
+  message: string;
+};
+
 export type Finding = {
   id: string; node_run_id: string; rule_id: string; category: 'secrets' | 'sca' | 'sast';
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; title: string; description: string; remediation: string;
   path: string; line: number | null; end_line: number | null; evidence: string; metadata: Record<string, string>;
+  verification?: FindingVerification | null;
 };
-export type RunReport = { status: RunStatus; summary: RunSummary; coverage: Record<string, JsonValue>; error: RunError | null };
+type ScanCheck = { category: Finding['category']; status: NodeStatus; warnings: RunError[] };
+type RecipientDelivery = {
+  id?: string; recipient: string; status: string; phase?: 'message' | 'attachment'; attempts?: number;
+  message_id?: string | null; attachment_id?: string | null; error_code?: string | null; error?: string | null;
+};
+type NodeDelivery = { channel?: string; status: string; error?: RunError | null; recipients?: RecipientDelivery[] };
+export type RunReport = {
+  status: RunStatus; summary: RunSummary;
+  coverage: { status?: string; checks?: Record<string, ScanCheck> }; error: RunError | null;
+  delivery?: Record<string, NodeDelivery> | null;
+};
 export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
 // Weekdays: 0 = Monday … 6 = Sunday.
 export type ScheduleSettings = {
@@ -52,6 +72,10 @@ const canonicalRepo = (url: string) => url.trim().replace(/\.git$/, '').replace(
 
 export const listProjects = () => api<Page<Project>>('/api/projects?limit=200');
 export const getProject = (id: string) => api<Project>(`/api/projects/${id}`);
+export const createProject = (data: { name: string; repository_url: string; default_ref?: string }) =>
+  api<Project>('/api/projects', { method: 'POST', json: data });
+export const updateProject = (id: string, data: Pick<Project, 'name' | 'default_ref'>) =>
+  api<Project>(`/api/projects/${id}`, { method: 'PATCH', json: data });
 
 export async function ensureProject(repositoryUrl: string, knownId?: string | null): Promise<Project> {
   const wanted = canonicalRepo(repositoryUrl);
@@ -64,7 +88,7 @@ export async function ensureProject(repositoryUrl: string, knownId?: string | nu
   const existing = (await listProjects()).items.find(p => canonicalRepo(p.repository_url) === wanted);
   if (existing) return existing;
   const name = repositoryUrl.trim().replace(/\/+$/, '').split('/').slice(-2).join('/') || 'project';
-  return api<Project>('/api/projects', { method: 'POST', json: { name, repository_url: repositoryUrl.trim() } });
+  return createProject({ name, repository_url: repositoryUrl.trim() });
 }
 
 export const listWorkflows = (projectId: string) => api<Page<Workflow>>(`/api/projects/${projectId}/workflows?limit=200`);
@@ -75,6 +99,11 @@ export const updateWorkflow = (id: string, name: string, graph: ApiGraph) =>
   api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph } });
 export const validateWorkflow = (id: string) =>
   api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {} });
+export const getSecurityWorkflow = (id: string, mode: 'local' | 'hosted' = 'local') =>
+  apiFile(`/api/workflows/${id}/security.yml?mode=${mode}`);
+export const issueCiToken = (id: string) => api<{ token: string }>(`/api/workflows/${id}/ci-token`, { method: 'POST', json: {} });
+export const startCiTest = (id: string, commitSha: string) =>
+  api<{ id: string }>(`/api/workflows/${id}/ci-test`, { method: 'POST', json: { commit_sha: commitSha } });
 export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
 export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: true } & ScheduleSettings)) =>
   api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });

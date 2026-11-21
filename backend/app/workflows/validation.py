@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
 from ..schemas.contracts import CiDecision, Graph, Issue, Node
 
-_ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast"}
+_ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast", "scan_password_hashing"}
 _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
 
 

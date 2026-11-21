@@ -550,6 +550,46 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
         assert "fixture-pass-98" not in client.get(url).text
 
 
+def test_password_hashing_node_persists_only_fast_password_digests(api, monkeypatch):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_password_hashing")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    source = """fun store(password: String) = DigestUtils.md5Hex(password)
+fun verify(rawPassword: String, stored: String) = DigestUtils.sha1Hex(rawPassword) == stored
+fun hash(password: String): ByteArray {
+    val digest = MessageDigest.getInstance("SHA-256")
+    return digest.digest(password.toByteArray())
+}
+fun checksum(file: File) = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+fun secure(password: String) = BCryptPasswordEncoder().encode(password)
+fun matches(password: String, stored: String) = Argon2PasswordEncoder.defaultsForSpringSecurity_v5_8().matches(password, stored)
+"""
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("b" * 40, {"Auth.kt": source}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+
+    base = f"/api/runs/{run_id}"
+    history = client.get(base).json()
+    assert history["status"] == "succeeded"
+    step = next(item for item in history["nodes"] if item["node_id"] == "scan")
+    assert step["type"] == scanner["type"]
+    assert step["output_preview"]["finding_count"] == 3
+    findings = client.get(f"{base}/findings").json()["items"]
+    assert [(f["metadata"]["algorithm"], f["line"]) for f in findings] == [
+        ("MD5", 1), ("SHA-1", 2), ("SHA-256", 5),
+    ]
+    exported = client.get(f"{base}/export").json()["findings"]
+    assert [(f["path"], f["line"]) for f in exported] == [("Auth.kt", 1), ("Auth.kt", 2), ("Auth.kt", 5)]
+    assert all("Argon2id" in f["remediation"] for f in exported)
+
+
 def test_queue_worker_reports_repository_failure(api, monkeypatch):
     client, sessions = api
 

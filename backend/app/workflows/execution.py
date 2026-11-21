@@ -10,7 +10,7 @@ import regex
 from pydantic import ValidationError
 
 from ..ai_reports import ReportError, explain_report
-from ..analyzers.models import Category, Finding, ScanError, Warning, finding_key
+from ..analyzers.models import Finding, ScanError, Warning, finding_key
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
@@ -18,11 +18,13 @@ from ..notifications import build_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import CiVerdict, Edge, Graph, Node
-from ..worker import run_scan
+from ..worker import Scanner, run_scan, scan_category
 from .persistence import RunProgress, error_payload
 from .validation import validate_graph
 
-SCANS: dict[str, Category] = {"scan_secrets": "secrets", "scan_sca": "sca", "scan_sast": "sast"}
+SCANS: dict[str, Scanner] = {
+    "scan_secrets": "secrets", "scan_sca": "sca", "scan_sast": "sast", "scan_password_hashing": "password_hashing",
+}
 _COMPARISONS = {"eq": eq, "ne": ne, "gt": gt, "gte": ge, "lt": lt, "lte": le}
 _INACTIVE = Warning("INACTIVE_BRANCH", "Вход находится в невыбранной ветке.")
 _UPSTREAM_FAILED = Warning("UPSTREAM_FAILED", "Вход недоступен из-за ошибки предыдущей ноды.")
@@ -236,7 +238,7 @@ class GraphExecution:
         self.steps[node.id] = step
         findings = []
         if node.type in SCANS:
-            outcome = step.scan or NodeResult(SCANS[node.type], step.status, warning=step.warning)
+            outcome = step.scan or NodeResult(scan_category(SCANS[node.type]), step.status, warning=step.warning)
             self.scans[node.id] = outcome
             if outcome.result is not None:
                 for finding in outcome.result.findings:

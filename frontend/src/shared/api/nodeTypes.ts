@@ -52,6 +52,7 @@ const CATEGORIES: Record<string, string> = {
   scan_secrets: 'Анализаторы',
   scan_sca: 'Анализаторы',
   scan_sast: 'Анализаторы',
+  scan_password_hashing: 'Анализаторы',
   merge_findings: 'Логика',
   condition: 'Логика',
   ci_gate: 'Логика',
@@ -95,6 +96,7 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
   { type: 'scan_secrets', label: 'Secrets', description: 'Найти встроенные секреты.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'scan_sca', label: 'SCA', description: 'Сопоставить зависимости с учебным справочником.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'scan_sast', label: 'SAST', description: 'Проверить Kotlin и конфигурацию безопасности.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
+  { type: 'scan_password_hashing', label: 'Хеширование паролей', description: 'Найти быстрые хеши паролей в Kotlin.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'merge_findings', label: 'Объединение находок', description: 'Собрать результаты анализаторов.', inputs: [port('results', 'scan_result', true)], outputs: [port('bundle', 'findings_bundle')], config_schema: {} },
   { type: 'ci_gate', label: 'Порог CI', description: 'Вернуть решение в CI и передать его вместе с находками в следующую ноду.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('bundle', 'findings_bundle')], config_schema: { properties: {
     threshold: { type: 'string', title: 'Блокировать начиная с', enum: ['CRITICAL', 'HIGH'], default: 'CRITICAL' },

@@ -31,7 +31,6 @@ SYSTEM_PROMPT = """Ты — помощник по безопасности ко�
 """
 
 def explain_findings(findings: list[dict], max_retries: int = 2) -> LLMReport:
-    # Подготавливаем входные данные: обогащаем их ID для LLM
     enriched_findings = []
     for f in findings:
         enriched = f.copy()
@@ -46,16 +45,13 @@ def explain_findings(findings: list[dict], max_retries: int = 2) -> LLMReport:
 
     last_errors = []
     for attempt in range(max_retries + 1):
-        print(f"[*] Запрос к LLM (попытка {attempt + 1})...")
         raw = chat(messages)
         
         report, errors = validate_response(raw, findings)
         if report is not None:
-            print("[+] Ответ прошел валидацию!")
             return report
 
         last_errors = errors
-        print(f"[-] Ошибка валидации: {errors}")
         
         if attempt < max_retries:
             messages.append({"role": "assistant", "content": raw})

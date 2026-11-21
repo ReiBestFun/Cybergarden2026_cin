@@ -12,10 +12,9 @@ if __name__ == "__main__":
     try:
         with open(input_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Извлекаем массив находок
             findings = data.get("findings", [])
             if not findings:
-                print("Входной файл не содержит находок (findings).")
+                print("Входной файл не содержит находок.")
                 sys.exit(0)
     except Exception as e:
         print(f"Ошибка чтения файла: {e}")

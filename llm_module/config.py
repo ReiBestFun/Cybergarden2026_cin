@@ -5,7 +5,7 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = "ollama"
-    llm_model: str = "qwen2.5:7b"
+    llm_model: str = "qwen3:8b"
     llm_temperature: float = 0.1
     llm_max_tokens: int = 2000
 

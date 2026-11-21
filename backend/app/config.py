@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     sca_catalog_path: Path | None = None
     repository_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     scan_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    scan_parallelism: int = Field(default=3, ge=1, le=3)
     worker_poll_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     scheduler_poll_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)
@@ -25,6 +26,11 @@ class Settings(BaseSettings):
     # Notifications. Secrets stay on the server and never enter workflow graphs.
     app_base_url: str = "http://localhost:5173"
     notify_timeout_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
+    notify_poll_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
+    notify_max_attempts: int = Field(default=4, ge=1, le=12)
+    notify_max_attachment_bytes: int = Field(default=2 * 1024 * 1024, ge=0)
+    notify_email_recipients: list[str] = Field(default_factory=list)
+    notify_telegram_recipients: list[str] = Field(default_factory=list)
     telegram_bot_token: SecretStr | None = None
     telegram_api_base: str = "https://api.telegram.org"
     smtp_host: str | None = None

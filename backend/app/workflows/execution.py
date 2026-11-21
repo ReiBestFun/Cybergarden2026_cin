@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from graphlib import TopologicalSorter
@@ -12,7 +13,8 @@ from ..analyzers.models import Category, ScanError, Warning, finding_key
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
-from ..notifications import Channel, EmailChannel, NotifierError, TelegramChannel, build_message
+from ..notifications import build_message
+from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import CiVerdict, Edge, Graph, Node
 from ..worker import run_scan
@@ -35,6 +37,7 @@ class Step:
     warning: Warning | None = None
     scan: NodeResult | None = None
     bundle: RunReport | None = None
+    notification: NotificationDraft | None = None
 
 
 def _coverage_status(report: RunReport) -> str:
@@ -123,6 +126,7 @@ class GraphExecution:
             assert self.prepared is not None
             outcome = run_scan(
                 SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
+                run_id=str(self.progress.claim.id),
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
@@ -146,18 +150,6 @@ class GraphExecution:
             return self._notify(node, edges)
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
 
-    def _channel(self, kind: str) -> Channel:
-        settings = self.settings
-        if kind == "notify_telegram":
-            token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
-            return TelegramChannel(token, api_base=settings.telegram_api_base, timeout=settings.notify_timeout_seconds)
-        return EmailChannel(
-            settings.smtp_host, port=settings.smtp_port, security=settings.smtp_security,
-            username=settings.smtp_username,
-            password=settings.smtp_password.get_secret_value() if settings.smtp_password else None,
-            sender=settings.smtp_from, timeout=settings.notify_timeout_seconds,
-        )
-
     def _notify(self, node: Node, edges: list[Edge]) -> Step:
         bundle = next((self.steps[edge.source].bundle for edge in edges if self._active(edge)), None)
         if bundle is None:
@@ -166,24 +158,17 @@ class GraphExecution:
         message = build_message(
             bundle, run_id=str(self.progress.claim.id), repository=str(self.source.get("repository_url", "")),
             app_base_url=self.settings.app_base_url, attach_json=config.attach_json,
+            max_attachment_bytes=self.settings.notify_max_attachment_bytes,
         )
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
-        try:
-            deliveries = self._channel(node.type).send(list(config.recipients), message)
-        except NotifierError as error:
-            raise ScanError(Warning(error.code, error.message)) from None
-        failed = [item for item in deliveries if item.status == "failed"]
-        preview = {
-            "channel": node.type.removeprefix("notify_"),
-            "sent": len(deliveries) - len(failed), "failed": len(failed),
-            "attachments": [item.filename for item in message.attachments],
-            "recipients": [asdict(item) for item in deliveries],
-        }
-        if failed:
-            warning = Warning("DELIVERY_FAILED", f"Не доставлено {len(failed)} из {len(deliveries)}: {failed[0].error}")
-            return Step("failed", preview=preview, warning=warning)
-        return Step(ports=("delivery",), preview=preview)
+        channel = node.type.removeprefix("notify_")
+        draft = NotificationDraft(channel, tuple(config.recipients), allowed_recipients(self.settings, channel), message)
+        return Step(
+            ports=("delivery",),
+            preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},
+            notification=draft,
+        )
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]
@@ -217,6 +202,7 @@ class GraphExecution:
         self.progress.finish_node(
             node.id, step.status, ports=list(step.ports), preview=step.preview, warning=step.warning,
             findings=tuple(findings), sha=self.sha if node.type == "repository" and self.sha else None,
+            notification=step.notification,
         )
 
     def execute(self) -> None:
@@ -236,12 +222,22 @@ class GraphExecution:
         nodes = {node.id: node for node in graph.nodes}
         order = TopologicalSorter({
             node_id: [edge.source for edge in incoming[node_id]] for node_id in nodes
-        }).static_order()
+        })
+        order.prepare()
 
-        with ExitStack() as resources:
-            for node_id in order:
-                node = nodes[node_id]
-                self._record(node, self._run_node(node, incoming[node_id], resources))
+        with ExitStack() as resources, ThreadPoolExecutor(max_workers=self.settings.scan_parallelism) as pool:
+            while order.is_active():
+                ready = order.get_ready()
+                scans = {
+                    node_id: pool.submit(self._run_node, nodes[node_id], incoming[node_id], resources)
+                    for node_id in ready if nodes[node_id].type in SCANS
+                }
+                for node_id in ready:
+                    node = nodes[node_id]
+                    scan = scans.get(node_id)
+                    step = scan.result() if scan is not None else self._run_node(node, incoming[node_id], resources)
+                    self._record(node, step)
+                    order.done(node_id)
 
         report = merge_findings(self.sha, tuple(self.scans.values()))
         status = report.status
@@ -250,7 +246,7 @@ class GraphExecution:
         if merged.status == "failed":
             status = "failed"
             failure = next((step.warning for step in self.steps.values() if step.status == "failed"), _NO_RESULTS)
-        elif any(step.status == "failed" for step in self.steps.values()):
+        elif any(self.steps[node.id].status == "failed" for node in graph.nodes if node.type not in NOTIFIER_CONFIGS):
             status = "partial"
         payload = {"coverage": {
             "status": _coverage_status(report),
@@ -264,6 +260,7 @@ class GraphExecution:
                 payload["ci_gate"] = step.preview
             elif node.type in NOTIFIER_CONFIGS:
                 payload.setdefault("delivery", {})[node.id] = {
-                    "status": step.status, "error": error_payload(step.warning), **(step.preview or {}),
+                    "status": "queued" if step.notification else step.status, "error": error_payload(step.warning),
+                    "channel": node.type.removeprefix("notify_"),
                 }
         self.progress.finish_run(status, asdict(report.summary), payload, failure)

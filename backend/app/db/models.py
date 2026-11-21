@@ -3,7 +3,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String,
+    Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, String,
     Text, Time, UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -137,3 +137,46 @@ class FindingRow(Base):
     end_line: Mapped[int | None] = mapped_column(Integer)
     evidence: Mapped[str] = mapped_column(Text)
     details: Mapped[dict[str, str]] = mapped_column("metadata", JSONB)
+
+
+class NotificationBatch(Base):
+    __tablename__ = "notification_batches"
+    __table_args__ = (
+        CheckConstraint("channel IN ('email', 'telegram')", name="ck_notification_channel"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    node_run_id: Mapped[UUID] = mapped_column(ForeignKey("node_runs.id"), unique=True)
+    channel: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    attachment_name: Mapped[str | None] = mapped_column(String(255))
+    attachment_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "recipient", name="uq_notification_recipient"),
+        CheckConstraint(
+            "status IN ('queued', 'sending', 'accepted', 'failed', 'unknown', 'cancelled')",
+            name="ck_notification_status",
+        ),
+        CheckConstraint("phase IN ('message', 'attachment')", name="ck_notification_phase"),
+        Index("ix_notification_queue", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    batch_id: Mapped[UUID] = mapped_column(ForeignKey("notification_batches.id"))
+    recipient: Mapped[str] = mapped_column(String(254))
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'queued'"))
+    phase: Mapped[str] = mapped_column(String(16), server_default=text("'message'"))
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[UUID | None]
+    message_id: Mapped[str | None] = mapped_column(String(255))
+    attachment_id: Mapped[str | None] = mapped_column(String(255))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)

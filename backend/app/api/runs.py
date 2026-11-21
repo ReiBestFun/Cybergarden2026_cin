@@ -8,6 +8,8 @@ from sqlalchemy import Select, func, select
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
 from ..db.models import FindingRow, NodeRun, ScanRun
 from ..db.session import Database
+from ..nodes.catalog import NOTIFIER_CONFIGS
+from ..notifications.queue import delivery_summary
 from ..reports import NodeResult, RunReport, readable_report, submission_json
 from ..schemas.contracts import (
     FindingRead, Graph, NodeRunRead, Page, RunCreate, RunDetail, RunQueued,
@@ -79,10 +81,19 @@ def get_run(run_id: UUID, db: Database) -> RunDetail:
         node.node_id: node
         for node in db.scalars(select(NodeRun).where(NodeRun.run_id == run_id))
     }
+    delivered = delivery_summary(db, run_id) if any(node.type in NOTIFIER_CONFIGS for node in graph.nodes) else {}
+    details = []
+    for node in graph.nodes:
+        if node.id not in nodes:
+            continue
+        detail = NodeRunRead.model_validate(nodes[node.id])
+        if node.id in delivered:
+            detail.output_preview = (detail.output_preview or {}) | delivered[node.id]
+        details.append(detail)
     return RunDetail(
         **RunRead.model_validate(run).model_dump(),
         graph_snapshot=graph,
-        nodes=[NodeRunRead.model_validate(nodes[node.id]) for node in graph.nodes if node.id in nodes],
+        nodes=details,
     )
 
 
@@ -111,9 +122,10 @@ def get_report(run_id: UUID, db: Database) -> RunReportRead:
         summary = RunSummary(total=sum(counts.values()), high_count=counts.get("high", 0), critical_count=counts.get("critical", 0))
     else:
         summary = RunSummary.model_validate(run.summary)
+    delivery = (payload.get("delivery") or {}) | delivery_summary(db, run_id)
     return RunReportRead(
         status=run.status, summary=summary, coverage=payload.get("coverage", {}),
-        llm=payload.get("llm"), delivery=payload.get("delivery"), error=run.error,
+        llm=payload.get("llm"), delivery=delivery or None, error=run.error,
     )
 
 

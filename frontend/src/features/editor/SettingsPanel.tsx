@@ -59,6 +59,7 @@ export function SettingsPanel() {
             <div className="node-run">
               <h4>Последний запуск: {nodeRun.status}</h4>
               {nodeRun.error && <p className="notice error">{nodeRun.error.message}</p>}
+              {nodeRun.error?.hint && <p className="muted">{nodeRun.error.hint}</p>}
               {nodeRun.output_preview && <pre>{JSON.stringify(nodeRun.output_preview, null, 2)}</pre>}
             </div>
           )}

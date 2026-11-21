@@ -48,7 +48,7 @@ class EmailConfig(Input):
     recipients: Annotated[list[EmailAddress], Field(
         min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
     )]
-    subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = Field(
+    subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200, pattern=r"^[^\r\n]*$")] | None = Field(
         default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
     )
     attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")

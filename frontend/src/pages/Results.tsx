@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Download } from 'lucide-react';
 import { getLastRunId } from '../features/editor/defaults';
 import { errorMessage } from '../shared/api/client';
-import { exportUrl, getRun, listFindings, type Finding, type RunDetail } from '../shared/api/workflows';
+import { exportUrl, getReport, getRun, listFindings, type Finding, type RunDetail, type RunReport } from '../shared/api/workflows';
 
 // The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
 const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
@@ -28,12 +28,17 @@ export function Results() {
   const [params] = useSearchParams();
   const runId = params.get('run') ?? getLastRunId();
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [report, setReport] = useState<RunReport | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [category, setCategory] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!runId) return;
+    setRun(null);
+    setReport(null);
+    setFindings([]);
+    setError(null);
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
@@ -42,8 +47,11 @@ export function Results() {
         if (cancelled) return;
         setRun(detail);
         if (detail.status === 'queued' || detail.status === 'running') { timer = setTimeout(load, 1500); return; }
-        const page = await listFindings(runId);
-        if (!cancelled) setFindings(page.items);
+        const [page, details] = await Promise.all([listFindings(runId), getReport(runId)]);
+        if (!cancelled) {
+          setFindings(page.items);
+          setReport(details);
+        }
       } catch (e) {
         if (!cancelled) setError(errorMessage(e));
       }
@@ -54,6 +62,7 @@ export function Results() {
 
   const shown = category ? findings.filter(f => f.category === category) : findings;
   const finished = run && run.status !== 'queued' && run.status !== 'running';
+  const checks = Object.entries(report?.coverage.checks ?? {}).filter(([, check]) => check.warnings.length);
 
   return (
     <div className="page">
@@ -75,7 +84,32 @@ export function Results() {
 
       {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
       {error && <div className="notice error">{error}</div>}
-      {run?.error && <div className="notice error">{run.error.message}</div>}
+      {run?.error && (
+        <div className="notice error">
+          {run.error.message}{run.error.hint && <p>{run.error.hint}</p>}
+        </div>
+      )}
+
+      {checks.length > 0 && (
+        <div className="panel">
+          <h3>Диагностика проверок</h3>
+          {checks.map(([id, check]) => (
+            <section key={id}>
+              <h4>{CATEGORY_LABEL[check.category]}</h4>
+              <ul>
+                {check.warnings.map((warning, index) => (
+                  <li key={warning.code + '-' + index}>
+                    {warning.message}{' '}
+                    {warning.path && <code>{warning.path}{warning.line ? ':' + warning.line : ''}</code>}
+                    {!warning.path && warning.field && <code>{warning.field}</code>}
+                    {warning.hint && <p className="muted">{warning.hint}</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
 
       {run?.summary && (
         <div className="summary-grid">

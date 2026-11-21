@@ -29,6 +29,9 @@ class Error(BaseModel):
     message: str
     node_id: str | None = None
     field: str | None = None
+    path: str | None = None
+    line: int | None = None
+    hint: str | None = None
 
 
 class ErrorResponse(BaseModel):

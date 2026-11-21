@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 from sqlalchemy import select, update
@@ -14,7 +15,7 @@ class ClaimLost(Exception):
 
 
 def error_payload(warning: Warning | None) -> dict | None:
-    return {"code": warning.code, "message": warning.message} if warning else None
+    return {key: value for key, value in asdict(warning).items() if value is not None} if warning else None
 
 
 class RunProgress:

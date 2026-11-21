@@ -100,6 +100,14 @@ def _cell(value: str) -> str:
     return value.replace("|", "&#124;").replace("[", "&#91;").replace("]", "&#93;").replace(chr(96), "&#96;")
 
 
+def _warning_text(warning: Warning) -> str:
+    location = warning.path or warning.field or ""
+    if warning.path and warning.line is not None:
+        location += f":{warning.line}"
+    text = warning.message + (f" ({location})" if location else "")
+    return _cell(f"{text} {warning.hint}" if warning.hint else text)
+
+
 def readable_report(report: RunReport) -> str:
     status = {"succeeded": "Проверка завершена", "partial": "Проверка завершена частично", "failed": "Проверка не выполнена"}
     lines = ["# Отчёт статического анализа", ""]
@@ -117,10 +125,9 @@ def readable_report(report: RunReport) -> str:
                 f"файлов просмотрено {coverage.files_scanned}, пропущено {coverage.files_skipped}. {coverage.scope}."
             )
             for warning in result.warnings:
-                path = f" ({_cell(warning.path)})" if warning.path else ""
-                lines.append(f"  - {warning.message}{path}")
+                lines.append(f"  - {_warning_text(warning)}")
         else:
-            message = node.warning.message if node.warning else "Проверка пропущена."
+            message = _warning_text(node.warning) if node.warning else "Проверка пропущена."
             lines.append(f"- **{category}** — {message}")
     if not report.findings:
         if report.status == "succeeded":

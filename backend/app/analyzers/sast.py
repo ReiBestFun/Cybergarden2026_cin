@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Iterator
 
+import yaml
 from tree_sitter import Node
+from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from . import kotlin as kt
 from .models import Finding, Scan, ScanResult, Severity, Snapshot, Warning
@@ -36,6 +38,11 @@ _RULES: dict[str, tuple[Severity, str, str, str]] = {
         "Идентификатор из запроса используется для чтения записи без подтверждённой проверки владельца.",
         "Ограничьте выборку или ответ идентификатором владельца из аутентифицированного пользователя.",
     ),
+    "actuator-exposure": (
+        "high", "Публичный доступ к чувствительному Actuator",
+        "Конфигурация включает чувствительный management endpoint, для которого действует permitAll.",
+        "Ограничьте список публикуемых endpoints и защитите служебные маршруты отдельной политикой доступа.",
+    ),
 }
 _MAPPING_METHODS = {f"{method.title()}Mapping": method for method in ("GET", "POST", "PUT", "DELETE", "PATCH")}
 _AUTH_ANNOTATIONS = {"PreAuthorize", "Secured", "RolesAllowed", "PostAuthorize"}
@@ -56,6 +63,7 @@ _SQL_SINKS: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
      frozenset({"createQuery", "createNativeQuery", "createSQLQuery"})),
     (frozenset({"Statement"}), frozenset({"executeQuery", "executeUpdate", "executeLargeUpdate", "execute", "addBatch"})),
     (frozenset({"Connection"}), frozenset({"prepareStatement", "prepareCall", "nativeSQL"})),
+    (frozenset({"JdbcClient"}), frozenset({"sql"})),
 )
 # Values of these types cannot carry SQL syntax, so they do not propagate injection.
 _SAFE_TYPES = frozenset({
@@ -82,6 +90,15 @@ _SPRING_DATA_REPOSITORIES = frozenset({
     "ReactiveCrudRepository", "CoroutineCrudRepository",
 })
 _FUNCTION_SCOPE = frozenset({"function_declaration", "class_declaration"})
+_SPRING_CONFIGURATION = {"application.yml", "application.yaml", "application.properties"}
+_ACTUATOR_METHODS = {
+    "env": "GET", "heapdump": "GET", "logfile": "GET",
+    "configprops": "GET", "mappings": "GET", "threaddump": "GET", "shutdown": "POST",
+}
+
+
+def accepts_sast_source(path: PurePosixPath) -> bool:
+    return path.suffix == ".kt" or path.name in _SPRING_CONFIGURATION
 
 
 def _short(node: Node) -> str:
@@ -350,14 +367,14 @@ def _sql_injection_findings(
 ) -> list[Finding]:
     """Follow request values from handlers through up to three calls into query APIs."""
     found: dict[tuple[str, int], Finding] = {}
-    seen: set[tuple[int, frozenset[str]]] = set()
+    seen: dict[tuple[str, int, frozenset[str]], int] = {}
 
     def visit(function: Function, tainted: frozenset[str], depth: int) -> None:
         tainted = tainted - function.scalar_parameters
-        key = (function.node.id, tainted)
-        if not tainted or key in seen:
+        key = (function.path, function.node.id, tainted)
+        if not tainted or seen.get(key, depth + 1) <= depth:
             return
-        seen.add(key)
+        seen[key] = depth
         for node, _, sql, _ in _sql_calls(function, all_sinks=True):
             if _uses_names(function.source, sql, tainted):
                 finding = _sql_finding(function, node, sql)
@@ -455,6 +472,62 @@ class AccessRule:
             else:
                 pattern += "/" + re.escape(part).replace(r"\*", "[^/]*")
         return re.fullmatch(pattern, route.path) is not None
+
+
+def _spring_configuration(path: str, content: str) -> Iterator[dict[str, str]]:
+    if path.endswith(".properties"):
+        values = {}
+        for line in content.splitlines():
+            if match := re.fullmatch(r"\s*([\w.-]+)\s*[:=]\s*(.*?)\s*", line):
+                values[match[1]] = match[2]
+        yield values
+        return
+
+    def flatten(node, prefix: str = "", depth: int = 0) -> Iterator[tuple[str, str]]:
+        if depth > 8:
+            return
+        if isinstance(node, MappingNode):
+            for key, value in node.value:
+                if isinstance(key, ScalarNode):
+                    key_path = f"{prefix}.{key.value}" if prefix else key.value
+                    if key_path == "management" or key_path.startswith("management."):
+                        yield from flatten(value, key_path, depth + 1)
+        elif isinstance(node, SequenceNode) and all(isinstance(item, ScalarNode) for item in node.value):
+            yield prefix, ",".join(item.value for item in node.value)
+        elif isinstance(node, ScalarNode):
+            yield prefix, node.value
+
+    for document in yaml.compose_all(content, Loader=yaml.SafeLoader):
+        yield dict(flatten(document))
+
+
+def _actuator_findings(scan: Scan, rules: list[AccessRule]) -> Iterator[Finding]:
+    if not rules:
+        return
+    for path, content in scan.files.items():
+        if PurePosixPath(path).name not in _SPRING_CONFIGURATION:
+            continue
+        try:
+            for properties in _spring_configuration(path, content):
+                include = set(map(str.strip, properties.get("management.endpoints.web.exposure.include", "").split(",")))
+                exclude = set(map(str.strip, properties.get("management.endpoints.web.exposure.exclude", "").split(",")))
+                base_path = properties.get("management.endpoints.web.base-path", "/actuator").rstrip("/")
+                if not base_path.startswith("/") or "*" in exclude or properties.get("management.server.port"):
+                    continue
+                for endpoint, method in _ACTUATOR_METHODS.items():
+                    if endpoint in exclude or ("*" not in include and endpoint not in include):
+                        continue
+                    if (
+                        properties.get(f"management.endpoint.{endpoint}.enabled") == "false"
+                        or properties.get(f"management.endpoint.{endpoint}.access") == "none"
+                    ):
+                        continue
+                    route = Route(method, f"{base_path}/{endpoint}", rules[0].function)
+                    access = next((rule for rule in rules if rule.matches(route)), None)
+                    if access and access.action == "permitAll":
+                        yield _finding("actuator-exposure", access.function, access.node)
+        except (yaml.YAMLError, RecursionError):
+            scan.skip(path, "SPRING_CONFIG_PARSE_ERROR", "Не удалось проверить конфигурацию Spring Boot.")
 
 
 def _security(functions: list[Function], scan: Scan) -> tuple[list[AccessRule], bool]:
@@ -675,13 +748,17 @@ def _spring_data(kind: str, supertypes: dict[str, list[str]], depth: int = 0) ->
 
 
 def scan_sast(snapshot: Snapshot) -> ScanResult:
-    scan = Scan(snapshot, lambda path: path.suffix == ".kt")
+    scan = Scan(snapshot, accepts_sast_source)
+    if scan.files and not any(path.endswith(".kt") for path in scan.files):
+        scan.warn(Warning("NO_KOTLIN_SOURCES", "В снимке нет доступных файлов Kotlin."), incomplete=True)
     findings: list[Finding] = []
     functions: list[Function] = []
     routes: list[Route] = []
     index: dict[tuple[str, str], list[Function]] = {}
     supertypes: dict[str, list[str]] = {}
     for path, data in scan.files.items():
+        if not path.endswith(".kt"):
+            continue
         source = kt.KotlinFile(data)
         if source.root.has_error:
             scan.skip(path, "KOTLIN_PARSE_ERROR", "Файл Kotlin разобран частично.")
@@ -699,6 +776,7 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
     findings.extend(_sql_injection_findings(functions, index, implementations))
 
     rules, cors = _security(functions, scan)
+    findings.extend(_actuator_findings(scan, rules))
     if cors:
         findings.extend(_cors_findings(functions, routes, rules, scan))
     for route in routes:

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from graphlib import TopologicalSorter
@@ -108,6 +109,7 @@ class GraphExecution:
             assert self.prepared is not None
             outcome = run_scan(
                 SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
+                run_id=str(self.progress.claim.id),
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
@@ -216,12 +218,22 @@ class GraphExecution:
         nodes = {node.id: node for node in graph.nodes}
         order = TopologicalSorter({
             node_id: [edge.source for edge in incoming[node_id]] for node_id in nodes
-        }).static_order()
+        })
+        order.prepare()
 
-        with ExitStack() as resources:
-            for node_id in order:
-                node = nodes[node_id]
-                self._record(node, self._run_node(node, incoming[node_id], resources))
+        with ExitStack() as resources, ThreadPoolExecutor(max_workers=self.settings.scan_parallelism) as pool:
+            while order.is_active():
+                ready = order.get_ready()
+                scans = {
+                    node_id: pool.submit(self._run_node, nodes[node_id], incoming[node_id], resources)
+                    for node_id in ready if nodes[node_id].type in SCANS
+                }
+                for node_id in ready:
+                    node = nodes[node_id]
+                    scan = scans.get(node_id)
+                    step = scan.result() if scan is not None else self._run_node(node, incoming[node_id], resources)
+                    self._record(node, step)
+                    order.done(node_id)
 
         report = merge_findings(self.sha, tuple(self.scans.values()))
         status = report.status

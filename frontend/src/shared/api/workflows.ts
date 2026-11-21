@@ -14,7 +14,10 @@ export type Workflow = { id: string; project_id: string; name: string; graph: Ap
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
 export type NodeStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
-export type RunError = { code: string; message: string; node_id?: string | null; field?: string | null };
+export type RunError = {
+  code: string; message: string; node_id?: string | null; field?: string | null;
+  path?: string | null; line?: number | null; hint?: string | null;
+};
 export type RunSummary = { total: number; high_count: number; critical_count: number };
 
 export type Run = {
@@ -34,7 +37,11 @@ export type Finding = {
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; title: string; description: string; remediation: string;
   path: string; line: number | null; end_line: number | null; evidence: string; metadata: Record<string, string>;
 };
-export type RunReport = { status: RunStatus; summary: RunSummary; coverage: Record<string, JsonValue>; error: RunError | null };
+type ScanCheck = { category: Finding['category']; status: NodeStatus; warnings: RunError[] };
+export type RunReport = {
+  status: RunStatus; summary: RunSummary;
+  coverage: { status?: string; checks?: Record<string, ScanCheck> }; error: RunError | null;
+};
 export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
 // Weekdays: 0 = Monday … 6 = Sunday.
 export type ScheduleSettings = {

@@ -624,6 +624,12 @@ def test_sensitive_logging_node_reports_only_exposed_values(api, monkeypatch):
     log.warn("header {}", request.headers[HttpHeaders.AUTHORIZATION])
     val sink = LoggerFactory.getLogger("audit")
     sink.error("credential {}", request.password)
+    log.warn("{}", request.headers[HttpHeaders.Authorization] ?: "missing")
+    log.info("{}", HttpHeaders.Authorization)
+    val sessionToken = "prefix-$tokenId"
+    log.trace("{}", sessionToken)
+    val userPassword = "***"
+    log.info("{}", userPassword)
 }'''
 
     @contextmanager
@@ -639,10 +645,11 @@ def test_sensitive_logging_node_reports_only_exposed_values(api, monkeypatch):
     assert [(f["path"], f["line"]) for f in findings] == [
         ("src/Auth.kt", 3), ("src/Auth.kt", 4), ("src/Auth.kt", 6),
         ("src/Auth.kt", 13), ("src/Auth.kt", 16), ("src/Auth.kt", 18),
+        ("src/Auth.kt", 19), ("src/Auth.kt", 22),
     ]
     assert all(f["rule_id"] == "sast.sensitive-logging" and f["severity"] == "high" for f in findings)
     report = client.get(f"{base}/export").json()["findings"]
-    assert [f["line"] for f in report] == [3, 4, 6, 13, 16, 18]
+    assert [f["line"] for f in report] == [3, 4, 6, 13, 16, 18, 19, 22]
     assert all(f["remediation"] for f in report)
     for url in (base, f"{base}/findings", f"{base}/export", f"{base}/export?format=markdown"):
         assert "synthetic-private-canary" not in client.get(url).text

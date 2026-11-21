@@ -35,10 +35,15 @@ def _logger(source: kt.KotlinFile, receiver: Node) -> bool:
     ) in {("LoggerFactory", "getLogger"), ("KotlinLogging", "logger"), ("LogManager", "getLogger")})
 
 
+def _header_constant(node: Node) -> bool:
+    return kt.text(node).rsplit(".", 2)[-2:] in (
+        ["HttpHeaders", "AUTHORIZATION"], ["HttpHeaders", "Authorization"],
+    )
+
+
 def _authorization_key(source: kt.KotlinFile, key: Node) -> bool:
     key = source.resolve(key)
-    return ((kt.literal(key) or "").lower() == "authorization"
-            or kt.text(key).rsplit(".", 2)[-2:] == ["HttpHeaders", "AUTHORIZATION"])
+    return (kt.literal(key) or "").lower() == "authorization" or _header_constant(key)
 
 
 def _exposes_credential(source: kt.KotlinFile, arguments: list[Node]) -> bool:
@@ -50,11 +55,13 @@ def _exposes_credential(source: kt.KotlinFile, arguments: list[Node]) -> bool:
         if value is not None:
             pending.append(value)
             origin = source.resolve(value)
+            if _header_constant(origin):
+                return False
             transform = kt.call(origin)
             if transform and _words(transform.name).split("_")[0] in {"mask", "masked", "redact", "redacted", "sanitize"}:
                 return False
-            if origin.type in kt.STRING_TYPES and kt.literal(origin) is None:
-                # Inspect the substitutions, which may already be redacted.
+            literal = kt.literal(origin)
+            if literal is not None and (not literal.strip("*") or literal.lower() in {"redacted", "[redacted]"}):
                 return False
         return _sensitive_name(name)
 
@@ -68,7 +75,7 @@ def _exposes_credential(source: kt.KotlinFile, arguments: list[Node]) -> bool:
             if identifier(kt.text(node), node):
                 return True
         elif node.type == "navigation_expression" and parts:
-            if kt.text(parts[-1]) != "AUTHORIZATION" and _sensitive_name(kt.text(parts[-1])):
+            if not _header_constant(node) and _sensitive_name(kt.text(parts[-1])):
                 return True
         elif node.type in kt.STRING_TYPES:
             for index, part in enumerate(parts):
@@ -78,7 +85,7 @@ def _exposes_credential(source: kt.KotlinFile, arguments: list[Node]) -> bool:
                     name = re.match(r"\w+", kt.text(parts[index + 1]))
                     if name and identifier(name.group(), part):
                         return True
-        elif node.type == "parenthesized_expression" or (node.type == "binary_expression" and kt.operator(node) == "+"):
+        elif node.type == "parenthesized_expression" or (node.type == "binary_expression" and kt.operator(node) in {"+", "?:"}):
             pending.extend(parts)
         elif node.type == "index_expression" and len(parts) == 2:
             if _authorization_key(source, parts[1]):

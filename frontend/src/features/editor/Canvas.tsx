@@ -63,7 +63,7 @@ export function Canvas({ editable = true }: { editable?: boolean }) {
       } 
       nodeTypes={nodeTypes}
       onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)}>
-      <Background color="#dfd4c8" gap={22} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
+      <Background color="#dfd4c8" gap={20} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
     </ReactFlow>
     {editable && <div className="canvas-hint">Соединяйте порты одного типа. Запуск выполняется на бэкенде, статусы нод обновляются по ходу.</div>}
   </main>;

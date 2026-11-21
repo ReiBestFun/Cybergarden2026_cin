@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { BookMarked, CalendarDays, ChevronDown, ChevronUp, LockKeyhole, UsersRound, Workflow } from 'lucide-react';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
 import { copyTemplate, editTemplate, listTemplates, publishDraft, removeTemplate, type WorkflowTemplate } from '../shared/api/templates';
@@ -7,6 +8,30 @@ import { ensureProject, listProjects, type Page, type Project } from '../shared/
 import { useWorkspace } from '../app/workspaceContext';
 
 const PAGE_SIZE = 12;
+
+function GraphPreview({ graph }: Pick<WorkflowTemplate, 'graph'>) {
+  if (!graph.nodes.length) return null;
+  const points = graph.nodes.map(node => node.position);
+  const left = Math.min(...points.map(p => p.x)) - 32;
+  const top = Math.min(...points.map(p => p.y)) - 28;
+  const width = Math.max(...points.map(p => p.x)) - left + 158;
+  const height = Math.max(...points.map(p => p.y)) - top + 80;
+  const positions = new Map(graph.nodes.map(node => [node.id, node.position]));
+  return <div className="graph-preview" aria-hidden="true">
+    <svg viewBox={[left, top, width, height].join(' ')}>
+      {graph.edges.map(edge => {
+        const from = positions.get(edge.source), to = positions.get(edge.target);
+        if (!from || !to) return null;
+        const x = from.x + 130, y = from.y + 26, end = to.y + 26, mid = (x + to.x) / 2;
+        return <path key={edge.id} d={`M ${x} ${y} C ${mid} ${y}, ${mid} ${end}, ${to.x} ${end}`} />;
+      })}
+      {graph.nodes.map(node => <g key={node.id} transform={`translate(${node.position.x} ${node.position.y})`}>
+        <rect width="130" height="52" rx="10" />
+        <circle cx="22" cy="26" r="8" /><line x1="46" x2="108" y1="21" y2="21" /><line x1="46" x2="84" y1="32" y2="32" />
+      </g>)}
+    </svg>
+  </div>;
+}
 
 export function Templates() {
   const { workspace, workspaces, withWorkspaceLock } = useWorkspace();
@@ -127,22 +152,28 @@ export function Templates() {
       <div className="page-heading"><h1>Шаблоны сценариев</h1><Link className="btn secondary" to="/editor">Открыть редактор</Link></div>
       {catalogError && <div className="notice error" role="alert">{catalogError}</div>}
       {!page && !catalogError && <p role="status">Загружаем шаблоны…</p>}
-      {page?.total === 0 && <p className="muted">Сохраните сценарий как шаблон в редакторе.</p>}
+      {page?.total === 0 && <div className="empty-state"><BookMarked size={32} /><h2>Пока нет шаблонов</h2><p className="muted">Сохраните сценарий как шаблон в редакторе.</p></div>}
+      <div className="template-grid">
       {page?.items.map(template => {
         const selected = selectedId === template.id;
         const names = new Map(template.graph.nodes.map(node => [node.id, types.find(type => type.kind === node.type)?.label ?? node.type]));
-        return <article className="panel template-card" key={template.id}>
-          <div className="page-heading">
-            <div><h2>{template.name}</h2><p className="muted">{template.can_edit ? 'Личный черновик' : 'Командный шаблон'} · {template.graph.nodes.length} нод · {new Date(template.created_at).toLocaleDateString('ru-RU')}</p></div>
+        return <article className="panel template-card" data-expanded={selected} key={template.id}>
+          <GraphPreview graph={template.graph} />
+          <div className="template-overview">
+            <span className="template-scope">{template.can_edit ? <LockKeyhole size={14} /> : <UsersRound size={14} />}
+              {template.can_edit ? 'Личный черновик' : 'Командный шаблон'}</span>
+            <h2>{template.name}</h2>
+            {template.description && <p className="template-description">{template.description}</p>}
+            <div className="template-meta"><span><Workflow size={14} />Блоков: {template.graph.nodes.length}</span>
+              <span><CalendarDays size={14} />{new Date(template.created_at).toLocaleDateString('ru-RU')}</span></div>
             <button className="btn secondary" aria-expanded={selected} disabled={busy} onClick={() => {
               setSelectedId(selected ? '' : template.id);
               setEditing(null);
               setCopyError('');
-            }}>{selected ? 'Свернуть' : 'Просмотреть'}</button>
+            }}>{selected ? 'Свернуть' : 'Просмотреть'}{selected ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>
           </div>
-          {template.description && <p className="template-description">{template.description}</p>}
           {selected && editing?.id === template.id && (
-            <form className="account-form" onSubmit={event => void update(event)}>
+            <form className="account-form template-details" onSubmit={event => void update(event)}>
               <label>Название<input value={editing.name} maxLength={120} required
                 onChange={event => setEditing({ ...editing, name: event.target.value })} /></label>
               <label>Описание<textarea value={editing.description} maxLength={1000}
@@ -154,10 +185,10 @@ export function Templates() {
               </div>
             </form>
           )}
-          {selected && editing?.id !== template.id && <>
-            <ul className="template-connections">
+          {selected && editing?.id !== template.id && <div className="template-details">
+            {template.graph.edges.length > 0 && <section><h3>Связи сценария</h3><ul className="template-connections">
               {template.graph.edges.map(edge => <li key={edge.id}>{names.get(edge.source)} <span className="muted">{edge.source_port} →</span> {names.get(edge.target)}</li>)}
-            </ul>
+            </ul></section>}
             {template.schedule && <p className="muted">Параметры расписания будут скопированы. Включить расписание можно в редакторе.</p>}
             {template.can_edit && <div className="toolbar-actions">
               {!workspace.personal && workspace.role === 'owner' && template.draft_source_workspace_id &&
@@ -167,6 +198,7 @@ export function Templates() {
               <button className="btn secondary" disabled={busy} onClick={() => void remove(template)}>Удалить</button>
             </div>}
             {destination && <form className="template-panel" onSubmit={event => void submit(event, template)}>
+              <h3>Создать копию сценария</h3>
               {canCopyToTeam && personal ?
                 <label>Пространство для копии<select disabled={busy} value={destination.id} onChange={event => {
                   setCopyError('');
@@ -184,9 +216,10 @@ export function Templates() {
               {copyError && <p className="notice error" role="alert">{copyError}</p>}
               <button className="btn primary" disabled={busy}>{busy ? 'Копирование…' : 'Скопировать и открыть'}</button>
             </form>}
-          </>}
+          </div>}
         </article>;
       })}
+      </div>
       {page && page.total > PAGE_SIZE && <div className="toolbar-actions">
         <button className="btn secondary" disabled={offset === 0 || busy} onClick={() => setOffset(offset - PAGE_SIZE)}>Назад</button>
         <button className="btn secondary" disabled={offset + PAGE_SIZE >= page.total || busy} onClick={() => setOffset(offset + PAGE_SIZE)}>Дальше</button>

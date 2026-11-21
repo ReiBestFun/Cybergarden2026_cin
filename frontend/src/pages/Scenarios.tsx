@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Plus, Workflow as WorkflowIcon } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { ArrowUpRight, Cable, Layers3, Plus, ScanLine, Workflow as WorkflowIcon } from 'lucide-react';
 import { errorMessage } from '../shared/api/client';
 import { listProjects, listWorkflows, type Project, type Workflow } from '../shared/api/workflows';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
@@ -51,22 +51,22 @@ export function Scenarios() {
       </div>
       {error && <div className="notice error">{error}</div>}
       <div className="summary-grid">
-        <div className="panel"><span className="muted">Сценарии</span><h2>{workflows?.length ?? '…'}</h2></div>
-        <div className="panel"><span className="muted">Доступные анализаторы</span><h2>{analyzers}</h2></div>
-        <div className="panel"><span className="muted">Бэкенд</span><h2>{source === 'api' ? 'Подключён' : 'Недоступен'}</h2></div>
+        <div className="panel"><Layers3 size={20} /><span>Сценарии</span><h2>{workflows?.length ?? '…'}</h2></div>
+        <div className="panel"><ScanLine size={20} /><span>Анализаторы</span><h2>{analyzers}</h2></div>
+        <div className="panel"><Cable size={20} /><span>Каталог проверок</span><h2>{source === 'api' ? 'Онлайн' : 'Офлайн'}</h2></div>
       </div>
       {workflows?.length === 0 && !error && (
         <div className="panel">В этом пространстве пока нет сценариев.</div>
       )}
       {workflows?.map(w => (
-        <div key={w.id} className="panel workflow-card" onClick={() => nav(`/editor?workflow=${w.id}`)}>
-          <WorkflowIcon size={24} />
+        <Link key={w.id} className="panel workflow-card" to={`/editor?workflow=${w.id}`}>
+          <span className="resource-icon"><WorkflowIcon size={22} /></span>
           <div>
             <strong>{w.name}</strong>
             <p className="muted">{w.project.repository_url} · {w.graph.nodes.length} нод · изменён {new Date(w.updated_at).toLocaleString('ru-RU')}</p>
           </div>
-          <span className="tag">Сохранён</span>
-        </div>
+          <ArrowUpRight size={18} aria-hidden="true" />
+        </Link>
       ))}
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { errorMessage } from '../shared/api/client';
 import { listProjects, listRuns, type Project, type Run } from '../shared/api/workflows';
 import { useWorkspace } from '../app/workspaceContext';
@@ -41,7 +41,7 @@ export function History() {
             <tbody>
               {runs.map(r => (
                 <tr key={r.id} className="clickable" onClick={() => nav(`/results?run=${r.id}`)}>
-                  <td>{new Date(r.created_at).toLocaleString('ru-RU')}</td>
+                  <td><Link to={`/results?run=${r.id}`} onClick={event => event.stopPropagation()}>{new Date(r.created_at).toLocaleString('ru-RU')}</Link></td>
                   <td>{r.project.name}</td>
                   <td>{TRIGGER_LABEL[r.trigger]}</td>
                   <td><span className={`tag run-${r.status}`}>{STATUS_LABEL[r.status]}</span></td>

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { ChevronDown, Plus, X } from 'lucide-react';
+import { ChevronDown, Layers3, Plus, X } from 'lucide-react';
 import { errorMessage } from '../shared/api/client';
 import { createWorkspace, type Workspace } from '../shared/api/workspaces';
 
@@ -28,7 +28,7 @@ export function WorkspaceSwitcher({ activeId, workspaces, onChange, onCreated, l
   }
 
   return <div className="workspace-switcher">
-    <label htmlFor="active-workspace">Рабочее пространство</label>
+    <label htmlFor="active-workspace"><Layers3 size={16} aria-hidden="true" />Рабочее пространство</label>
     <div className="workspace-switcher-controls">
       <div className="workspace-select">
         <select id="active-workspace" value={activeId} onChange={event => onChange(event.target.value)} disabled={busy || locked}>

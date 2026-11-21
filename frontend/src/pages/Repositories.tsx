@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { ArrowUpRight, FolderGit2, GitBranch, Pencil, Plus, Workflow } from 'lucide-react';
 import { useEditorStore } from '../features/editor/store';
 import { setLastRunId } from '../features/editor/defaults';
 import { useWorkspace } from '../app/workspaceContext';
@@ -16,6 +17,7 @@ export function Repositories() {
   const [url, setUrl] = useState('');
   const [ref, setRef] = useState('main');
   const [editing, setEditing] = useState<Project | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -58,6 +60,7 @@ export function Repositories() {
   }
 
   function resetForm() {
+    setFormOpen(false);
     setEditing(null);
     setName('');
     setUrl('');
@@ -65,6 +68,8 @@ export function Repositories() {
   }
 
   function edit(project: Project) {
+    setMoving(null);
+    setFormOpen(true);
     setEditing(project);
     setName(project.name);
     setUrl(project.repository_url);
@@ -106,40 +111,48 @@ export function Repositories() {
   return (
     <div className="page">
       <div className="page-heading">
-        <h1>Репозитории</h1>
-        <Link to="/scenarios" className="btn secondary">Сценарии</Link>
+        <div><h1>Репозитории</h1><p className="muted">Проекты GitHub в пространстве «{workspace.name}».</p></div>
+        {workspace.role === 'owner' && !formOpen && <button className="btn primary" disabled={busy}
+          onClick={() => { setFormOpen(true); setMoving(null); setError(''); setNotice(''); }}>
+          <Plus size={17} /> Добавить репозиторий
+        </button>}
       </div>
-      {workspace.role === 'owner' && <form className="panel account-form" onSubmit={event => void save(event)}>
+      {formOpen && workspace.role === 'owner' && <form className="panel account-form" onSubmit={event => void save(event)}>
         <h2>{editing ? 'Настройки репозитория' : 'Добавить репозиторий'}</h2>
         <div className="account-fields">
-          <label>Название<input value={name} onChange={event => setName(event.target.value)} required maxLength={120} /></label>
+          <label>Название<input autoFocus value={name} onChange={event => setName(event.target.value)} required maxLength={120} /></label>
           <label>URL GitHub<input value={url} onChange={event => setUrl(event.target.value)} type="url" required maxLength={2048}
             readOnly={!!editing} placeholder="https://github.com/owner/repository" /></label>
           <label>Ветка по умолчанию<input value={ref} onChange={event => setRef(event.target.value)} required maxLength={255} /></label>
         </div>
         <div className="toolbar-actions">
           <button className="btn primary" disabled={busy}>{editing ? 'Сохранить изменения' : 'Добавить'}</button>
-          {editing && <button className="btn secondary" type="button" onClick={resetForm} disabled={busy}>Отмена</button>}
+          <button className="btn secondary" type="button" onClick={resetForm} disabled={busy}>Отмена</button>
         </div>
       </form>}
       {notice && <p className="notice success" role="status">{notice}</p>}
       {error && <p className="notice error" role="alert">{error}</p>}
       {projects === null && !error && <p className="muted">Загрузка репозиториев…</p>}
-      {projects?.length === 0 && !error && <p className="muted">В этом пространстве пока нет репозиториев.</p>}
+      {projects?.length === 0 && !error && !formOpen && <div className="empty-state">
+        <FolderGit2 size={32} aria-hidden="true" /><h2>Пока нет репозиториев</h2>
+        <p className="muted">{workspace.role === 'owner' ? 'Добавьте проект с GitHub, чтобы создать для него сценарий проверки.' : 'Здесь появятся проекты, которые добавит владелец пространства.'}</p>
+      </div>}
       {projects?.map(project => (
         <section className="panel account-row" key={project.id}>
-          <div>
-            <h3>{project.name}</h3>
-            <p className="muted">{project.repository_url} · <code>{project.default_ref}</code></p>
+          <div className="repo-identity"><span className="resource-icon"><FolderGit2 size={23} /></span>
+            <div><h2>{project.name}</h2><div className="repo-meta">
+              <span>{project.repository_url.replace(/^https:\/\/github\.com\//, '')}</span>
+              <span className="branch-chip"><GitBranch size={13} />{project.default_ref}</span>
+            </div></div>
           </div>
           {workspace.role === 'owner' && <div className="toolbar-actions">
-            <button className="btn secondary" onClick={() => edit(project)} disabled={busy}>Изменить</button>
+            <button className="btn secondary" onClick={() => edit(project)} disabled={busy}><Pencil size={14} />Изменить</button>
             {workspace.personal && targets.length > 0 && <button className="btn secondary" disabled={busy}
-              onClick={() => { setMoving(project); setTargetId(targets.length === 1 ? targets[0].id : ''); setError(''); setNotice(''); }}>
-              Перенести в команду
+              onClick={() => { resetForm(); setMoving(project); setTargetId(targets.length === 1 ? targets[0].id : ''); setError(''); setNotice(''); }}>
+              <ArrowUpRight size={15} />Перенести в команду
             </button>}
             <button className="btn primary" onClick={() => { newWorkflow(undefined, project); navigate('/editor'); }}>
-              Создать сценарий
+              <Workflow size={15} />Создать сценарий
             </button>
           </div>}
         </section>

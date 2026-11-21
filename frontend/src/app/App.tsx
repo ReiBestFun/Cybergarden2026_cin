@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { ReactFlowProvider } from '@xyflow/react';
-import { BookMarked, FolderGit2, Github, ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon, KeyRound, LogOut, UserRound } from 'lucide-react';
+import { BookMarked, FolderGit2, Github, ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon, KeyRound, LogOut, Menu, X, UserRound, UsersRound, ScanLine, ArrowRight } from 'lucide-react';
 import { Editor } from '../features/editor/Editor';
 import { Scenarios } from '../pages/Scenarios';
 import { Results } from '../pages/Results';
@@ -39,6 +39,7 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
   const refreshCatalog = useNodeTypesStore(s => s.refresh);
   const navigate = useNavigate();
   const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [logoutError, setLogoutError] = useState('');
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -116,14 +117,18 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
 
   return (
     <div className="app-shell">
-      <nav className="app-nav">
+      <nav className="app-nav" aria-label="Основная навигация" data-open={menuOpen}>
         <div className="brand">
           <div className="brand-mark">
             <ShieldCheck size={21} />
           </div>
           CyberFlow
         </div>
-        <div className="nav-links">
+        <button type="button" className="menu-button" aria-controls="app-links" aria-expanded={menuOpen}
+          onClick={() => setMenuOpen(open => !open)}>{menuOpen ? <X size={18} /> : <Menu size={18} />}Меню</button>
+        <div className="nav-links" id="app-links" onClick={event => {
+          if ((event.target as Element).closest('a')) setMenuOpen(false);
+        }}>
           <NavLink to="/" end>
             <FolderGit2 size={18} /> Репозитории
           </NavLink>
@@ -149,10 +154,10 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
             <UserRound size={18} /> Профиль
           </NavLink>
           {workspace && !workspace.personal && workspace.role === 'owner' &&
-            <NavLink to="/team"><UserRound size={18} /> Настройки команды</NavLink>}
+            <NavLink to="/team"><UsersRound size={18} /> Настройки команды</NavLink>}
         </div>
         <div className="nav-footer account-nav-footer">
-          <span>@{user.github_login}</span>
+          <div className="account-identity"><span className="account-avatar" aria-hidden="true">{user.github_login.slice(0, 1).toUpperCase()}</span><span>@{user.github_login}</span></div>
           {logoutError && <p role="alert">{logoutError}</p>}
           <button className="btn secondary" onClick={() => void signOut()} disabled={leaving}>
             <LogOut size={15} /> {leaving ? 'Выход…' : 'Выйти'}
@@ -243,31 +248,43 @@ function SessionGate() {
   const loginUrl = apiUrl('/api/auth/github/start?' + new URLSearchParams({ next }));
 
   return (
-    <main className="login-screen">
-      <section className="panel login-card" aria-labelledby="login-title">
-        <span className="brand-mark"><ShieldCheck size={28} /></span>
-        <h1 id="login-title">CyberFlow</h1>
-        <p className="muted">Проверяйте репозитории и сохраняйте сценарии в личном кабинете.</p>
-        {loginError && <p className="notice error" role="alert">{loginError}</p>}
-        {user === undefined ? <p role="status">Проверяем сессию…</p> : error ? (
-          <>
-            <p className="notice error" role="alert">{error}</p>
-            <button className="btn secondary" onClick={() => { setUser(undefined); setError(''); setAttempt(value => value + 1); }}>
-              Повторить
-            </button>
-          </>
-        ) : (
-          <a className="btn primary" href={loginUrl} onClick={event => {
-            if (teamId && location.hash) {
-              try { rememberInvitation(teamId, location.hash); }
-              catch {
-                event.preventDefault();
-                setError('Разрешите хранилище вкладки для возврата к приглашению после входа через GitHub.');
+    <main className="login-screen sign-in">
+      <div className="sign-in-layout">
+        <div className="sign-in-visual">
+          <div className="brand"><span className="brand-mark"><ShieldCheck size={23} /></span>CyberFlow</div>
+          <div className="sign-in-flow">
+            <h2>Как устроена проверка</h2>
+            <ol>
+              <li><FolderGit2 /><div><strong>Репозиторий</strong><small>Код из GitHub</small></div></li>
+              <li><ScanLine /><div><strong>Сценарий</strong><small>Набор проверок</small></div></li>
+              <li><FileSearch /><div><strong>Отчёт</strong><small>Результаты запуска</small></div></li>
+            </ol>
+          </div>
+        </div>
+        <section className="login-card" aria-labelledby="login-title">
+          <h1 id="login-title">Вход в CyberFlow</h1>
+          <p className="muted">Войдите с аккаунтом GitHub, чтобы открыть свои репозитории, сценарии и результаты проверок.</p>
+          {loginError && <p className="notice error" role="alert">{loginError}</p>}
+          {user === undefined ? <p role="status">Проверяем сессию…</p> : error ? (
+            <>
+              <p className="notice error" role="alert">{error}</p>
+              <button className="btn secondary" onClick={() => { setUser(undefined); setError(''); setAttempt(value => value + 1); }}>
+                Повторить
+              </button>
+            </>
+          ) : (
+            <a className="btn primary" href={loginUrl} onClick={event => {
+              if (teamId && location.hash) {
+                try { rememberInvitation(teamId, location.hash); }
+                catch {
+                  event.preventDefault();
+                  setError('Разрешите хранилище вкладки для возврата к приглашению после входа через GitHub.');
+                }
               }
-            }
-          }}><Github size={19} /> Войти через GitHub</a>
-        )}
-      </section>
+            }}><Github size={19} /> Войти через GitHub <ArrowRight size={17} /></a>
+          )}
+        </section>
+      </div>
     </main>
   );
 }

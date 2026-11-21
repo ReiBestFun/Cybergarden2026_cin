@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Finding, Warning
-from ..db.models import FindingRow, NodeRun, Project, ScanRun
+from ..db.models import FindingRow, NodeRun, Project, ScanRun, WorkspaceDeliverySetting
 from ..nodes.catalog import CATALOG
 from ..notifications.queue import NotificationDraft, enqueue_notification
 from ..schemas.contracts import NodeStatus, RunStatus
@@ -40,6 +40,11 @@ class RunProgress:
     def __init__(self, sessions: sessionmaker[Session], claim: ClaimedRun):
         self.sessions = sessions
         self.claim = claim
+
+    def delivery_settings(self, channel: str) -> WorkspaceDeliverySetting | None:
+        with self.sessions() as db:
+            workspace_id = db.scalar(select(Project.workspace_id).where(Project.id == self.claim.project_id))
+            return db.get(WorkspaceDeliverySetting, (workspace_id, channel)) if workspace_id is not None else None
 
     def _owned(self):
         return (

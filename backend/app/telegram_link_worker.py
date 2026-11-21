@@ -44,7 +44,8 @@ def consume_start(db: Session, message: dict, settings: Settings, bot_name: str)
         return
     chat_id = str(chat["id"])
     link.token_hash = None
-    if settings.notify_telegram_recipients and chat_id not in allowed_recipients(settings, "telegram"):
+    allowed = allowed_recipients(settings, "telegram")
+    if allowed is not None and chat_id not in allowed:
         return
     key = telegram_chat_key(require_cipher(db.get_bind().dialect), link.owner_id, chat_id)
     label = ("@" + chat["username"] if chat.get("username") else

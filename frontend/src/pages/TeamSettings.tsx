@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useWorkspace } from '../app/workspaceContext';
 import { api, errorMessage } from '../shared/api/client';
 import type { Workspace } from '../shared/api/workspaces';
+import { WorkspaceDeliverySettings } from './WorkspaceDeliverySettings';
 
 type Role = Workspace['role'];
 type Member = { id: string; github_login: string; role: Role };
@@ -79,5 +80,7 @@ export function TeamSettings({ userId }: { userId: string }) {
           }}>Удалить</button>
         </div>
       </div>)}
-    </section></main>;
+    </section>
+    <WorkspaceDeliverySettings />
+  </main>;
 }

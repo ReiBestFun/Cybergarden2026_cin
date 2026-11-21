@@ -253,6 +253,7 @@ def test_template_is_portable_and_schedule_stays_disabled(api):
     graph = analysis_graph("schedule_trigger")
     graph["nodes"].append(node("email", "notify_email", {
         "credential_id": str(UUID(int=5)), "recipients": ["user@example.org"], "subject": "Private subject", "attach_json": False,
+        "use_workspace_settings": True,
     }))
     graph["edges"].append(edge("deliver", "merge", "bundle", "email", "report"))
     workflow_id = create_workflow(client, project_id, graph)

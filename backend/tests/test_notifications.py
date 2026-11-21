@@ -35,6 +35,37 @@ from backend.tests.test_api import ORIGIN, api, create_project, create_workflow,
 TOKEN = "123456:TEST-token-value"
 
 
+def test_workspace_delivery_settings_hide_secrets_and_enforce_membership(api, monkeypatch):
+    client, _ = api
+    workspace = client.post("/api/workspaces", json={"name": "Команда доставки"}).json()["id"]
+    path = f"/api/workspaces/{workspace}/delivery"
+    client.app.state.settings.notify_email_recipients = ["team@example.org", "second@example.org"]
+    assert client.get(path).json() == {"email": None, "telegram": None}
+    value = {"version": 0, "recipients": ["team@example.org"], "credentials": {"username": "smtp-user", "secret": "fixture-smtp-secret"}}
+    changed = client.patch(path + "/email", json=value)
+    assert changed.status_code == 200 and changed.json() == {"version": 1, "recipients": ["team@example.org"], "has_credentials": True}
+    assert "fixture-smtp-secret" not in client.get(path).text and "smtp-user" not in client.get(path).text
+    assert client.patch(path + "/email", json=value).status_code == 409
+    assert client.patch(path + "/email", json={"version": 1, "recipients": ["outside@example.org"]}).status_code == 422
+    assert client.patch(path + "/email", json={"version": 1, "recipients": ["team@example.org"]}).json()["has_credentials"]
+    second = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    other_path = f"/api/workspaces/{second}/delivery"
+    other_settings = client.patch(other_path + "/email", json={
+        "version": 0, "recipients": ["second@example.org"],
+        "credentials": {"username": "other-smtp-user", "secret": "other-smtp-secret"},
+    })
+    assert other_settings.json() == {"version": 1, "recipients": ["second@example.org"], "has_credentials": True}
+    assert client.get(path).json()["email"]["recipients"] == ["team@example.org"]
+    invitation = client.post(f"/api/workspaces/{workspace}/invitations", json={"role": "member"}).json()["token"]
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get(path).status_code == 404
+        assert other.post(f"/api/workspaces/{workspace}/join", json={"token": invitation}).status_code == 200
+        assert other.get(path).status_code == 403
+        assert other.patch(path + "/email", json=value).status_code == 403
+        assert other.get(other_path).status_code == 404
+
+
 def report() -> RunReport:
     return RunReport("f" * 40, "succeeded", (), (
         Finding("secret.password", "secrets", "high", "Встроенный пароль", "Пароль в коде.", "Вынесите в окружение.",
@@ -276,6 +307,90 @@ def _prepare_sources(monkeypatch):
         yield RepositorySnapshot(Snapshot("b" * 40, {"App.kt": 'val password = "fixture-auth-83"'}), None)
 
     monkeypatch.setattr(execution, "prepare_repository", prepared)
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_workspace_delivery_uses_latest_credentials_and_rechecks_queued_recipient(api, monkeypatch, removed):
+    client, sessions = api
+    settings = client.app.state.settings
+    settings.smtp_host = "127.0.0.1"
+    settings.smtp_from = "cyberflow@localhost"
+    settings.notify_email_recipients = ["team@example.org", "new@example.org"]
+    team = client.post("/api/workspaces", json={"name": "Командная почта"}).json()["id"]
+    path = f"/api/workspaces/{team}/delivery/email"
+    client.patch(path, json={"version": 0, "recipients": ["team@example.org"], "credentials": {
+        "username": "old", "secret": "old-password",
+    }}).raise_for_status()
+    second = client.post("/api/workspaces", json={"name": "Вторая командная почта"}).json()["id"]
+    client.patch(f"/api/workspaces/{second}/delivery/email", json={
+        "version": 0, "recipients": ["new@example.org"], "credentials": {"username": "other", "secret": "other-password"},
+    }).raise_for_status()
+    project = client.post("/api/projects", json={
+        "name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team,
+    }).json()["id"]
+    graph = _graph(("notify_email", {"use_workspace_settings": True, "recipients": ["unused-invalid-address"]}))
+    workflow = create_workflow(client, project, graph.model_dump())
+    response = client.post(f"/api/workflows/{workflow}/runs")
+    assert response.status_code == 202
+    run_id = response.json()["id"]
+    with sessions.begin() as db:
+        db.get(ScanRun, UUID(run_id)).created_at = datetime(1980, 1, 1, tzinfo=UTC)
+    _prepare_sources(monkeypatch)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    client.patch(path, json={"version": 1, "recipients": ["new@example.org" if removed else "team@example.org"], "credentials": {
+        "username": "new", "secret": "new-password",
+    }}).raise_for_status()
+    sent = []
+
+    def simulate_send(channel, recipient, message, **kwargs):
+        sent.append((channel._username, channel._password, recipient))
+        return "fixture-id"
+
+    monkeypatch.setattr(EmailChannel, "send_one", simulate_send)
+    assert process_next(sessions, settings)
+    [delivery] = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"]
+    if removed:
+        assert not sent and delivery["error_code"] == "WORKSPACE_RECIPIENT_REMOVED"
+    else:
+        assert sent == [("new", "new-password", "team@example.org")] and delivery["status"] == "accepted"
+
+
+def test_team_telegram_requires_confirmation_and_uses_workspace_token(api, telegram_api, monkeypatch):
+    client, sessions = api
+    settings = client.app.state.settings
+    settings.telegram_bot_token = SecretStr(TOKEN)
+    settings.telegram_api_base = telegram_api
+    settings.notify_telegram_recipients = []
+    team = client.post("/api/workspaces", json={"name": "Командный Telegram"}).json()["id"]
+    path = f"/api/workspaces/{team}/delivery/telegram"
+    chat_id = "-1001"
+    config = {"version": 0, "recipients": [chat_id], "credentials": {"secret": TOKEN}}
+    rejected = client.patch(path, json=config)
+    assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "TELEGRAM_DESTINATION_UNVERIFIED"
+    destination = client.post("/api/telegram-destinations", json={"label": "Канал команды", "chat_id": chat_id}).json()
+    destination_path = f"/api/telegram-destinations/{destination['id']}"
+    client.post(destination_path + "/challenge").raise_for_status()
+    code = re.search(r"\b[0-9]{8}\b", json.loads(_FakeTelegram.calls[-1][2])["text"])[0]
+    client.post(destination_path + "/verify", json={"code": code}).raise_for_status()
+    assert client.patch(path, json=config).json() == {"version": 1, "recipients": [chat_id], "has_credentials": True}
+    assert TOKEN not in client.get(f"/api/workspaces/{team}/delivery").text
+
+    project = client.post("/api/projects", json={
+        "name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team,
+    }).json()["id"]
+    graph = _graph(("notify_telegram", {"use_workspace_settings": True, "attach_json": False}))
+    workflow = create_workflow(client, project, graph.model_dump())
+    run_id = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+    with sessions.begin() as db:
+        db.get(ScanRun, UUID(run_id)).created_at = datetime(1980, 1, 1, tzinfo=UTC)
+    _FakeTelegram.calls.clear()
+    settings.telegram_bot_token = None
+    _prepare_sources(monkeypatch)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    assert process_next(sessions, settings)
+    [delivery] = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"]
+    assert delivery["status"] == "accepted"
+    assert [json.loads(body)["chat_id"] for _, _, body in _FakeTelegram.calls] == [chat_id]
 
 
 @pytest.mark.parametrize("failure", [None, "repository", "delivery"])

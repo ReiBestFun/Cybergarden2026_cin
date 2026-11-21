@@ -51,6 +51,7 @@ def _reusable_graph(graph_json: dict) -> dict:
         if node.type in NOTIFIER_CONFIGS:
             node.config.pop("recipients", None)
             node.config.pop("subject", None)
+            node.config.pop("use_workspace_settings", None)
         elif node.type == "ci_trigger":
             node.config.pop("branch", None)
     return checked_draft(graph)

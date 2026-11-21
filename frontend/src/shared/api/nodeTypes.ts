@@ -115,11 +115,13 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
   } } },
   { type: 'ai_report', label: 'AI-отчёт', description: 'Подготовить рекомендации по сохранённым находкам.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('report', 'report')], config_schema: {} },
   { type: 'notify_telegram', label: 'Telegram', description: 'Разослать отчёт в чаты Telegram.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    use_workspace_settings: { type: 'boolean', title: 'Получатели и реквизиты команды', default: false },
     credential_id: { type: 'string', title: 'Учётные данные' },
     recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'chat_id или @username канала, по одному в строке.' },
     attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
   } } },
   { type: 'notify_email', label: 'Почта', description: 'Разослать отчёт по электронной почте.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    use_workspace_settings: { type: 'boolean', title: 'Получатели и реквизиты команды', default: false },
     credential_id: { type: 'string', title: 'Учётные данные' },
     recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'Адреса почты, по одному в строке.' },
     subject: { type: 'string', title: 'Тема письма', description: 'Если пусто, тема формируется автоматически.' },

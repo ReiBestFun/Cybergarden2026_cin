@@ -13,6 +13,7 @@ from .analyzers.models import ScanError
 from .config import Settings
 from .credentials import resolve_credential
 from .db.encryption import check_storage_key
+from .db.models import WorkspaceDeliverySetting
 from .db.session import make_engine
 from .notifications.base import DeliveryError, NotifierError
 from .notifications.destinations import verified_telegram_recipients
@@ -46,7 +47,7 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
         now = datetime.now(UTC)
         recovered = expire_deliveries(db, now)
         job = claim_delivery(db, now, lease_seconds=max(60, settings.notify_timeout_seconds * 12))
-        unverified = job is not None and job.channel == "telegram" and not verified_telegram_recipients(
+        unverified = job is not None and job.settings_workspace_id is None and job.channel == "telegram" and not verified_telegram_recipients(
             db, job.owner_id, [job.recipient],
         )
     for delivery in recovered:
@@ -64,11 +65,20 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
             raise DeliveryError("PROJECT_UNOWNED", "Назначьте владельца проекта перед отправкой отчётов.")
         if unverified:
             raise DeliveryError("TELEGRAM_DESTINATION_UNVERIFIED", "Подтвердите этот Telegram-чат в профиле владельца проекта.")
-        restricted = job.channel == "email" or settings.notify_telegram_recipients
-        if restricted and job.recipient not in allowed_recipients(settings, job.channel):
+        allowed = allowed_recipients(settings, job.channel)
+        if allowed is not None and job.recipient not in allowed:
             raise DeliveryError("RECIPIENT_NOT_ALLOWED", "Получатель не входит в разрешённый список сервера.")
         credential = None
-        if job.credential_id is not None and job.project_id is not None:
+        if job.settings_workspace_id is not None:
+            if job.settings_workspace_id != job.workspace_id:
+                raise DeliveryError("WORKSPACE_DELIVERY_CHANGED", "Проект больше не принадлежит пространству этого уведомления.")
+            with sessions() as db:
+                policy = db.get(WorkspaceDeliverySetting, (job.settings_workspace_id, job.channel))
+                if policy is None or job.recipient not in policy.recipients:
+                    raise DeliveryError("WORKSPACE_RECIPIENT_REMOVED", "Получатель удалён из настроек команды.")
+                if policy.secret is not None:
+                    credential = CredentialValue(secret=policy.secret, username=policy.username)
+        elif job.credential_id is not None and job.project_id is not None:
             with sessions() as db:
                 credential = resolve_credential(db, settings, job.project_id, job.credential_id,
                                                 "smtp" if job.channel == "email" else "telegram")

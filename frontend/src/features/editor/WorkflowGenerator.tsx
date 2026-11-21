@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Bot, X } from 'lucide-react';
 import { errorMessage } from '../../shared/api/client';
 import { generateWorkflow, type GeneratedWorkflow } from '../../shared/api/workflows';
-import { browserTimeZone } from './defaults';
 import { useEditorStore } from './store';
 
 export function WorkflowGenerator() {
@@ -25,7 +24,7 @@ export function WorkflowGenerator() {
     setError('');
     setCandidate(null);
     try {
-      const draft = await generateWorkflow(description.trim(), browserTimeZone(), controller.signal);
+      const draft = await generateWorkflow(description.trim(), useEditorStore.getState().profileTimezone, controller.signal);
       if (controller.signal.aborted) return;
       const editor = useEditorStore.getState();
       if (editor.nodes.length || editor.workflowId || editor.busy) setCandidate(draft);

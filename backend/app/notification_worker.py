@@ -12,15 +12,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from .analyzers.models import ScanError
 from .config import Settings
 from .credentials import resolve_credential
+from .db.encryption import check_storage_key
 from .db.session import make_engine
 from .notifications.base import DeliveryError, NotifierError
+from .notifications.destinations import verified_telegram_recipients
 from .notifications.email import EmailChannel
 from .notifications.queue import ClaimedDelivery, allowed_recipients, claim_delivery, expire_deliveries, finish_delivery
 from .notifications.telegram import TelegramChannel
 from .schemas.credentials import CredentialValue
-
-log = logging.getLogger(__name__)
-
+from .technical_log import log_event
 
 def _send(job: ClaimedDelivery, settings: Settings, credential: CredentialValue | None) -> str | None:
     if job.channel == "email":
@@ -44,15 +44,28 @@ def _send(job: ClaimedDelivery, settings: Settings, credential: CredentialValue 
 def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
     with sessions.begin() as db:
         now = datetime.now(UTC)
-        expire_deliveries(db, now)
+        recovered = expire_deliveries(db, now)
         job = claim_delivery(db, now, lease_seconds=max(60, settings.notify_timeout_seconds * 12))
+        unverified = job is not None and job.channel == "telegram" and not verified_telegram_recipients(
+            db, job.owner_id, [job.recipient],
+        )
+    for delivery in recovered:
+        log_event("notification_worker", "delivery.recover", delivery.status, level=logging.WARNING,
+                  run_id=delivery.run_id, node_run_id=delivery.node_run_id, delivery_id=delivery.id)
     if job is None:
         return False
+    log_event("notification_worker", "delivery.claim", "sending", run_id=job.run_id, node_run_id=job.node_run_id,
+              delivery_id=job.id, phase=job.phase)
 
     provider_id = None
     error = None
     try:
-        if job.recipient not in allowed_recipients(settings, job.channel):
+        if job.owner_id is None:
+            raise DeliveryError("PROJECT_UNOWNED", "Назначьте владельца проекта перед отправкой отчётов.")
+        if unverified:
+            raise DeliveryError("TELEGRAM_DESTINATION_UNVERIFIED", "Подтвердите этот Telegram-чат в профиле владельца проекта.")
+        restricted = job.channel == "email" or settings.notify_telegram_recipients
+        if restricted and job.recipient not in allowed_recipients(settings, job.channel):
             raise DeliveryError("RECIPIENT_NOT_ALLOWED", "Получатель не входит в разрешённый список сервера.")
         credential = None
         if job.credential_id is not None and job.project_id is not None:
@@ -66,15 +79,13 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
         error = DeliveryError(failure.code, failure.message)
     except ScanError as failure:
         error = DeliveryError(failure.warning.code, failure.warning.message)
-    except Exception as failure:
-        log.error("Delivery %s %s stopped with %s", job.id, job.phase, type(failure).__name__)
+    except Exception:
         error = DeliveryError("DELIVERY_OUTCOME_UNKNOWN", "Отправка завершилась без подтверждения.", outcome="unknown")
     with sessions.begin() as db:
-        stored = finish_delivery(db, job, provider_id=provider_id, error=error, max_attempts=settings.notify_max_attempts)
-    if not stored:
-        log.warning("Delivery %s %s has already expired", job.id, job.phase)
-    elif error:
-        log.info("Delivery %s %s: %s", job.id, job.phase, error.code)
+        status = finish_delivery(db, job, provider_id=provider_id, error=error, max_attempts=settings.notify_max_attempts)
+    level = logging.WARNING if status is None or error is not None else logging.INFO
+    log_event("notification_worker", "delivery.finish", status or "claim_lost", level=level,
+              run_id=job.run_id, node_run_id=job.node_run_id, delivery_id=job.id, phase=job.phase)
     return True
 
 
@@ -82,9 +93,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Отправляет отчёты из очереди PostgreSQL.")
     parser.add_argument("--once", action="store_true", help="Обработать не более одной попытки.")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings()
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url, settings.data_encryption_key)
+    with engine.connect() as connection:
+        check_storage_key(connection)
     sessions = sessionmaker(engine)
     stop = Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -94,7 +106,7 @@ def main() -> int:
             try:
                 processed = process_next(sessions, settings)
             except SQLAlchemyError:
-                log.error("Could not access the notification queue")
+                log_event("notification_worker", "delivery.queue", "failed", level=logging.ERROR)
                 if args.once:
                     return 1
                 processed = False
@@ -108,4 +120,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except Exception:
+        log_event("notification_worker", "process.run", "failed", level=logging.ERROR)
+        exit_code = 1
+    raise SystemExit(exit_code)

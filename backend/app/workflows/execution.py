@@ -156,7 +156,7 @@ class GraphExecution:
             assert self.prepared is not None
             outcome = run_scan(
                 SCANNER_NODES[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
-                run_id=str(self.progress.claim.id),
+                run_id=self.progress.claim.id,
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
@@ -209,7 +209,9 @@ class GraphExecution:
             explanation = (upstream.preview or {}).get("text") or "AI-рекомендации недоступны."
             message = replace(message, text=message.text + "\n\n" + explanation)
         channel = node.type.removeprefix("notify_")
-        draft = NotificationDraft(channel, tuple(config.recipients), allowed_recipients(self.settings, channel), message)
+        restricted = channel == "email" or self.settings.notify_telegram_recipients
+        allowed = allowed_recipients(self.settings, channel) if restricted else None
+        draft = NotificationDraft(channel, tuple(config.recipients), allowed, message)
         return Step(
             ports=("delivery",),
             preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},

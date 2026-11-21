@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from .models import Category, ScanResult, Snapshot
 from .password_hashing import accepts_password_source, scan_password_hashing
@@ -16,13 +16,13 @@ from .sensitive_logging import accepts_logging_source, scan_sensitive_logging
 class Scanner:
     category: Category
     accepts: Callable[[PurePosixPath], bool]
-    analyze: Callable[[Snapshot, Path | None], ScanResult]
+    analyze: Callable[[Snapshot, VulnerabilityCatalog | None], ScanResult]
 
 
-def _scan_dependencies(snapshot: Snapshot, catalog: Path | None) -> ScanResult:
+def _scan_dependencies(snapshot: Snapshot, catalog: VulnerabilityCatalog | None) -> ScanResult:
     if catalog is None:
         raise catalog_missing()
-    return scan_sca(snapshot, VulnerabilityCatalog.from_file(catalog))
+    return scan_sca(snapshot, catalog)
 
 
 SCANNERS = {

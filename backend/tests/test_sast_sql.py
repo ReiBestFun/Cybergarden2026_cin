@@ -1,6 +1,7 @@
 """SQL injection through JPA/JDBC APIs, Spring request binding and calls across classes."""
 
 from backend.app.analyzers import Snapshot, scan_sast
+from backend.app.analyzers.verification import verify_findings
 
 SHA = "a" * 40
 
@@ -136,6 +137,29 @@ def test_spring_data_repository_calls_are_resolved():
     result = scan_sast(Snapshot(SHA, {"src/web/OwnerController.kt": CONTROLLER, "src/store/OwnerRepository.kt": repository}))
     assert result.findings == ()
     assert result.coverage.status == "complete" and not result.warnings
+
+
+def test_verifies_sql_at_the_recorded_jdbc_call():
+    source = """
+        import org.springframework.jdbc.core.JdbcTemplate
+        @RestController
+        class Search(private val jdbc: JdbcTemplate) {
+            @GetMapping("/search")
+            fun search(@RequestParam name: String): Int =
+                jdbc.update("UPDATE entries SET n = 1 WHERE name = '$name'")
+        }
+    """
+    path = "Search.kt"
+    snapshot = Snapshot(SHA, {path: source})
+    findings = scan_sast(snapshot).findings
+    for code, status, reason in (
+        (source, "confirmed", "SQL_REQUEST_INPUT_IN_TEXT"),
+        (source.replace("'$name'\"", '?", name'), "false_positive", "SQL_PARAMETERS_BOUND"),
+        (source.replace("$name", "${name.trim()}"), "needs_review", "SQL_FLOW_UNVERIFIED"),
+        (source.replace("org.springframework.jdbc.core", "demo.custom"), "needs_review", "SQL_FLOW_UNVERIFIED"),
+    ):
+        verdict, = verify_findings(Snapshot(SHA, {path: code}), findings)
+        assert (verdict.status, verdict.code) == (status, reason)
 
 
 def test_jdbc_client_follows_shorter_path_after_depth_limit():

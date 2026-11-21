@@ -11,6 +11,7 @@ from typing import Callable, Literal
 
 Category = Literal["secrets", "sca", "sast"]
 Severity = Literal["info", "low", "medium", "high", "critical"]
+VerificationStatus = Literal["confirmed", "needs_review", "false_positive"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,13 @@ class ScanError(Exception):
 
 
 @dataclass(frozen=True)
+class FindingVerification:
+    status: VerificationStatus
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
 class Finding:
     rule_id: str
     category: Category
@@ -42,6 +50,7 @@ class Finding:
     end_line: int | None
     evidence: str
     metadata: dict[str, str]
+    verification: FindingVerification | None = None
 
 
 @dataclass(frozen=True)

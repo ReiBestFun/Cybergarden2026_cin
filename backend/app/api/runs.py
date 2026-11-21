@@ -11,8 +11,9 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
-from ..db.models import FindingRow, NodeRun, ScanRun
+from ..db.models import User, FindingRow, NodeRun, Project, ScanRun
 from ..db.session import Database
+from ..db.workspaces import project_access
 from ..nodes.catalog import NOTIFIER_CONFIGS
 from ..notifications.queue import delivery_summary
 from ..reports import NodeResult, RunReport, readable_report, submission_json
@@ -22,6 +23,7 @@ from ..schemas.contracts import (
 )
 from ..workflows.queue import enqueue_manual_run
 from ..workflows.validation import validate_graph
+from .auth import CurrentUser
 from .common import ApiError, Pagination, graph_error, page
 from .projects import get_project
 from .workflows import get_workflow
@@ -39,36 +41,41 @@ class FindingFilters(Pagination):
     severity: Severity | None = None
 
 
-def _get_run(run_id: UUID, db: Database) -> ScanRun:
-    run = db.get(ScanRun, run_id)
+def _get_run(run_id: UUID, db: Database, user_id: UUID, request: Request | None = None) -> ScanRun:
+    run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
+        ScanRun.id == run_id, project_access(user_id),
+    ))
     if run is None:
         raise ApiError(404, "RUN_NOT_FOUND", "Запуск не найден.")
+    if request is not None:
+        request.state.run_id = run.id
     return run
 
 
 def _findings(run_id: UUID) -> Select[tuple[FindingRow]]:
     return select(FindingRow).where(FindingRow.run_id == run_id).order_by(
-        FindingRow.path, FindingRow.line.nulls_last(), FindingRow.id
+        FindingRow.category, FindingRow.line.nulls_last(), FindingRow.id
     )
 
 
 @router.post("/workflows/{workflow_id}/runs", status_code=202, response_model=RunQueued)
-def create_run(workflow_id: UUID, db: Database, data: RunCreate | None = None) -> ScanRun:
-    workflow = get_workflow(workflow_id, db, lock=True)
+def create_run(workflow_id: UUID, db: Database, user: CurrentUser, request: Request, data: RunCreate | None = None) -> ScanRun:
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     graph = Graph.model_validate(workflow.graph_json)
     # "Run now" works for any trigger: a scheduled workflow can also be started by hand.
     if issues := validate_graph(graph):
         raise graph_error(issues[0])
-    project = get_project(workflow.project_id, db)
+    project = get_project(workflow.project_id, db, user.id)
     ref = data.ref if data and data.ref is not None else project.default_ref
     run = enqueue_manual_run(db, project, workflow, graph, ref)
     db.commit()
+    request.state.run_id = run.id
     return run
 
 
 @router.get("/projects/{project_id}/runs", response_model=Page[RunRead])
-def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Query()]) -> dict:
-    get_project(project_id, db)
+def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Query()], user: CurrentUser) -> dict:
+    get_project(project_id, db, user.id)
     statement = select(ScanRun).where(ScanRun.project_id == project_id)
     if filters.status is not None:
         statement = statement.where(ScanRun.status == filters.status)
@@ -79,8 +86,12 @@ def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Que
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
-def get_run(run_id: UUID, db: Database) -> RunDetail:
-    run = _get_run(run_id, db)
+def get_run(run_id: UUID, db: Database, user: CurrentUser, request: Request) -> RunDetail:
+    return _run_detail(_get_run(run_id, db, user.id, request), db)
+
+
+def _run_detail(run: ScanRun, db: Database) -> RunDetail:
+    run_id = run.id
     graph = Graph.model_validate(run.graph_snapshot)
     nodes = {
         node.node_id: node
@@ -112,7 +123,7 @@ def _stream_finished(run: RunDetail, wait_for_delivery: bool) -> bool:
     )
 
 
-def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, *, wait_for_delivery: bool = False) -> Iterator[str]:
+def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user: User, *, wait_for_delivery: bool = False) -> Iterator[str]:
     previous = run.model_dump_json()
     yield f"retry: 1500\nevent: run\ndata: {previous}\n\n"
     if _stream_finished(run, wait_for_delivery):
@@ -122,7 +133,7 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, *, wa
         while True:
             # Take a new snapshot after LISTEN to include changes since the first read.
             with sessions() as db:
-                run = get_run(run.id, db)
+                run = _run_detail(_get_run(run.id, db, user.id), db)
             current = run.model_dump_json()
             if current != previous:
                 yield f"event: run\ndata: {current}\n\n"
@@ -134,20 +145,20 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, *, wa
 
 
 @router.get("/runs/{run_id}/events")
-def stream_run(run_id: UUID, request: Request, wait_for_delivery: bool = False) -> StreamingResponse:
+def stream_run(run_id: UUID, request: Request, user: CurrentUser, wait_for_delivery: bool = False) -> StreamingResponse:
     sessions = request.app.state.session_factory
     with sessions() as db:
-        initial = get_run(run_id, db)
+        initial = _run_detail(_get_run(run_id, db, user.id, request), db)
     dsn = make_url(request.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     return StreamingResponse(
-        _run_events(initial, sessions, dsn, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
+        _run_events(initial, sessions, dsn, user, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 
 @router.get("/runs/{run_id}/findings", response_model=Page[FindingRead])
-def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()]) -> dict:
-    _get_run(run_id, db)
+def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()], user: CurrentUser, request: Request) -> dict:
+    _get_run(run_id, db, user.id, request)
     statement = _findings(run_id)
     if filters.category is not None:
         statement = statement.where(FindingRow.category == filters.category)
@@ -157,8 +168,8 @@ def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters,
 
 
 @router.get("/runs/{run_id}/report", response_model=RunReportRead)
-def get_report(run_id: UUID, db: Database) -> RunReportRead:
-    run = _get_run(run_id, db)
+def get_report(run_id: UUID, db: Database, user: CurrentUser, request: Request) -> RunReportRead:
+    run = _get_run(run_id, db, user.id, request)
     payload = run.report or {}
     if run.summary is None:
         statement = (
@@ -181,18 +192,21 @@ def get_report(run_id: UUID, db: Database) -> RunReportRead:
     "/runs/{run_id}/export", response_class=Response,
     responses={200: {"content": {"application/json": {}, "text/markdown": {}}, "description": "Файл отчёта"}},
 )
-def export_run(run_id: UUID, db: Database, format: Literal["json", "markdown"] = "json") -> Response:
-    run = _get_run(run_id, db)
+def export_run(
+    run_id: UUID, db: Database, user: CurrentUser, request: Request, format: Literal["json", "markdown"] = "json",
+) -> Response:
+    run = _get_run(run_id, db, user.id, request)
     if run.status in {"queued", "running"}:
         raise ApiError(409, "REPORT_NOT_READY", "Запуск ещё выполняется.")
     if run.status == "failed":
         raise ApiError(409, "REPORT_UNAVAILABLE", "Для этого запуска отчёт недоступен.")
-    rows = tuple(db.scalars(_findings(run_id)))
+    rows = sorted(db.scalars(_findings(run_id)), key=lambda row: (row.path, row.line is None, row.line or 0, row.id))
     findings = tuple(
         Finding(
             rule_id=row.rule_id, category=row.category, severity=row.severity, title=row.title,
             description=row.description, remediation=row.remediation, path=row.path, line=row.line,
-            end_line=row.end_line, evidence=row.evidence, metadata=row.details,
+            end_line=row.end_line, evidence=row.evidence, metadata=row.finding_metadata,
+            verification=row.verification,
         )
         for row in rows
     )

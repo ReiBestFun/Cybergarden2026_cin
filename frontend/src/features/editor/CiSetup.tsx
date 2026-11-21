@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Play } from 'lucide-react';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow, issueCiToken } from '../../shared/api/workflows';
 import { DEFAULT_REPOSITORY, TRAINING_CI_SHA } from './defaults';
 import { useEditorStore } from './store';
+import { useWorkspace } from '../../app/workspaceContext';
 
 export function CiSetup() {
+  const { withWorkspaceLock } = useWorkspace();
+  const yamlRequest = useRef<AbortController>();
   const { project, nodes, workflowId, busy, save, runWorkflow } = useEditorStore();
   const repository = project.trim().replace(/\/$/, '').replace(/\.git$/, '');
   const githubUrl = /^https:\/\/github\.com\/[a-z\d-]+\/[a-z\d_.-]+$/i.test(repository) ? repository : null;
@@ -19,19 +22,30 @@ export function CiSetup() {
   const sha = commit.trim().toLowerCase();
   const token = issuedToken?.id === workflowId ? issuedToken.value : '';
   const yaml = generatedYaml?.id === workflowId ? generatedYaml.value : '';
+  useEffect(() => () => yamlRequest.current?.abort(), []);
 
   const prepare = async (kind: 'token' | 'yaml') => {
     setPending(true);
     setFeedback('');
+    const controller = new AbortController();
+    if (kind === 'yaml') yamlRequest.current = controller;
     try {
-      const id = await save();
-      if (!id) return;
-      if (kind === 'token') setToken({ id, value: (await issueCiToken(id)).token });
-      else setYaml({ id, value: await (await getSecurityWorkflow(id, runner)).text() });
+      if (kind === 'token') {
+        await withWorkspaceLock(async () => {
+          const id = await save();
+          if (id) setToken({ id, value: (await issueCiToken(id)).token });
+        });
+      } else {
+        const id = await save();
+        if (!id || controller.signal.aborted) return;
+        const value = await (await getSecurityWorkflow(id, runner, controller.signal)).text();
+        if (!controller.signal.aborted) setYaml({ id, value });
+      }
     } catch (error) {
-      setFeedback(errorMessage(error));
+      if (!controller.signal.aborted) setFeedback(errorMessage(error));
     } finally {
-      setPending(false);
+      if (!controller.signal.aborted) setPending(false);
+      if (yamlRequest.current === controller) yamlRequest.current = undefined;
     }
   };
 

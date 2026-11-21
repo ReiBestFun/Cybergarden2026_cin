@@ -1,12 +1,17 @@
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from secrets import randbits
 from threading import Barrier, Event, Lock
+from types import SimpleNamespace
 from typing import get_args
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -14,16 +19,22 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from cryptography.fernet import Fernet
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from backend.app.analyzers.models import Coverage, ScanError, ScanResult, Snapshot, Warning
 from backend.app.api import runs as runs_api
+from backend.app.api import auth
 from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.db.encryption import require_cipher
+from backend.app.notifications.destinations import telegram_chat_key
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceMembership
 from backend.app.integrations.github_actions import security_workflow
+from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
@@ -31,13 +42,59 @@ from backend.app.main import create_app
 from backend.app import notification_worker
 from backend.app.queue_worker import run_next
 from backend.app.reports import NodeResult
-from backend.app.schemas.contracts import Graph
+from backend.app.schemas.contracts import Graph, RunDetail
 from backend.app.schemas.credentials import CredentialKind
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
 from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 from backend.app.workflows.scheduling import next_daily_slot
 from backend.app.workflows.validation import validate_graph
+
+ORIGIN = "http://localhost:5173"
+TEST_KEY = urlsafe_b64encode(b"fixture-only-encryption-key-2026").decode()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_api_logs_errors_without_exposing_the_exception(caplog, monkeypatch, streaming):
+    app = create_app(Settings(_env_file=None, frontend_origins=[ORIGIN]))
+    logger = logging.getLogger("cyberflow.events")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    caplog.set_level(logging.INFO, logger=logger.name)
+    secret = "synthetic-private-exception-detail"
+
+    @app.get("/api/fixture-failure")
+    async def fail():
+        if not streaming:
+            raise RuntimeError(secret)
+
+        async def chunks():
+            yield b"partial response"
+            raise RuntimeError(secret)
+
+        return StreamingResponse(chunks())
+
+    with TestClient(app, headers={"Origin": ORIGIN}) as client:
+        if streaming:
+            with pytest.raises(RuntimeError, match="CyberFlow API response was interrupted") as error:
+                client.get("/api/fixture-failure", params={"key": secret})
+            assert secret not in str(error.value)
+        else:
+            response = client.get("/api/fixture-failure", params={"key": secret})
+            assert response.status_code == 500 and secret not in response.text
+            assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
+            assert "X-Request-ID" in response.headers["Access-Control-Expose-Headers"]
+    [event] = [json.loads(record.getMessage()) for record in caplog.records if record.name == logger.name]
+    assert event["action"] == "http.request" and event["result"] == "failed"
+    assert event["http_status"] == (200 if streaming else 500)
+    UUID(event["request_id"])
+    assert secret not in caplog.text
+
+
+def test_invalid_token_settings_omit_input_values_from_startup_errors():
+    secret = "synthetic-private-configuration-token"
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None, ci_workflow_tokens=[secret])
+    assert secret not in str(error.value)
 
 
 def node(node_id, kind, config=None):
@@ -197,19 +254,19 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
     client, sessions = api
     workflow_id = create_workflow(client, create_project(client), analysis_graph())
     run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
-    with sessions() as db:
-        initial = runs_api.get_run(run_id, db)
+    user = SimpleNamespace(id=UUID(client.get("/api/me").json()["id"]))
+    initial = RunDetail.model_validate(client.get(f"/api/runs/{run_id}").json())
     dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     listening = Event()
-    get_run = runs_api.get_run
+    run_detail = runs_api._run_detail
 
     def observed_read(*args):
-        run = get_run(*args)
+        run = run_detail(*args)
         listening.set()
         return run
 
-    monkeypatch.setattr(runs_api, "get_run", observed_read)
-    events = runs_api._run_events(initial, sessions, dsn)
+    monkeypatch.setattr(runs_api, "_run_detail", observed_read)
+    events = runs_api._run_events(initial, sessions, dsn, user)
     assert '"status":"queued"' in next(events)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(next, events)
@@ -255,10 +312,14 @@ def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
     assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
 
-def test_project_credentials_are_encrypted_and_scoped(api):
+def test_project_credentials_are_encrypted_and_scoped(api, monkeypatch):
     client, sessions = api
     project_id = UUID(create_project(client))
-    other_project_id = UUID(create_project(client))
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        other_project_id = UUID(create_project(other))
+        assert other_project_id != project_id
+        assert other.get(f"/api/projects/{project_id}/credentials").status_code == 404
     route = f"/api/projects/{project_id}/credentials"
     settings = client.app.state.settings
     settings.credentials_encryption_key = None
@@ -302,6 +363,14 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
     settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
     settings.notify_telegram_recipients = [recipient] if kind == "telegram" else []
     settings.notify_email_recipients = [recipient] if kind == "smtp" else []
+    if kind == "telegram":
+        owner_id = UUID(client.get("/api/me").json()["id"])
+        with sessions.begin() as db:
+            cipher = require_cipher(db.get_bind().dialect)
+            db.add(TelegramDestination(
+                owner_id=owner_id, chat_id=recipient, label="Test destination",
+                verified_at=datetime.now(UTC), chat_key=telegram_chat_key(cipher, owner_id, recipient),
+            ))
     route = f"/api/projects/{project_id}/credentials"
     value = {"secret": "synthetic-old"}
     if kind == "smtp":
@@ -367,19 +436,35 @@ def api(monkeypatch):
     if not url:
         pytest.skip("Set TEST_DATABASE_URL to a dedicated PostgreSQL test database")
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", TEST_KEY)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     # Tests use the strict allowlist regardless of a developer's local .env.
-    app = create_app(Settings(database_url=url, allow_any_repository=False))
-    with TestClient(app) as client:
+    app = create_app(Settings(
+        database_url=url, allow_any_repository=False, app_base_url=ORIGIN,
+        github_client_id="fixture-github-app", github_client_secret="fixture-github-secret",
+    ))
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        login(client, monkeypatch, randbits(48) + 1)
         yield client, app.state.session_factory
+
+
+def login(client, monkeypatch, identity, *, name="Пользователь", login_name="test-user", next_path="/"):
+    monkeypatch.setattr(auth, "fetch_identity", lambda *args: GitHubIdentity(identity, login_name, name, None))
+    start = client.get("/api/auth/github/start", params={"next": next_path}, follow_redirects=False)
+    assert start.status_code == 303, start.text
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    callback = client.get("/api/auth/github/callback", params={"code": "fixture-code", "state": query["state"][0]}, follow_redirects=False)
+    assert callback.status_code == 303 and "cyberflow_session" in callback.headers["set-cookie"]
+    return callback
 
 
 def create_project(client):
     response = client.post("/api/projects", json={
         "name": "Учебный проект", "repository_url": "https://github.com/TBagirov/training.git",
     })
-    assert response.status_code == 201, response.text
+    assert response.status_code in {200, 201}, response.text
     return response.json()["id"]
 
 
@@ -390,6 +475,61 @@ def create_workflow(client, project, graph=None):
     response = client.post(f"/api/projects/{project}/workflows", json=payload)
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypatch):
+    client, sessions = api
+    [personal] = client.get("/api/workspaces").json()["items"]
+    assert personal["personal"] and personal["role"] == "owner"
+    response = client.post("/api/workspaces", json={"name": "Команда"})
+    assert response.status_code == 201
+    team = response.json()["id"]
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph())
+    run = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+
+    moved = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert moved.status_code == 200 and moved.json()["workspace_id"] == team
+    assert client.post(f"/api/projects/{project}/move", json={"workspace_id": team}).status_code == 200
+    assert client.get("/api/projects").json()["items"] == []
+    assert [item["id"] for item in client.get("/api/projects", params={"workspace_id": team}).json()["items"]] == [project]
+    assert client.get(f"/api/workflows/{workflow}").status_code == 200
+    assert client.get(f"/api/projects/{project}/runs").json()["items"][0]["id"] == run
+    assert client.get(f"/api/runs/{run}").json()["workflow_id"] == workflow
+
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get("/api/projects", params={"workspace_id": team}).status_code == 404
+        assert other.get(f"/api/projects/{project}").status_code == 404
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 404
+        assert other.get(f"/api/workflows/{workflow}").status_code == 404
+        assert other.get(f"/api/runs/{run}/findings").status_code == 404
+        # Membership management belongs to issue #4. Seed an existing membership at the boundary.
+        other_id = UUID(other.get("/api/me").json()["id"])
+        with sessions.begin() as db:
+            db.add(WorkspaceMembership(workspace_id=UUID(team), user_id=other_id, role="member"))
+        spaces = other.get("/api/workspaces").json()["items"]
+        assert next(space for space in spaces if space["id"] == team)["role"] == "member"
+        assert other.get("/api/projects", params={"workspace_id": team}).json()["items"][0]["id"] == project
+        assert other.get(f"/api/runs/{run}").status_code == 200
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 403
+        assert other.post(f"/api/workflows/{workflow}/runs").status_code == 403
+        assert other.get(f"/api/projects/{project}/credentials").status_code == 403
+        assert other.post(f"/api/projects/{create_project(other)}/move", json={"workspace_id": team}).status_code == 403
+
+
+def test_workspace_repository_conflict_preserves_personal_project(api):
+    client, _ = api
+    team = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    project = create_project(client)
+    payload = {"name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team}
+    created = client.post("/api/projects", json=payload)
+    assert created.status_code == 201 and created.json()["id"] != project
+    duplicate = client.post("/api/projects", json=payload)
+    assert duplicate.status_code == 200 and duplicate.json()["id"] == created.json()["id"]
+    rejected = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "WORKSPACE_REPOSITORY_EXISTS"
+    assert client.get("/api/projects").json()["items"][0]["id"] == project
 
 
 def test_project_workflow_and_run_are_persisted(api):
@@ -481,6 +621,7 @@ def test_persisted_findings_are_filtered_and_exported(api):
     assert page["total"] == 1
     assert page["items"][0]["metadata"] == {"class": "password"}
     assert page["items"][0]["evidence"] == "***"
+    assert page["items"][0]["verification"] is None
     assert client.get(f"{base}/findings?category=sca").json()["total"] == 0
     assert client.get(f"{base}/report").json()["summary"]["high_count"] == 1
     export = client.get(f"{base}/export")
@@ -540,12 +681,17 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
     assert steps["branch"]["status"] == "skipped" and steps["branch"]["error"]["code"] == "INACTIVE_BRANCH"
     findings = client.get(f"{base}/findings").json()["items"]
     assert [(item["category"], item["evidence"]) for item in findings] == [("secrets", "***")]
+    assert findings[0]["verification"]["status"] == "confirmed"
+    assert findings[0]["verification"]["code"] == "SECRET_LITERAL"
+    assert "verification" not in findings[0]["metadata"]
     report = client.get(f"{base}/report").json()
     assert report["summary"]["total"] == 1
     assert report["coverage"]["status"] == "partial"
     markdown = client.get(f"{base}/export?format=markdown").text
     assert "**SECRET** — полное покрытие" in markdown
     assert "**SCA** — Для SCA требуется справочник Maven." in markdown
+    assert "Подтверждено" in markdown
+    assert "verification" not in client.get(f"{base}/export").json()["findings"][0]
     for url in (base, f"{base}/findings", f"{base}/report", f"{base}/export?format=markdown"):
         assert "fixture-pass-98" not in client.get(url).text
 
@@ -833,13 +979,16 @@ def test_queue_claims_are_exclusive_and_expired_workers_cannot_write(api):
             second_claim = claim_next(second_transaction)
             assert second_claim.id == second
     stale = datetime.now(UTC) - timedelta(minutes=10)
+    progress = RunProgress(sessions, claim)
+    progress.start_node("entry", {})
     with sessions.begin() as db:
         db.get(ScanRun, first).heartbeat_at = stale
     with sessions.begin() as db:
-        assert expire_stale_runs(db, stale + timedelta(seconds=1)) == 1
+        [expired] = expire_stale_runs(db, stale + timedelta(seconds=1))
+        assert expired.id == claim.id
+        assert ("manual_trigger", "failed") in {(kind, status) for _, kind, status in expired.nodes}
     detail = client.get(f"/api/runs/{first}").json()
     assert detail["status"] == "failed" and detail["error"]["code"] == "WORKER_EXPIRED"
-    progress = RunProgress(sessions, claim)
     assert progress.heartbeat() is False
     with pytest.raises(ClaimLost):
         progress.finish_node("entry", "succeeded", ports=["params"])

@@ -10,6 +10,11 @@ from typing import Literal
 from .analyzers.models import Category, Finding, ScanResult, Warning, finding_key, safe_path
 
 _CATEGORIES = {"secrets": "SECRET", "sca": "SCA", "sast": "SAST"}
+_VERDICTS = {
+    "confirmed": "Подтверждено",
+    "needs_review": "Нужна проверка",
+    "false_positive": "Ложное срабатывание",
+}
 
 
 @dataclass(frozen=True)
@@ -137,8 +142,8 @@ def readable_report(report: RunReport) -> str:
         return "\n".join(lines) + "\n"
 
     lines.extend((
-        "", "| Категория | Критичность | Находка | Место | Исправление |",
-        "|---|---|---|---|---|",
+        "", "| Категория | Критичность | Находка | Место | Дополнительная проверка | Исправление |",
+        "|---|---|---|---|---|---|",
     ))
     for finding in report.findings:
         location = finding.path
@@ -152,6 +157,8 @@ def readable_report(report: RunReport) -> str:
                 location += f"–{min(finding.end_line, finding.line + 14)}"
             if finding.category == "secrets":
                 detail += " Значение скрыто."
-        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, finding.remediation)
+        verification = finding.verification
+        verdict = f"{_VERDICTS[verification.status]}. {verification.message}" if verification else "—"
+        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, verdict, finding.remediation)
         lines.append("| " + " | ".join(map(_cell, cells)) + " |")
     return "\n".join(lines) + "\n"

@@ -5,7 +5,6 @@ import type { Frequency, Schedule, ScheduleSettings } from '../../shared/api/wor
 export const DEFAULT_REPOSITORY = 'https://github.com/TBagirov/training';
 export const DEFAULT_NAME = 'Security check workflow';
 export const TRAINING_CI_SHA = 'fe1fcbe212669783480666b9b60147c8a8c6eef4';
-const DRAFT_KEY = 'cyberflow.workflow.v2';
 
 const node = (id: string, kind: string, label: string, x: number, y: number): FlowNode =>
   ({ id, type: 'flowNode', position: { x, y }, data: { kind, label, config: {} } });
@@ -43,16 +42,6 @@ export const ciPreset = {
   edges: [...analysisEdges, edge('e-merge-gate', 'merge', 'bundle', 'gate', 'bundle')],
 };
 
-export type Draft = {
-  nodes: FlowNode[];
-  edges: Edge[];
-  project: string;
-  name: string;
-  projectId: string | null;
-  workflowId: string | null;
-  schedule?: Partial<ScheduleDraft>;
-};
-
 // Local, editable schedule settings; all fields are kept so switching frequency loses nothing.
 export type ScheduleDraft = {
   enabled: boolean; frequency: Frequency; time: string; weekdays: number[]; day_of_month: number; cron: string; timezone: string;
@@ -62,8 +51,8 @@ export const browserTimeZone = () => {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
 };
 
-export const defaultSchedule = (): ScheduleDraft => ({
-  enabled: true, frequency: 'daily', time: '09:00', weekdays: [0], day_of_month: 1, cron: '0 9 * * 1-5', timezone: browserTimeZone(),
+export const defaultSchedule = (timezone = browserTimeZone()): ScheduleDraft => ({
+  enabled: true, frequency: 'daily', time: '09:00', weekdays: [0], day_of_month: 1, cron: '0 9 * * 1-5', timezone,
 });
 
 export function scheduleSettings(draft: ScheduleDraft): ScheduleSettings {
@@ -94,26 +83,6 @@ export function scheduleFromServer(s: Schedule, fallback: ScheduleDraft): Schedu
   };
 }
 
-export function getSaved(): Draft {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (Array.isArray(p.nodes) && Array.isArray(p.edges)) {
-        return { project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null, ...p };
-      }
-    }
-  } catch { /* corrupted draft */ }
-  return { nodes: [], edges: [], project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null };
-}
-
-export function saveDraft(draft: Draft) {
-  try {
-    const nodes = draft.nodes.map(n => ({ ...n, data: { ...n.data, status: undefined } }));
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...draft, nodes }));
-  } catch { /* storage unavailable */ }
-}
-
-const LAST_RUN_KEY = 'cyberflow.lastRunId';
-export const getLastRunId = () => { try { return localStorage.getItem(LAST_RUN_KEY); } catch { return null; } };
-export const setLastRunId = (id: string) => { try { localStorage.setItem(LAST_RUN_KEY, id); } catch { /* ignore */ } };
+let lastRunId: string | null = null;
+export const getLastRunId = () => lastRunId;
+export const setLastRunId = (id: string | null) => { lastRunId = id; };

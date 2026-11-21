@@ -43,7 +43,7 @@ export function PublishTemplate({ onClose }: { onClose: () => void }) {
         {!workspace.personal && workspace.role === 'owner' &&
           <label className="checkbox"><input type="checkbox" name="team" /> Доступен всей команде «{workspace.name}»</label>}
         <label>Описание<textarea name="description" maxLength={1000} rows={2} /></label>
-        <p className="muted">Учётные данные и адресаты уведомлений исключаются из шаблона.</p>
+        <p className="muted">В шаблон войдут граф и настройки расписания. Ветку CI, реквизиты, адресатов и темы уведомлений для копии задают заново.</p>
         {error && <p className="notice error" role="alert">{error}</p>}
         <div className="toolbar-actions">
           <button className="btn primary" disabled={saving || !!busy}>{saving ? 'Сохранение…' : 'Сохранить шаблон'}</button>

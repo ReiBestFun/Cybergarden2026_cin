@@ -14,8 +14,13 @@ class TemplatePublish(Input):
     description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ""
 
 
+class DraftPublication(Input):
+    workspace_id: UUID
+
+
 class TemplateRead(ReadModel):
     id: UUID
+    workspace_id: UUID | None
     name: str
     description: str
     graph: Graph = Field(validation_alias="graph_json")

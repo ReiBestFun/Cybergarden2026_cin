@@ -3,6 +3,7 @@ import type { ApiGraph, Page, ScheduleSettings, Workflow } from './workflows';
 
 export type WorkflowTemplate = {
   id: string;
+  workspace_id: string | null;
   name: string;
   description: string;
   graph: ApiGraph;
@@ -20,6 +21,9 @@ export const publishTemplate = (workflowId: string, name: string, description: s
 
 export const copyTemplate = (id: string, projectId: string, name: string, signal?: AbortSignal) =>
   api<Workflow>(`/api/templates/${id}/copy`, { method: 'POST', json: { project_id: projectId, name }, signal });
+
+export const publishDraft = (id: string, workspaceId: string) =>
+  api<WorkflowTemplate>(`/api/templates/${id}/publish`, { method: 'POST', json: { workspace_id: workspaceId } });
 
 export const editTemplate = (id: string, data: Pick<WorkflowTemplate, 'name' | 'description'>) =>
   api<WorkflowTemplate>(`/api/templates/${id}`, { method: 'PATCH', json: data });

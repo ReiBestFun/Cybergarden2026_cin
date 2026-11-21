@@ -2,14 +2,18 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
-import { copyTemplate, editTemplate, listTemplates, removeTemplate, type WorkflowTemplate } from '../shared/api/templates';
+import { copyTemplate, editTemplate, listTemplates, publishDraft, removeTemplate, type WorkflowTemplate } from '../shared/api/templates';
 import { ensureProject, listProjects, type Page, type Project } from '../shared/api/workflows';
 import { useWorkspace } from '../app/workspaceContext';
 
 const PAGE_SIZE = 12;
 
 export function Templates() {
-  const { workspace } = useWorkspace();
+  const { workspace, workspaces, withWorkspaceLock } = useWorkspace();
+  const personal = workspaces.find(item => item.personal);
+  const [copyToPersonal, setCopyToPersonal] = useState(false);
+  const destination = workspace.role === 'member' || copyToPersonal ? personal : workspace;
+  const destinationId = destination?.id;
   const copyRequest = useRef<AbortController>();
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<Page<WorkflowTemplate> | null>(null);
@@ -38,24 +42,24 @@ export function Templates() {
 
   useEffect(() => {
     const controller = new AbortController();
-    if (workspace.role === 'owner') void listProjects(workspace.id, controller.signal).then(items => {
+    if (destinationId) void listProjects(destinationId, controller.signal).then(items => {
       if (controller.signal.aborted) return;
       setProjects(items);
       setProjectId(items[0]?.id ?? '');
     }).catch(error => { if (!controller.signal.aborted) setCopyError(errorMessage(error)); });
     return () => { controller.abort(); copyRequest.current?.abort(); };
-  }, [workspace.id, workspace.role]);
+  }, [destinationId]);
 
   const submit = async (event: FormEvent<HTMLFormElement>, template: WorkflowTemplate) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || !destinationId) return;
     const fields = new FormData(event.currentTarget);
     const controller = new AbortController();
     copyRequest.current = controller;
     setCopyError('');
     setBusy(true);
     try {
-      const target = projectId || (await ensureProject(workspace.id, String(fields.get('repository')), null, controller.signal)).id;
+      const target = projectId || (await ensureProject(destinationId, String(fields.get('repository')), null, controller.signal)).id;
       const workflow = await copyTemplate(template.id, target, String(fields.get('name')), controller.signal);
       if (!controller.signal.aborted) nav(`/editor?workflow=${workflow.id}`);
     } catch (error) {
@@ -99,6 +103,20 @@ export function Templates() {
     }
   };
 
+  const publish = async (template: WorkflowTemplate) => {
+    if (busy) return;
+    setBusy(true);
+    setCopyError('');
+    try {
+      await withWorkspaceLock(() => publishDraft(template.id, workspace.id));
+      setRefresh(value => value + 1);
+    } catch (error) {
+      setCopyError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-heading"><h1>Шаблоны сценариев</h1><Link className="btn secondary" to="/editor">Открыть редактор</Link></div>
@@ -110,7 +128,7 @@ export function Templates() {
         const names = new Map(template.graph.nodes.map(node => [node.id, types.find(type => type.kind === node.type)?.label ?? node.type]));
         return <article className="panel template-card" key={template.id}>
           <div className="page-heading">
-            <div><h2>{template.name}</h2><p className="muted">{template.graph.nodes.length} нод · {new Date(template.created_at).toLocaleDateString('ru-RU')}</p></div>
+            <div><h2>{template.name}</h2><p className="muted">{template.can_edit ? 'Личный черновик' : 'Командный шаблон'} · {template.graph.nodes.length} нод · {new Date(template.created_at).toLocaleDateString('ru-RU')}</p></div>
             <button className="btn secondary" aria-expanded={selected} disabled={busy} onClick={() => {
               setSelectedId(selected ? '' : template.id);
               setEditing(null);
@@ -137,10 +155,22 @@ export function Templates() {
             </ul>
             {template.schedule && <p className="muted">Параметры расписания будут скопированы. Включить расписание можно в редакторе.</p>}
             {template.can_edit && <div className="toolbar-actions">
+              {!workspace.personal && workspace.role === 'owner' &&
+                <button className="btn primary" disabled={busy} onClick={() => void publish(template)}>Опубликовать в «{workspace.name}»</button>}
               <button className="btn secondary" disabled={busy} onClick={() => { setEditing(template); setCopyError(''); }}>Изменить</button>
               <button className="btn secondary" disabled={busy} onClick={() => void remove(template)}>Удалить</button>
             </div>}
-            {workspace.role === 'owner' && <form className="template-panel" onSubmit={event => void submit(event, template)}>
+            {destination && <form className="template-panel" onSubmit={event => void submit(event, template)}>
+              {workspace.role === 'owner' && !workspace.personal && personal ?
+                <label>Пространство для копии<select disabled={busy} value={destination.id} onChange={event => {
+                  setProjects([]);
+                  setProjectId('');
+                  setCopyError('');
+                  setCopyToPersonal(event.target.value === personal.id);
+                }}>
+                  <option value={workspace.id}>{workspace.name}</option>
+                  <option value={personal.id}>{personal.name}</option>
+                </select></label> : <p className="muted">Копия в пространстве «{destination.name}»</p>}
               <label>Название копии<input name="name" defaultValue={template.name} maxLength={120} required /></label>
               <label>Проект<select value={projectId} onChange={event => setProjectId(event.target.value)}>
                 <option value="">Другой учебный репозиторий</option>

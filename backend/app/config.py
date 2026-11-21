@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,7 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     scheduler_poll_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)
+    ci_workflow_tokens: dict[UUID, SecretStr] = Field(default_factory=dict)
 
     # Notifications. Secrets stay on the server and never enter workflow graphs.
     app_base_url: str = "http://localhost:5173"

@@ -14,7 +14,7 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
-export async function api<T>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
+async function request(path: string, init: RequestInit & { json?: unknown } = {}): Promise<Response> {
   const { json, headers, ...rest } = init;
   let response: Response;
   try {
@@ -34,8 +34,17 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
     } catch { /* not JSON */ }
     throw new ApiError(response.status, body);
   }
+  return response;
+}
+
+export async function api<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
+  const response = await request(path, init);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export async function apiFile(path: string): Promise<Blob> {
+  return (await request(path)).blob();
 }
 
 export function errorMessage(error: unknown): string {

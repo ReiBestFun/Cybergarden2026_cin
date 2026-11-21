@@ -1,5 +1,6 @@
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from backend.app.analyzers.models import ScanError, Snapshot, Warning
 from backend.app.config import Settings
 from backend.app.db.models import FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.integrations.github_actions import security_workflow
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
@@ -58,6 +60,82 @@ def test_graph_validation_types_ports_and_cycles():
     issues = validate_graph(Graph.model_validate(graph), expected_trigger="schedule_trigger")
     codes = {issue.code for issue in issues}
     assert {"UNKNOWN_PORT", "WRONG_TRIGGER", "GRAPH_CYCLE", "MISSING_INPUT", "UNREACHABLE_NODE", "INVALID_CONFIG"} <= codes
+
+
+def ci_graph(threshold="CRITICAL"):
+    graph = analysis_graph("ci_trigger")
+    graph["nodes"].append(node("gate", "ci_gate", {"threshold": threshold}))
+    graph["edges"].append(edge("merge-gate", "merge", "bundle", "gate", "bundle"))
+    return graph
+
+
+def test_github_actions_template_and_gate_config():
+    import yaml
+
+    workflow_id = UUID(int=1)
+    for mode, runner in [("local", ["self-hosted", "Windows", "cyberflow"]), ("hosted", "ubuntu-latest")]:
+        workflow = yaml.load(security_workflow(workflow_id, "release/demo", mode), Loader=yaml.BaseLoader)
+        assert workflow["on"]["push"]["branches"] == ["release/demo"]
+        assert workflow["permissions"] == {}
+        job = workflow["jobs"]["cyberflow"]
+        assert job["runs-on"] == runner
+        assert job["steps"][0]["env"]["CYBERFLOW_TOKEN"] == "${{ secrets.CYBERFLOW_TOKEN }}"
+    assert validate_graph(Graph.model_validate(ci_graph()), expected_trigger="ci_trigger") == []
+    assert validate_graph(Graph.model_validate(ci_graph("LOW")))[0].code == "INVALID_CONFIG"
+    assert validate_graph(Graph.model_validate(analysis_graph("ci_trigger")))[0].code == "CI_GATE_REQUIRED"
+
+
+@pytest.mark.parametrize(("threshold", "coverage", "outcome"), [
+    ("CRITICAL", "complete", "passed"), ("HIGH", "complete", "blocked"),
+    ("CRITICAL", "partial", "error"), ("HIGH", "partial", "blocked"), ("HIGH", "failed", "error"),
+])
+def test_ci_webhook_exact_sha_and_verdict(api, monkeypatch, tmp_path, threshold, coverage, outcome):
+    client, sessions = api
+    workflow_id = create_workflow(client, create_project(client), ci_graph(threshold))
+    settings = client.app.state.settings
+    settings.ci_workflow_tokens = Settings(ci_workflow_tokens={workflow_id: "ci-test-token"}).ci_workflow_tokens
+    headers = {"Authorization": "Bearer ci-test-token"}
+    endpoint = f"/api/hooks/{workflow_id}"
+    sha = "a" * 40
+    payload = {"repository_url": "https://github.com/TBagirov/training", "commit_sha": sha, "request_id": "123-1"}
+    assert client.get(f"/api/workflows/{workflow_id}/security.yml").status_code == 200
+    assert client.post(endpoint, json=payload).status_code == 401
+    assert client.post(endpoint, headers=headers, json={**payload, "commit_sha": "main"}).status_code == 422
+    assert client.post(endpoint, headers=headers, json={**payload, "repository_url": "https://github.com/other/source"}).status_code == 403
+
+    response = client.post(endpoint, headers=headers, json=payload)
+    assert response.status_code == 202, response.text
+    assert client.post(endpoint, headers=headers, json=payload).json() == response.json()
+    assert client.post(endpoint, headers=headers, json={**payload, "commit_sha": "b" * 40}).status_code == 409
+    status_url = f"{endpoint}/runs/{response.json()['id']}"
+    assert client.get(status_url).status_code == 401
+    assert client.get(status_url, headers=headers).json()["gate"] is None
+
+    (tmp_path / "Service.kt").write_text('val importPassword = "synthetic-ci-not-a-real-password"\n', encoding="utf-8")
+
+    @contextmanager
+    def prepare(url, ref, **kwargs):
+        assert url == payload["repository_url"] and ref == sha
+        if coverage == "failed":
+            raise ScanError(Warning("REPOSITORY_FETCH_FAILED", "Тестовый сбой."))
+        yield RepositorySnapshot(Snapshot.from_directory(tmp_path, sha), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepare)
+    if coverage == "partial":
+        run_scan = execution.run_scan
+
+        def partial_scan(*args):
+            scanned = run_scan(*args)
+            result = scanned.result
+            return replace(scanned, result=replace(result, coverage=replace(result.coverage, status="partial")))
+
+        monkeypatch.setattr(execution, "run_scan", partial_scan)
+    assert run_next(sessions, settings, None)
+    status = client.get(status_url, headers=headers).json()
+    assert status["gate"]["decision"] == outcome
+    if coverage != "failed":
+        assert status["commit_sha"] == sha
+        assert status["report_url"].endswith(response.json()["id"])
 
 
 def test_allow_any_repository_switch():

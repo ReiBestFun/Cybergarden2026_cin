@@ -79,7 +79,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (!item) return;
       const id = `${kind}-${crypto.randomUUID().slice(0, 8)}`;
       const config = Object.fromEntries(Object.entries(item.params_schema.properties ?? {})
-        .filter(([, field]) => field.default !== undefined).map(([key, field]) => [key, String(field.default)]));
+        .filter(([, field]) => field.default != null).map(([key, field]) => [key, String(field.default)]));
       set((state) => ({ selected: id, nodes: [...state.nodes, { id, type: 'flowNode', position: position ?? { x: 160 + state.nodes.length * 45, y: 180 + state.nodes.length * 35 }, data: { kind, label: item.label, config } }] }));
     },
     updateConfig: (key, value) => set((state) => ({ nodes: state.nodes.map((n) => n.id === state.selected ? { ...n, data: { ...n.data, config: { ...n.data.config, [key]: value } } } : n) })),

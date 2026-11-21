@@ -53,7 +53,8 @@ export function fromApiGraph(graph: ApiGraph, types: NodeTypeDefinition[], label
       data: {
         kind: n.type,
         label: labels[n.id] ?? types.find(t => t.kind === n.type)?.label ?? n.type,
-        config: Object.fromEntries(Object.entries(n.config ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.join('\n') : String(v)])),
+        config: Object.fromEntries(Object.entries(n.config ?? {}).filter(([, v]) => v !== null)
+          .map(([k, v]) => [k, Array.isArray(v) ? v.join('\n') : String(v)])),
       },
     })),
     edges: graph.edges.map(e => ({

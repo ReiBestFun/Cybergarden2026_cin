@@ -7,11 +7,23 @@ import { NodePalette } from './NodePalette';
 import { Canvas } from './Canvas';
 import { SettingsPanel } from './SettingsPanel';
 import { toApiGraph } from './graph';
+import { errorMessage } from '../../shared/api/client';
+import { getSecurityWorkflow } from '../../shared/api/workflows';
+
+function download(blob: Blob, filename: string) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
 
 export function Editor() {
   const { nodes, edges, project, name, workflowId, busy, notice, run, save, runWorkflow, loadWorkflow, newWorkflow, setNotice } = useEditorStore();
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
+  const [downloadingCi, setDownloadingCi] = useState(false);
+  const hasCiTrigger = nodes.some(node => node.data.kind === 'ci_trigger');
 
   // /editor?workflow=<id> opens a saved workflow from the server.
   useEffect(() => {
@@ -31,11 +43,19 @@ export function Editor() {
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'cyberflow-workflow.json';
-    a.click();
-    URL.revokeObjectURL(a.href);
+    download(blob, 'cyberflow-workflow.json');
+  };
+
+  const exportCi = async () => {
+    setDownloadingCi(true);
+    try {
+      const id = await save();
+      if (id) download(await getSecurityWorkflow(id), 'security.yml');
+    } catch (error) {
+      setNotice({ kind: 'error', text: errorMessage(error) });
+    } finally {
+      setDownloadingCi(false);
+    }
   };
 
   const send = () => {
@@ -65,6 +85,11 @@ export function Editor() {
           <button className="btn secondary" onClick={exportJson}>
             <Download size={16} /> JSON
           </button>
+          {hasCiTrigger && (
+            <button className="btn secondary" disabled={!!busy || downloadingCi} onClick={() => void exportCi()}>
+              <Download size={16} /> security.yml
+            </button>
+          )}
           <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
             <Play size={16} /> {busy === 'run' ? 'Выполнение…' : 'Запустить'}
           </button>

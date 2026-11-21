@@ -1,4 +1,4 @@
-import { api, apiUrl } from './client';
+import { api, apiFile, apiUrl } from './client';
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
@@ -18,7 +18,7 @@ export type RunError = { code: string; message: string; node_id?: string | null;
 export type RunSummary = { total: number; high_count: number; critical_count: number };
 
 export type Run = {
-  id: string; project_id: string; workflow_id: string; trigger: 'manual' | 'schedule'; status: RunStatus;
+  id: string; project_id: string; workflow_id: string; trigger: 'manual' | 'schedule' | 'ci'; status: RunStatus;
   source_snapshot: Record<string, string>; commit_sha: string | null; created_at: string;
   started_at: string | null; finished_at: string | null; summary: RunSummary | null; error: RunError | null;
 };
@@ -75,6 +75,7 @@ export const updateWorkflow = (id: string, name: string, graph: ApiGraph) =>
   api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph } });
 export const validateWorkflow = (id: string) =>
   api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {} });
+export const getSecurityWorkflow = (id: string) => apiFile(`/api/workflows/${id}/security.yml`);
 export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
 export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: true } & ScheduleSettings)) =>
   api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });

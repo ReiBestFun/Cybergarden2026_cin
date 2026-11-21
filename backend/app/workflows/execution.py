@@ -10,11 +10,11 @@ from pydantic import ValidationError
 
 from ..analyzers.models import Category, ScanError, Warning, finding_key
 from ..config import Settings
-from ..integrations.repository import Allowlist, RepositorySnapshot, prepare_repository
-from ..nodes.catalog import NOTIFIER_CONFIGS, ConditionConfig
+from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
+from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
 from ..notifications import Channel, EmailChannel, NotifierError, TelegramChannel, build_message
 from ..reports import NodeResult, RunReport, merge_findings
-from ..schemas.contracts import Edge, Graph, Node
+from ..schemas.contracts import CiVerdict, Edge, Graph, Node
 from ..worker import run_scan
 from .persistence import RunProgress, error_payload
 from .validation import validate_graph
@@ -39,6 +39,18 @@ class Step:
 
 def _coverage_status(report: RunReport) -> str:
     return {"succeeded": "complete", "partial": "partial", "failed": "unavailable"}[report.status]
+
+
+def evaluate_ci_gate(config: CiGateConfig, bundle: RunReport) -> CiVerdict:
+    summary = bundle.summary
+    count = summary.critical_count + (summary.high_count if config.threshold == "HIGH" else 0)
+    if count:
+        decision, reason = "blocked", "THRESHOLD_REACHED"
+    elif bundle.status != "succeeded":
+        decision, reason = "error", "SCAN_INCOMPLETE"
+    else:
+        decision, reason = "passed", "CHECKS_PASSED"
+    return CiVerdict(decision=decision, reason=reason, threshold=config.threshold, findings_at_threshold=count)
 
 
 def _condition_branch(config: ConditionConfig, bundle: RunReport) -> str:
@@ -78,7 +90,7 @@ class GraphExecution:
     def __init__(self, progress: RunProgress, settings: Settings, allowed: Allowlist):
         self.progress = progress
         self.settings = settings
-        self.allowed = allowed
+        self.allowed = allowed_repository_urls(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
         self.source = progress.claim.source
         self.prepared: RepositorySnapshot | None = None
         self.steps: dict[str, Step] = {}
@@ -93,16 +105,19 @@ class GraphExecution:
         return edge.source_port in self.steps[edge.source].ports
 
     def _execute_node(self, node: Node, edges: list[Edge], resources: ExitStack) -> Step:
-        if node.type in {"manual_trigger", "schedule_trigger"}:
+        if node.type in {"manual_trigger", "schedule_trigger", "ci_trigger"}:
             return Step(ports=("params",), preview={"trigger": self.progress.claim.trigger, "ref": self.source.get("ref")})
         if node.type == "repository":
             url, ref = self.source.get("repository_url"), self.source.get("ref")
             if not isinstance(url, str) or not isinstance(ref, str):
                 raise ScanError(Warning("INVALID_SOURCE", "В запуске отсутствуют параметры репозитория."))
-            self.prepared = resources.enter_context(prepare_repository(
+            prepared = resources.enter_context(prepare_repository(
                 url, ref, allowed=self.allowed, timeout=self.settings.repository_timeout_seconds,
                 catalog_path=self.settings.sca_catalog_path,
             ))
+            if self.progress.claim.trigger == "ci" and prepared.snapshot.sha != ref:
+                raise ScanError(Warning("CI_SHA_MISMATCH", "Полученный коммит не совпадает с SHA из CI."))
+            self.prepared = prepared
             return Step(ports=("snapshot",), preview={"commit_sha": self.sha, "files": len(self.prepared.snapshot.files)})
         if node.type in SCANS:
             assert self.prepared is not None
@@ -122,6 +137,11 @@ class GraphExecution:
             assert bundle is not None
             branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle)
             return Step(ports=(branch,), preview={"branch": branch}, bundle=bundle)
+        if node.type == "ci_gate":
+            bundle = self.steps[edges[0].source].bundle
+            assert bundle is not None
+            gate = evaluate_ci_gate(CiGateConfig.model_validate(node.config), bundle)
+            return Step(preview=gate.model_dump())
         if node.type in NOTIFIER_CONFIGS:
             return self._notify(node, edges)
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
@@ -205,7 +225,7 @@ class GraphExecution:
         except ValidationError:
             self.progress.fail(Warning("INVALID_GRAPH", "Снимок графа имеет неверный формат."))
             return
-        expected = "schedule_trigger" if self.progress.claim.trigger == "schedule" else None
+        expected = {"schedule": "schedule_trigger", "ci": "ci_trigger"}.get(self.progress.claim.trigger)
         if issues := validate_graph(graph, expected_trigger=expected):
             self.progress.fail(Warning("INVALID_GRAPH", issues[0].message))
             return
@@ -240,6 +260,8 @@ class GraphExecution:
             step = self.steps[node.id]
             if node.type == "ai_report":
                 payload["llm"] = {"status": step.status, "error": error_payload(step.warning)}
+            elif node.type == "ci_gate" and step.preview is not None:
+                payload["ci_gate"] = step.preview
             elif node.type in NOTIFIER_CONFIGS:
                 payload.setdefault("delivery", {})[node.id] = {
                     "status": step.status, "error": error_payload(step.warning), **(step.preview or {}),

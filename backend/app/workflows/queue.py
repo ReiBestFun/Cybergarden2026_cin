@@ -15,9 +15,16 @@ def enqueue_manual_run(db: Session, project: Project, workflow: Workflow, graph:
     return _enqueue(db, project, workflow, graph, ref, trigger="manual")
 
 
+def enqueue_ci_run(
+    db: Session, project: Project, workflow: Workflow, graph: Graph, sha: str, request_id: str,
+) -> ScanRun:
+    return _enqueue(db, project, workflow, graph, sha, trigger="ci", ci_request_id=request_id)
+
+
 def _enqueue(
     db: Session, project: Project, workflow: Workflow, graph: Graph, ref: str, *,
     trigger: str, schedule: Schedule | None = None, scheduled_for: datetime | None = None,
+    ci_request_id: str | None = None,
 ) -> ScanRun:
     run = ScanRun(
         project_id=project.id,
@@ -26,6 +33,7 @@ def _enqueue(
         status="queued",
         graph_snapshot=graph.model_dump(mode="json"),
         source_snapshot={"repository_url": project.repository_url, "ref": ref},
+        ci_request_id=ci_request_id,
         schedule_id=schedule.id if schedule else None,
         scheduled_for=scheduled_for,
     )

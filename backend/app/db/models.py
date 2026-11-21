@@ -61,7 +61,8 @@ class ScanRun(Base):
     __tablename__ = "scan_runs"
     __table_args__ = (
         CheckConstraint("status IN ('queued', 'running', 'succeeded', 'partial', 'failed')", name="ck_run_status"),
-        CheckConstraint("trigger IN ('manual', 'schedule')", name="ck_run_trigger"),
+        CheckConstraint("trigger IN ('manual', 'schedule', 'ci')", name="ck_run_trigger"),
+        UniqueConstraint("workflow_id", "ci_request_id", name="uq_run_ci_request"),
         UniqueConstraint("schedule_id", "scheduled_for", name="uq_run_schedule_slot"),
         Index("ix_scan_runs_queue", "status", "created_at"),
         Index("ix_scan_runs_project_history", "project_id", "created_at"),
@@ -76,6 +77,7 @@ class ScanRun(Base):
     graph_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
     source_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
     commit_sha: Mapped[str | None] = mapped_column(String(64))
+    ci_request_id: Mapped[str | None] = mapped_column(String(100))
     schedule_id: Mapped[UUID | None] = mapped_column(ForeignKey("schedules.id"))
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

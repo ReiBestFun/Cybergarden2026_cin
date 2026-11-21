@@ -13,7 +13,9 @@ GraphId = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern
 NodeType = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 RunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
 NodeStatus = Literal["pending", "running", "succeeded", "failed", "skipped"]
-Trigger = Literal["manual", "schedule"]
+Trigger = Literal["manual", "schedule", "ci"]
+CiThreshold = Literal["CRITICAL", "HIGH"]
+CommitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 
 
 class Input(BaseModel):
@@ -143,6 +145,27 @@ class ScheduleRead(BaseModel):
 
 class RunCreate(Input):
     ref: Ref | None = None
+
+
+class CiRunCreate(Input):
+    repository_url: Annotated[str, StringConstraints(max_length=2048)]
+    commit_sha: CommitSha
+    request_id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,100}$")]
+
+
+class CiVerdict(BaseModel):
+    decision: Literal["passed", "blocked", "error"]
+    reason: str
+    threshold: CiThreshold | None = None
+    findings_at_threshold: int | None = None
+
+
+class CiRunStatus(BaseModel):
+    id: UUID
+    status: RunStatus
+    commit_sha: str | None
+    gate: CiVerdict | None = None
+    report_url: str | None = None
 
 
 class RunQueued(ReadModel):

@@ -14,6 +14,9 @@ const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
 };
 const CATEGORY_LABEL: Record<string, string> = { secrets: 'SECRET', sca: 'SCA', sast: 'SAST' };
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частичное покрытие', failed: 'ошибка' };
+const CI_LABEL: Record<string, string> = {
+  passed: 'Проверка CI пройдена', blocked: 'CI заблокирован по критичности', error: 'Проверка CI завершилась ошибкой',
+};
 
 function findingName(f: Finding) {
   if (f.category === 'sca') {
@@ -54,6 +57,8 @@ export function Results() {
 
   const shown = category ? findings.filter(f => f.category === category) : findings;
   const finished = run && run.status !== 'queued' && run.status !== 'running';
+  const gate = run?.nodes.find(node => node.type === 'ci_gate')?.output_preview;
+  const decision = typeof gate?.decision === 'string' ? gate.decision : null;
 
   return (
     <div className="page">
@@ -76,6 +81,11 @@ export function Results() {
       {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
       {error && <div className="notice error">{error}</div>}
       {run?.error && <div className="notice error">{run.error.message}</div>}
+      {finished && decision && CI_LABEL[decision] && (
+        <div className={`notice ${decision === 'passed' ? 'success' : 'error'}`}>
+          {CI_LABEL[decision]}{typeof gate?.threshold === 'string' && <> · порог {gate.threshold}</>}
+        </div>
+      )}
 
       {run?.summary && (
         <div className="summary-grid">

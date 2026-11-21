@@ -4,6 +4,7 @@ import { errorMessage } from '../shared/api/client';
 import { listProjects, listRuns, type Project, type Run } from '../shared/api/workflows';
 
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частично', failed: 'ошибка' };
+const TRIGGER_LABEL: Record<Run['trigger'], string> = { manual: 'вручную', schedule: 'расписание', ci: 'GitHub Actions' };
 
 export function History() {
   const nav = useNavigate();
@@ -38,7 +39,7 @@ export function History() {
                 <tr key={r.id} className="clickable" onClick={() => nav(`/results?run=${r.id}`)}>
                   <td>{new Date(r.created_at).toLocaleString('ru-RU')}</td>
                   <td>{r.project.name}</td>
-                  <td>{r.trigger === 'manual' ? 'вручную' : 'расписание'}</td>
+                  <td>{TRIGGER_LABEL[r.trigger]}</td>
                   <td><span className={`tag run-${r.status}`}>{STATUS_LABEL[r.status]}</span></td>
                   <td>{r.summary?.total ?? '—'}</td>
                   <td>{r.commit_sha ? <code>{r.commit_sha.slice(0, 7)}</code> : '—'}</td>

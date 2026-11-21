@@ -82,31 +82,47 @@ export function Editor() {
       <div className="editor-layout">
         <NodePalette />
         <Canvas />
-        <SettingsPanel />
-      </div>
 
-      <div className={`chat-widget ${chatOpen ? 'open' : ''}`}>
-        <button className="chat-toggle" onClick={() => setChatOpen((v) => !v)}>
-          <Bot size={19} /> AI-помощник {chatOpen ? <X size={17} /> : <MessageCircle size={17} />}
-        </button>
-        {chatOpen && (
-          <>
+        <div className={`editor-sidebar ${chatOpen ? 'chat-expanded' : ''}`}>
+          <div className="editor-settings-area">
+            <SettingsPanel />
+          </div>
+
+          <div className="editor-chat-area">
+            <button
+              type="button"
+              className="chat-toggle"
+              onClick={() => setChatOpen((v) => !v)}
+              aria-expanded={chatOpen}
+            >
+              <Bot size={19} />
+              <span>AI-помощник</span>
+              {chatOpen ? <X size={17} /> : <MessageCircle size={17} />}
+            </button>
+
             <div className="chat-messages">
               {messages.map((m, i) => (
-                <div key={i} className={`chat-message ${m.role}`}>{m.text}</div>
+                <div key={i} className={`chat-message ${m.role}`}>
+                  {m.text}
+                </div>
               ))}
             </div>
+
             <div className="chat-input">
               <input
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
+                onFocus={() => setChatOpen(true)}
                 onKeyDown={(e) => e.key === 'Enter' && send()}
                 placeholder="Например: настрой проверку секретов…"
+                aria-label="Сообщение AI-помощнику"
               />
-              <button onClick={send} aria-label="Отправить"><Send size={17} /></button>
+              <button type="button" onClick={send} aria-label="Отправить">
+                <Send size={17} />
+              </button>
             </div>
-          </>
-        )}
+          </div>
+        </div>
       </div>
     </div>
   );

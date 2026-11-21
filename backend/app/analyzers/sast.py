@@ -15,6 +15,11 @@ from .models import Finding, Scan, ScanResult, Severity, Snapshot, Warning
 from .spring_settings import spring_settings
 
 _RULES: dict[str, tuple[Severity, str, str, str]] = {
+    "error-stacktrace": (
+        "medium", "Стек исключения в ответе сервера",
+        "Spring Boot настроен передавать стек исключения в ответах об ошибках.",
+        "Установите server.error.include-stacktrace=never.",
+    ),
     "sql-injection": (
         "high", "Пользовательский ввод в SQL", "SQL-команда строится на основе параметра запроса.",
         "Передавайте значения отдельными параметрами JDBC, а текст запроса оставляйте статическим.",
@@ -312,14 +317,16 @@ def _index(
     return functions, routes, supertypes
 
 
-def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
+def _located_finding(kind: str, path: str, start: int, end: int) -> Finding:
     severity, title, description, remediation = _RULES[kind]
-    start = kt.line(node)
-    end = min(kt.end_line(last or node), start + 14)
     return Finding(
-        f"sast.{kind}", "sast", severity, title, description, remediation, function.path,
-        start, end, title, {"class": kind},
+        f"sast.{kind}", "sast", severity, title, description, remediation, path,
+        start, min(end, start + 14), title, {"class": kind},
     )
+
+
+def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
+    return _located_finding(kind, function.path, kt.line(node), kt.end_line(last or node))
 
 
 def _sql_calls(function: Function, *, all_sinks: bool = False) -> Iterator[tuple[Node, kt.Call, Node, str]]:
@@ -512,12 +519,7 @@ def _config_findings(scan: Scan, rules: list[AccessRule], *, check_error_respons
                 yield from _actuator_access(properties, rules)
                 if check_error_responses and properties.get("server.error.include-stacktrace", "").lower() == "always":
                     line = settings["server.error.include-stacktrace"][1]
-                    yield Finding(
-                        "sast.error-stacktrace", "sast", "medium", "Стек исключения в ответе сервера",
-                        "Spring Boot настроен передавать стек исключения в ответах об ошибках.",
-                        "Установите server.error.include-stacktrace=never.",
-                        path, line, line, "server.error.include-stacktrace", {"class": "error-stacktrace"},
-                    )
+                    yield _located_finding("error-stacktrace", path, line, line)
         except (yaml.YAMLError, RecursionError):
             scan.skip(path, "SPRING_CONFIG_PARSE_ERROR", "Не удалось проверить конфигурацию Spring Boot.")
 

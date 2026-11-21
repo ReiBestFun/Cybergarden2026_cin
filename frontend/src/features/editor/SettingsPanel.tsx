@@ -2,6 +2,7 @@ import { Trash2 } from 'lucide-react';
 import { useEditorStore } from './store';
 import { useNodeTypesStore } from './nodeTypesStore';
 import { SchemaForm } from './SchemaForm';
+import { ConditionSettings } from './ConditionSettings';
 import { ScheduleSettings } from './ScheduleSettings';
 import { CredentialPicker } from './CredentialPicker';
 import { NodeInspector } from './NodeInspector';
@@ -10,7 +11,7 @@ import { NodeInspector } from './NodeInspector';
 const CUSTOM_SETTINGS = new Set(['schedule_trigger']);
 
 export function SettingsPanel() {
-  const { nodes, selected, project, setProject, name, setName, updateConfig, renameSelected, removeSelected, run } = useEditorStore();
+  const { nodes, selected, project, setProject, name, setName, updateConfig, setConditions, renameSelected, removeSelected, run } = useEditorStore();
   const selectedNode = nodes.find(n => n.id === selected);
   const definition = useNodeTypesStore(s => s.types.find(t => t.kind === selectedNode?.data.kind));
   const nodeRun = run?.nodes.find(n => n.node_id === selected);
@@ -39,7 +40,9 @@ export function SettingsPanel() {
             <input readOnly value={selectedNode.data.kind} />
           </label>
 
-          {definition && (Object.keys(definition.params_schema.properties ?? {}).length > 0 || !CUSTOM_SETTINGS.has(selectedNode.data.kind)) && (
+          {definition && selectedNode.data.kind === 'condition' &&
+            <ConditionSettings schema={definition.params_schema} data={selectedNode.data} onChange={setConditions} />}
+          {definition && selectedNode.data.kind !== 'condition' && (Object.keys(definition.params_schema.properties ?? {}).length > 0 || !CUSTOM_SETTINGS.has(selectedNode.data.kind)) && (
             <SchemaForm schema={definition.params_schema} values={selectedNode.data.config ?? {}} onChange={updateConfig} />
           )}
           {selectedNode.data.kind === 'repository' && (

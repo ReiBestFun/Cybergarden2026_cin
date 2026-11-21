@@ -4,19 +4,22 @@ type Props = {
   schema: ParamSchema;
   values: Record<string, string>;
   onChange: (key: string, value: string) => void;
+  idPrefix?: string;
 };
 
-export function SchemaForm({schema, values, onChange}: Props) {
+export function SchemaForm({schema, values, onChange, idPrefix = 'node-param'}: Props) {
   const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'credential_id');
   if (!properties.length) return <p className="muted">У этой ноды нет настраиваемых параметров.</p>;
   return <>
     {properties.map(([key, field]) => {
-      const id = `node-param-${key}`;
+      const id = `${idPrefix}-${key}`;
       const value = values[key] ?? (field.default == null ? '' : String(field.default));
       const required = schema.required?.includes(key) ?? false;
       const label = field.title ?? key;
       const choices = values.field === 'ci.decision' && key === 'value' ? ['passed', 'blocked', 'error']
-        : values.field === 'ci.decision' && key === 'operator' ? ['eq', 'ne'] : field.enum;
+        : values.field === 'ci.decision' && key === 'operator' ? ['eq', 'ne']
+        : values.field === 'coverage.status' && key === 'operator' ? ['eq', 'ne', 'matches']
+        : values.field?.startsWith('summary.') && key === 'operator' ? field.enum?.filter(op => op !== 'matches') : field.enum;
       return <label key={key} htmlFor={id}>
         {label}{required ? ' *' : ''}
         {field.type === 'array' ? (

@@ -5,7 +5,10 @@ from typing import get_args
 from pydantic import ValidationError
 
 from ..analyzers.registry import SCANNER_NODES
-from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
+from ..nodes.catalog import (
+    CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft,
+    ConditionExpression, ConditionGroup,
+)
 from ..schemas.contracts import CiDecision, Graph, Issue, Node
 
 _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
@@ -31,23 +34,15 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
             if draft and config.keys() < allowed:
                 ConditionDraft.model_validate(config)
                 return None
-            condition = ConditionConfig.model_validate(config)
+            condition = ConditionExpression.model_validate(config).root
         except ValidationError:
-            return Issue(code="INVALID_CONFIG", message="Укажите поле, операцию и значение условия.", node_id=node.id, field="config")
-        if condition.field == "ci.decision":
-            if condition.operator not in {"eq", "ne"} or condition.value not in get_args(CiDecision):
-                return Issue(code="INVALID_CONFIG", message="Для вердикта CI выберите passed, blocked или error и операцию eq или ne.", node_id=node.id, field="config.value")
-        elif condition.field == "coverage.status":
-            if not isinstance(condition.value, str) or condition.operator not in {"eq", "ne", "matches"}:
-                return Issue(code="INVALID_CONFIG", message="Для покрытия нужна строка и операция eq, ne или matches.", node_id=node.id, field="config")
-            if condition.operator == "matches" and condition.value:
-                try:
-                    re.compile(condition.value)
-                except (re.error, RecursionError):
-                    return Issue(code="INVALID_REGEX", message="Неверный шаблон регулярного выражения.", node_id=node.id, field="config.value")
-        elif type(condition.value) is not int or condition.operator == "matches":
-            return Issue(code="INVALID_CONFIG", message="Для счётчика требуется целое число и операция сравнения.", node_id=node.id, field="config")
-        return None
+            return Issue(code="INVALID_CONFIG", message="Заполните условия. Для группы выберите AND или OR и задайте минимум две проверки.", node_id=node.id, field="config")
+        if isinstance(condition, ConditionGroup):
+            for index, rule in enumerate(condition.conditions):
+                if issue := _condition_error(rule, node.id, f"config.conditions.{index}"):
+                    return issue
+            return None
+        return _condition_error(condition, node.id, "config")
     if node.type in NOTIFIER_CONFIGS:
         if draft and not config.get("recipients"):
             # A draft may be saved before recipients are filled in; running it is still blocked.
@@ -65,6 +60,23 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
         return None
     if config:
         return Issue(code="INVALID_CONFIG", message="У этого типа ноды нет настроек графа.", node_id=node.id, field="config")
+    return None
+
+
+def _condition_error(condition: ConditionConfig, node_id: str, path: str) -> Issue | None:
+    if condition.field == "ci.decision":
+        if condition.operator not in {"eq", "ne"} or condition.value not in get_args(CiDecision):
+            return Issue(code="INVALID_CONFIG", message="Для вердикта CI выберите passed, blocked или error и операцию eq или ne.", node_id=node_id, field=f"{path}.value")
+    elif condition.field == "coverage.status":
+        if not isinstance(condition.value, str) or condition.operator not in {"eq", "ne", "matches"}:
+            return Issue(code="INVALID_CONFIG", message="Для покрытия нужна строка и операция eq, ne или matches.", node_id=node_id, field=path)
+        if condition.operator == "matches" and condition.value:
+            try:
+                re.compile(condition.value)
+            except (re.error, RecursionError):
+                return Issue(code="INVALID_REGEX", message="Неверный шаблон регулярного выражения.", node_id=node_id, field=f"{path}.value")
+    elif type(condition.value) is not int or condition.operator == "matches":
+        return Issue(code="INVALID_CONFIG", message="Для счётчика требуется целое число и операция сравнения.", node_id=node_id, field=path)
     return None
 
 

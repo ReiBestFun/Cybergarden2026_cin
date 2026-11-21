@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, RootModel, StringConstraints
 
 from ..notifications.email import ADDRESS
 from ..notifications.telegram import CHAT_ID
@@ -23,6 +23,14 @@ class ConditionDraft(Input):
     field: FIELD | None = None
     operator: OPERATOR | None = None
     value: OPERAND | None = None
+
+
+class ConditionGroup(Input):
+    mode: Literal["AND", "OR"]
+    conditions: list[ConditionConfig] = Field(min_length=2)
+
+
+ConditionExpression = RootModel[ConditionConfig | ConditionGroup]
 
 
 class CiGateConfig(Input):
@@ -88,7 +96,7 @@ def definition(
     description: str,
     inputs: tuple[Port, ...],
     outputs: tuple[Port, ...],
-    config: type[Input] = Input,
+    config: type[BaseModel] = Input,
 ) -> NodeDefinition:
     return NodeDefinition(
         type=kind, label=label, description=description, inputs=list(inputs), outputs=list(outputs),
@@ -120,7 +128,7 @@ CATALOG = {node.type: node for node in (
     definition("ci_gate", "Порог CI", "Вернуть решение в CI и передать его вместе с находками в следующую ноду.",
                (BUNDLE,), (BUNDLE,), CiGateConfig),
     definition("condition", "IF / ELSE", "Выбрать ветку по сводке, покрытию или вердикту CI.", (BUNDLE,),
-               (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionConfig),
+               (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionExpression),
     definition("ai_report", "AI-отчёт", "Подготовить рекомендации по сохранённым находкам.", (BUNDLE,), (REPORT,)),
     definition("notify_telegram", "Telegram", "Разослать отчёт в чаты Telegram.",
                (NOTIFY_INPUT,), (DELIVERY,), TelegramConfig),

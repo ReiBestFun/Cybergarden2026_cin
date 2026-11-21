@@ -655,6 +655,70 @@ def test_sensitive_logging_node_reports_only_exposed_values(api, monkeypatch):
         assert "synthetic-private-canary" not in client.get(url).text
 
 
+@pytest.mark.parametrize(("mode", "total", "coverage", "branch"), [
+    ("AND", 0, "complete", "true"), ("AND", 0, "partial", "false"),
+    ("AND", 1, "complete", "false"), ("AND", 1, "partial", "false"),
+    ("OR", 0, "complete", "true"), ("OR", 0, "partial", "true"),
+    ("OR", 1, "complete", "true"), ("OR", 1, "partial", "false"),
+    (None, 0, "complete", "true"), (None, 1, "complete", "false"),
+])
+def test_condition_routes_only_the_selected_branch(api, monkeypatch, mode, total, coverage, branch):
+    client, sessions = api
+    graph = analysis_graph()
+    count = {"field": "summary.total", "operator": "eq", "value": total}
+    status = {"field": "coverage.status", "operator": "matches", "value": coverage}
+    config = {"mode": mode, "conditions": [count, status]} if mode else count
+    graph["nodes"].append(node("decision", "condition", config))
+    graph["edges"].append(edge("input", "merge", "bundle", "decision", "bundle"))
+    for port in ("true", "false"):
+        graph["nodes"].append(node(port, "condition", count))
+        graph["edges"].append(edge(port, "decision", port, port, "bundle"))
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("d" * 40, {"Sample.kt": "val count = 1"}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    detail = client.get(f"/api/runs/{run_id}").json()
+    steps = {step["node_id"]: step for step in detail["nodes"]}
+    assert steps["decision"]["output_preview"]["branch"] == branch
+    assert steps["decision"]["active_output_ports"] == [branch]
+    assert steps[branch]["status"] == "succeeded"
+    other = "false" if branch == "true" else "true"
+    assert steps[other]["error"]["code"] == "INACTIVE_BRANCH"
+    assert steps[other]["status"] == "skipped"
+
+
+@pytest.mark.parametrize(("change", "code"), [
+    ({"mode": "XOR"}, "INVALID_CONFIG"),
+    ({"conditions": []}, "INVALID_CONFIG"),
+    ({"conditions": [{"field": "summary.total", "operator": "eq", "value": 0}]}, "INVALID_CONFIG"),
+    ({"field": "summary.total"}, "INVALID_CONFIG"),
+    ({"second": {"field": "summary.total", "operator": "gt", "value": "3"}}, "INVALID_CONFIG"),
+    ({"second": {"field": "ci.decision", "operator": "matches", "value": "passed"}}, "INVALID_CONFIG"),
+    ({"second": {"field": "coverage.status", "operator": "matches", "value": "["}}, "INVALID_REGEX"),
+])
+def test_api_rejects_invalid_condition_groups(api, change, code):
+    client, _ = api
+    workflow = create_workflow(client, create_project(client))
+    graph = analysis_graph()
+    count = {"field": "summary.total", "operator": "eq", "value": 0}
+    config = {"mode": "OR", "conditions": [count, count]}
+    if "second" in change:
+        config["conditions"][1] = change["second"]
+    else:
+        config.update(change)
+    graph["nodes"].append(node("decision", "condition", config))
+    graph["edges"].append(edge("input", "merge", "bundle", "decision", "bundle"))
+    url = f"/api/workflows/{workflow}"
+    result = client.post(f"{url}/validate", json={"graph": graph}).json()
+    assert result["valid"] is False
+    assert [(issue["node_id"], issue["code"]) for issue in result["issues"]] == [("decision", code)]
+    assert client.patch(url, json={"graph": graph}).status_code == 422
+
+
 def test_queue_worker_reports_repository_failure(api, monkeypatch):
     client, sessions = api
 

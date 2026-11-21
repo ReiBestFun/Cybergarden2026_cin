@@ -16,6 +16,7 @@ export type ParamField = {
 };
 
 export type ParamSchema = {
+  $defs?: Record<string, ParamSchema>;
   type?: 'object';
   properties?: Record<string, ParamField>;
   required?: string[];
@@ -70,7 +71,9 @@ const FIELD_TITLES: Record<string, string> = {
 };
 
 export function fromBackend(item: BackendCheckType): NodeTypeDefinition {
-  const properties = Object.fromEntries(Object.entries(item.config_schema?.properties ?? {}).map(
+  // Condition settings render the leaf comparison schema once per row.
+  const schema = item.config_schema.$defs?.ConditionConfig ?? item.config_schema;
+  const properties = Object.fromEntries(Object.entries(schema.properties ?? {}).map(
     ([key, field]) => [key, { ...field, title: FIELD_TITLES[key] ?? field.title ?? key }],
   ));
   return {
@@ -78,7 +81,7 @@ export function fromBackend(item: BackendCheckType): NodeTypeDefinition {
     label: item.label,
     description: item.description,
     category: CATEGORIES[item.type] ?? 'Прочее',
-    params_schema: { ...item.config_schema, properties },
+    params_schema: { ...schema, properties },
     inputs: item.inputs ?? [],
     outputs: item.outputs ?? [],
   };

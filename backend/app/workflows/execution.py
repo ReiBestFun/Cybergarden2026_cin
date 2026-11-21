@@ -14,7 +14,7 @@ from ..analyzers.models import Finding, ScanError, Warning, finding_key
 from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
-from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
+from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup
 from ..notifications import build_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
@@ -59,7 +59,7 @@ def evaluate_ci_gate(config: CiGateConfig, bundle: RunReport) -> CiVerdict:
     return CiVerdict(decision=decision, reason=reason, threshold=config.threshold, findings_at_threshold=count)
 
 
-def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVerdict | None) -> str:
+def _matches_condition(config: ConditionConfig, bundle: RunReport, verdict: CiVerdict | None) -> bool:
     if config.field == "ci.decision":
         if verdict is None:
             raise ScanError(Warning("CI_VERDICT_MISSING", "Для проверки вердикта CI проведите данные через ноду «Порог CI»."))
@@ -69,7 +69,7 @@ def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVer
     else:
         actual = getattr(bundle.summary, config.field.removeprefix("summary."))
     try:
-        matches = (
+        return (
             regex.search(config.value, actual, timeout=0.05) is not None
             if config.operator == "matches" else _COMPARISONS[config.operator](actual, config.value)
         )
@@ -77,6 +77,14 @@ def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVer
         raise ScanError(Warning("CONDITION_TIMEOUT", "Проверка регулярного выражения превысила лимит времени.")) from None
     except regex.error:
         raise ScanError(Warning("INVALID_REGEX", "Не удалось обработать регулярное выражение.")) from None
+
+
+def _condition_branch(config: ConditionConfig | ConditionGroup, bundle: RunReport, verdict: CiVerdict | None) -> str:
+    if isinstance(config, ConditionGroup):
+        combine = all if config.mode == "AND" else any
+        matches = combine(_matches_condition(rule, bundle, verdict) for rule in config.conditions)
+    else:
+        matches = _matches_condition(config, bundle, verdict)
     return "true" if matches else "false"
 
 
@@ -162,7 +170,7 @@ class GraphExecution:
             upstream = self.steps[edges[0].source]
             bundle = upstream.bundle
             assert bundle is not None
-            branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle, upstream.ci_verdict)
+            branch = _condition_branch(ConditionExpression.model_validate(node.config).root, bundle, upstream.ci_verdict)
             preview = {"branch": branch, **_bundle_preview(bundle, upstream.ci_verdict)}
             return Step(ports=(branch,), preview=preview, bundle=bundle, ci_verdict=upstream.ci_verdict)
         if node.type == "ci_gate":

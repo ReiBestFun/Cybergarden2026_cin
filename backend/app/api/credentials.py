@@ -27,14 +27,14 @@ def _encrypt(request: Request, credential: Credential, value: CredentialValue) -
 
 @router.get("", response_model=Page[CredentialRead])
 def list_credentials(project_id: UUID, db: Database, pagination: PageQuery, user: CurrentUser) -> dict:
-    get_project(project_id, db, user.id)
+    get_project(project_id, db, user.id, owner_required=True)
     statement = select(Credential).where(Credential.project_id == project_id)
     return page(db, statement.order_by(Credential.name, Credential.id), pagination.limit, pagination.offset)
 
 
 @router.post("", status_code=201, response_model=CredentialRead)
 def create_credential(project_id: UUID, data: CredentialCreate, db: Database, request: Request, user: CurrentUser) -> Credential:
-    get_project(project_id, db, user.id)
+    get_project(project_id, db, user.id, owner_required=True)
     credential = Credential(id=uuid4(), project_id=project_id, name=data.name, kind=data.kind, active=True)
     credential.ciphertext = _encrypt(request, credential, data.value)
     db.add(credential)
@@ -46,7 +46,7 @@ def create_credential(project_id: UUID, data: CredentialCreate, db: Database, re
 def update_credential(
     project_id: UUID, credential_id: UUID, data: CredentialPatch, db: Database, request: Request, user: CurrentUser,
 ) -> Credential:
-    get_project(project_id, db, user.id)
+    get_project(project_id, db, user.id, owner_required=True)
     credential = db.scalar(select(Credential).where(
         Credential.id == credential_id, Credential.project_id == project_id,
     ).with_for_update())

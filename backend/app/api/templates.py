@@ -112,7 +112,7 @@ def delete_template(template_id: UUID, db: Database, user: CurrentUser) -> Respo
 @router.post("/{template_id}/instantiate", status_code=201, response_model=WorkflowRead)
 def instantiate_template(template_id: UUID, data: TemplateCopy, db: Database, user: CurrentUser) -> Workflow:
     template = _template(template_id, user.id, db)
-    project = get_project(data.project_id, db, user.id)
+    project = get_project(data.project_id, db, user.id, owner_required=True)
     workflow = Workflow(project_id=project.id, name=data.name or template.name, graph_json=template.graph_json)
     db.add(workflow)
     if template.schedule is not None:

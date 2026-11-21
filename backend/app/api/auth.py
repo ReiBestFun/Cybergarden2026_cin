@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert
 from ..db.encryption import check_storage_key, require_cipher
 from ..db.models import OAuthAttempt, User, UserSession
 from ..db.session import Database
+from ..db.workspaces import provision_personal_workspace
 from ..integrations.github_oauth import AUTHORIZE_URL, GitHubLoginError, fetch_identity
 from ..schemas.contracts import Input, Name, ReadModel
 from .common import ApiError
@@ -175,6 +176,7 @@ def github_callback(
         index_elements=[User.github_key],
         set_={"github_login": statement.excluded.github_login, "avatar_url": statement.excluded.avatar_url},
     ).returning(User.id))
+    provision_personal_workspace(db, user_id)
     db.execute(delete(UserSession).where(UserSession.expires_at <= now))
     if old_session and len(old_session) == 43:
         db.execute(delete(UserSession).where(UserSession.token_hash == token_hash(old_session)))

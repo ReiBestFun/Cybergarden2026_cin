@@ -33,7 +33,7 @@ class CiTestRequest(Input):
 @dataclass(frozen=True)
 class CiAuthorization:
     settings: Settings
-    owner_id: UUID
+    project_id: UUID
 
 
 def _authorize(
@@ -43,19 +43,19 @@ def _authorize(
     settings: Settings = request.app.state.settings
     if bearer is not None:
         workflow = db.execute(
-            select(Workflow.ci_token_hash, Project.owner_id)
+            select(Workflow.ci_token_hash, Project.id)
             .join(Project, Workflow.project_id == Project.id)
-            .where(Workflow.id == workflow_id, Project.owner_id.is_not(None))
+            .where(Workflow.id == workflow_id, Project.workspace_id.is_not(None))
         ).one_or_none()
         if workflow is not None:
-            digest, owner_id = workflow
+            digest, project_id = workflow
             if digest is not None:
                 if compare_digest(digest, sha256(bearer.credentials.encode()).hexdigest()):
-                    return CiAuthorization(settings, owner_id)
+                    return CiAuthorization(settings, project_id)
             else:
                 expected = settings.ci_workflow_tokens.get(workflow_id)
                 if expected and compare_digest(expected.get_secret_value().encode(), bearer.credentials.encode()):
-                    return CiAuthorization(settings, owner_id)
+                    return CiAuthorization(settings, project_id)
     raise ApiError(401, "CI_UNAUTHORIZED", "Нужен действующий токен CI для этого сценария.")
 
 
@@ -76,7 +76,7 @@ def _ci_graph(graph_json: dict) -> Graph:
 
 @router.post("/workflows/{workflow_id}/ci-test", status_code=202)
 def start_ci_test(workflow_id: UUID, body: CiTestRequest, db: Database, request: Request, user: CurrentUser) -> dict[str, UUID]:
-    workflow = get_workflow(workflow_id, db, user.id, lock=True)
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     project = get_project(workflow.project_id, db, user.id)
     _check_repository(project, request.app.state.settings)
     graph = _ci_graph(workflow.graph_json)
@@ -88,7 +88,7 @@ def start_ci_test(workflow_id: UUID, body: CiTestRequest, db: Database, request:
 
 @router.post("/workflows/{workflow_id}/ci-token")
 def issue_token(workflow_id: UUID, body: Input, db: Database, request: Request, response: Response, user: CurrentUser) -> dict[str, str]:
-    workflow = get_workflow(workflow_id, db, user.id, lock=True)
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     _check_repository(get_project(workflow.project_id, db, user.id), request.app.state.settings)
     _ci_graph(workflow.graph_json)
     token = token_urlsafe(32)
@@ -114,8 +114,12 @@ def download_workflow(workflow_id: UUID, db: Database, request: Request, user: C
 
 @router.post("/hooks/{workflow_id}", status_code=202)
 def start_ci_run(workflow_id: UUID, body: CiRunCreate, db: Database, auth: CiAuth, request: Request) -> dict[str, UUID]:
-    workflow = get_workflow(workflow_id, db, auth.owner_id, lock=True)
-    project = get_project(workflow.project_id, db, auth.owner_id)
+    workflow = db.scalar(select(Workflow).where(
+        Workflow.id == workflow_id, Workflow.project_id == auth.project_id,
+    ).with_for_update())
+    project = db.get(Project, auth.project_id)
+    if workflow is None or project is None or project.workspace_id is None:
+        raise ApiError(404, "WORKFLOW_NOT_FOUND", "Сценарий не найден.")
     _check_repository(project, auth.settings)
     if normalize_repository(body.repository_url).casefold() != project.repository_url.casefold():
         raise ApiError(403, "CI_REPOSITORY_MISMATCH", "Репозиторий CI не совпадает с репозиторием проекта.")
@@ -137,7 +141,8 @@ def start_ci_run(workflow_id: UUID, body: CiRunCreate, db: Database, auth: CiAut
 @router.get("/hooks/{workflow_id}/runs/{run_id}", response_model=CiRunStatus)
 def get_ci_run(workflow_id: UUID, run_id: UUID, db: Database, auth: CiAuth, request: Request) -> CiRunStatus:
     run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
-        ScanRun.id == run_id, ScanRun.workflow_id == workflow_id, ScanRun.trigger == "ci", Project.owner_id == auth.owner_id,
+        ScanRun.id == run_id, ScanRun.workflow_id == workflow_id, ScanRun.trigger == "ci",
+        Project.id == auth.project_id, Project.workspace_id.is_not(None),
     ))
     if run is None:
         raise ApiError(404, "CI_RUN_NOT_FOUND", "Запуск CI не найден.")

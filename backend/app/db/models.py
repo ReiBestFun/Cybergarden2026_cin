@@ -55,15 +55,41 @@ class OAuthAttempt(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        CheckConstraint("personal_user_id IS NULL OR personal_user_id = id", name="ck_workspace_personal_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(EncryptedText("workspaces.name"))
+    personal_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), unique=True)
+
+    @property
+    def personal(self) -> bool:
+        return self.personal_user_id is not None
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_membership_role"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(16))
+
+
 class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
-        UniqueConstraint("owner_id", "repository_key", name="uq_project_owner_repository"),
+        UniqueConstraint("workspace_id", "repository_key", name="uq_project_workspace_repository"),
         CheckConstraint("(owner_id IS NULL) = (repository_key IS NULL)", name="ck_project_owner_key"),
+        CheckConstraint("(workspace_id IS NULL) = (owner_id IS NULL)", name="ck_project_workspace_owner"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
     repository_key: Mapped[str | None] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(EncryptedText("projects.name"))
     repository_url: Mapped[str] = mapped_column(EncryptedText("projects.repository_url"))

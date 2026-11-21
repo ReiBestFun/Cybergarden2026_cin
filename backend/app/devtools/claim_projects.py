@@ -8,9 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..db.encryption import check_storage_key, require_cipher
+from ..db.encryption import check_storage_key
 from ..db.models import Project, User
 from ..db.session import make_engine
+from ..db.workspaces import workspace_repository_key
 
 
 def claim_projects(db: Session, owner_id: UUID, project_ids: set[UUID]) -> int:
@@ -22,10 +23,10 @@ def claim_projects(db: Session, owner_id: UUID, project_ids: set[UUID]) -> int:
     ).order_by(Project.id).with_for_update()).all()
     if len(projects) != len(project_ids):
         raise ValueError("Один из указанных проектов не найден или уже назначен владельцу.")
-    cipher = require_cipher(db.get_bind().dialect)
     for project in projects:
         project.owner_id = owner_id
-        project.repository_key = cipher.digest(f"project:{owner_id}", project.repository_url.casefold())
+        project.workspace_id = owner_id
+        project.repository_key = workspace_repository_key(db, owner_id, project.repository_url)
     db.flush()
     return len(projects)
 

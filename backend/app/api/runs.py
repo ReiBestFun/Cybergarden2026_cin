@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
 from ..db.models import User, FindingRow, NodeRun, Project, ScanRun
 from ..db.session import Database
+from ..db.workspaces import project_access
 from ..nodes.catalog import NOTIFIER_CONFIGS
 from ..notifications.queue import delivery_summary
 from ..reports import NodeResult, RunReport, readable_report, submission_json
@@ -40,9 +41,9 @@ class FindingFilters(Pagination):
     severity: Severity | None = None
 
 
-def _get_run(run_id: UUID, db: Database, owner_id: UUID, request: Request | None = None) -> ScanRun:
+def _get_run(run_id: UUID, db: Database, user_id: UUID, request: Request | None = None) -> ScanRun:
     run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
-        ScanRun.id == run_id, Project.owner_id == owner_id,
+        ScanRun.id == run_id, project_access(user_id),
     ))
     if run is None:
         raise ApiError(404, "RUN_NOT_FOUND", "Запуск не найден.")
@@ -59,7 +60,7 @@ def _findings(run_id: UUID) -> Select[tuple[FindingRow]]:
 
 @router.post("/workflows/{workflow_id}/runs", status_code=202, response_model=RunQueued)
 def create_run(workflow_id: UUID, db: Database, user: CurrentUser, request: Request, data: RunCreate | None = None) -> ScanRun:
-    workflow = get_workflow(workflow_id, db, user.id, lock=True)
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     graph = Graph.model_validate(workflow.graph_json)
     # "Run now" works for any trigger: a scheduled workflow can also be started by hand.
     if issues := validate_graph(graph):

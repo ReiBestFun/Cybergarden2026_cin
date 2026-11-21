@@ -83,10 +83,12 @@ class ProjectCreate(Input):
     name: Name
     repository_url: Annotated[str, StringConstraints(max_length=2048)]
     default_ref: Ref = "main"
+    workspace_id: UUID | None = None
 
 
 class ProjectRead(ReadModel):
     id: UUID
+    workspace_id: UUID
     name: str
     repository_url: str
     default_ref: str
@@ -96,6 +98,21 @@ class ProjectRead(ReadModel):
 class ProjectPatch(Input):
     name: Name | None = None
     default_ref: Ref | None = None
+
+
+class ProjectMove(Input):
+    workspace_id: UUID
+
+
+class WorkspaceCreate(Input):
+    name: Name
+
+
+class WorkspaceRead(ReadModel):
+    id: UUID
+    name: str
+    personal: bool
+    role: Literal["owner", "member"]
 
 
 class WorkflowCreate(Input):

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from ..db.models import Project, Schedule, Workflow
 from ..db.session import Database
+from ..db.workspaces import project_access
 from ..integrations.repository import is_repository_allowed
 from ..llm import ModelError
 from ..nodes.catalog import CATALOG, CatalogRead
@@ -25,13 +26,15 @@ from .projects import get_project
 router = APIRouter(tags=["workflows"])
 
 
-def get_workflow(workflow_id: UUID, db: Database, owner_id: UUID, *, lock: bool = False) -> Workflow:
+def get_workflow(workflow_id: UUID, db: Database, user_id: UUID, *, lock: bool = False, owner_required: bool = False) -> Workflow:
     statement = select(Workflow).join(Project, Project.id == Workflow.project_id).where(
-        Workflow.id == workflow_id, Project.owner_id == owner_id,
+        Workflow.id == workflow_id, project_access(user_id),
     )
     workflow = db.scalar(statement.with_for_update(of=Workflow) if lock else statement)
     if workflow is None:
         raise ApiError(404, "WORKFLOW_NOT_FOUND", "Сценарий не найден.")
+    if owner_required:
+        get_project(workflow.project_id, db, user_id, owner_required=True)
     return workflow
 
 
@@ -73,7 +76,7 @@ def list_workflows(project_id: UUID, db: Database, pagination: PageQuery, user: 
 
 @router.post("/projects/{project_id}/workflows", status_code=201, response_model=WorkflowRead)
 def create_workflow(project_id: UUID, data: WorkflowCreate, db: Database, user: CurrentUser) -> Workflow:
-    get_project(project_id, db, user.id)
+    get_project(project_id, db, user.id, owner_required=True)
     workflow = Workflow(project_id=project_id, name=data.name, graph_json=checked_draft(data.graph))
     db.add(workflow)
     db.commit()
@@ -87,7 +90,7 @@ def workflow_detail(workflow_id: UUID, db: Database, user: CurrentUser) -> Workf
 
 @router.patch("/workflows/{workflow_id}", response_model=WorkflowRead)
 def modify_workflow(workflow_id: UUID, data: WorkflowPatch, db: Database, user: CurrentUser) -> Workflow:
-    workflow = get_workflow(workflow_id, db, user.id, lock=True)
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     if data.name is not None:
         workflow.name = data.name
     if data.graph is not None:
@@ -135,7 +138,7 @@ def preview_schedule(data: ScheduleSettings, user: CurrentUser) -> SchedulePrevi
 
 @router.put("/workflows/{workflow_id}/schedule", response_model=ScheduleRead)
 def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database, user: CurrentUser) -> ScheduleRead:
-    workflow = get_workflow(workflow_id, db, user.id, lock=True)
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id).with_for_update())
     if not data.enabled:
         if data.timezone is not None:

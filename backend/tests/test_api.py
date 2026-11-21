@@ -32,7 +32,7 @@ from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
 from backend.app.db.encryption import require_cipher
 from backend.app.notifications.destinations import telegram_chat_key
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceMembership
 from backend.app.integrations.github_actions import security_workflow
 from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
@@ -475,6 +475,61 @@ def create_workflow(client, project, graph=None):
     response = client.post(f"/api/projects/{project}/workflows", json=payload)
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypatch):
+    client, sessions = api
+    [personal] = client.get("/api/workspaces").json()["items"]
+    assert personal["personal"] and personal["role"] == "owner"
+    response = client.post("/api/workspaces", json={"name": "Команда"})
+    assert response.status_code == 201
+    team = response.json()["id"]
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph())
+    run = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+
+    moved = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert moved.status_code == 200 and moved.json()["workspace_id"] == team
+    assert client.post(f"/api/projects/{project}/move", json={"workspace_id": team}).status_code == 200
+    assert client.get("/api/projects").json()["items"] == []
+    assert [item["id"] for item in client.get("/api/projects", params={"workspace_id": team}).json()["items"]] == [project]
+    assert client.get(f"/api/workflows/{workflow}").status_code == 200
+    assert client.get(f"/api/projects/{project}/runs").json()["items"][0]["id"] == run
+    assert client.get(f"/api/runs/{run}").json()["workflow_id"] == workflow
+
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get("/api/projects", params={"workspace_id": team}).status_code == 404
+        assert other.get(f"/api/projects/{project}").status_code == 404
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 404
+        assert other.get(f"/api/workflows/{workflow}").status_code == 404
+        assert other.get(f"/api/runs/{run}/findings").status_code == 404
+        # Membership management belongs to issue #4. Seed an existing membership at the boundary.
+        other_id = UUID(other.get("/api/me").json()["id"])
+        with sessions.begin() as db:
+            db.add(WorkspaceMembership(workspace_id=UUID(team), user_id=other_id, role="member"))
+        spaces = other.get("/api/workspaces").json()["items"]
+        assert next(space for space in spaces if space["id"] == team)["role"] == "member"
+        assert other.get("/api/projects", params={"workspace_id": team}).json()["items"][0]["id"] == project
+        assert other.get(f"/api/runs/{run}").status_code == 200
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 403
+        assert other.post(f"/api/workflows/{workflow}/runs").status_code == 403
+        assert other.get(f"/api/projects/{project}/credentials").status_code == 403
+        assert other.post(f"/api/projects/{create_project(other)}/move", json={"workspace_id": team}).status_code == 403
+
+
+def test_workspace_repository_conflict_preserves_personal_project(api):
+    client, _ = api
+    team = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    project = create_project(client)
+    payload = {"name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team}
+    created = client.post("/api/projects", json=payload)
+    assert created.status_code == 201 and created.json()["id"] != project
+    duplicate = client.post("/api/projects", json=payload)
+    assert duplicate.status_code == 200 and duplicate.json()["id"] == created.json()["id"]
+    rejected = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "WORKSPACE_REPOSITORY_EXISTS"
+    assert client.get("/api/projects").json()["items"][0]["id"] == project
 
 
 def test_project_workflow_and_run_are_persisted(api):

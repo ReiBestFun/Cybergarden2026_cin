@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Local SMTP sink output (python -m backend.app.devtools.mail_sink)
+.mail/

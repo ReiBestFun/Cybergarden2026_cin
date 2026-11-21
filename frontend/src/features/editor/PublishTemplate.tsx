@@ -30,8 +30,8 @@ export function PublishTemplate({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <section className="panel template-panel" aria-label="Опубликовать шаблон">
-      <h3>Опубликовать сценарий как шаблон</h3>
+    <section className="panel template-panel" aria-label="Сохранить личный шаблон">
+      <h3>Сохранить сценарий как шаблон</h3>
       {published ? <div className="toolbar-actions">
         <Link className="btn primary" to="/templates">Открыть библиотеку</Link>
         <button className="btn secondary" onClick={onClose}>Закрыть</button>
@@ -41,7 +41,7 @@ export function PublishTemplate({ onClose }: { onClose: () => void }) {
         <p className="muted">Учётные данные и адресаты уведомлений исключаются из шаблона.</p>
         {error && <p className="notice error" role="alert">{error}</p>}
         <div className="toolbar-actions">
-          <button className="btn primary" disabled={saving || !!busy}>{saving ? 'Публикация…' : 'Опубликовать'}</button>
+          <button className="btn primary" disabled={saving || !!busy}>{saving ? 'Сохранение…' : 'Сохранить шаблон'}</button>
           <button className="btn secondary" type="button" disabled={saving} onClick={onClose}>Отмена</button>
         </div>
       </form>}

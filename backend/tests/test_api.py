@@ -1,12 +1,16 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from secrets import randbits
 from threading import Barrier, Event, Lock
+from types import SimpleNamespace
 from typing import get_args
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -20,10 +24,14 @@ from sqlalchemy.engine import make_url
 
 from backend.app.analyzers.models import Coverage, ScanError, ScanResult, Snapshot, Warning
 from backend.app.api import runs as runs_api
+from backend.app.api import auth
 from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.db.encryption import require_cipher
+from backend.app.notifications.destinations import telegram_chat_key
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow
 from backend.app.integrations.github_actions import security_workflow
+from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
@@ -38,6 +46,9 @@ from backend.app.workflows.persistence import ClaimLost, RunProgress
 from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 from backend.app.workflows.scheduling import next_daily_slot
 from backend.app.workflows.validation import validate_graph
+
+ORIGIN = "http://localhost:5173"
+TEST_KEY = urlsafe_b64encode(b"fixture-only-encryption-key-2026").decode()
 
 
 def node(node_id, kind, config=None):
@@ -198,7 +209,8 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
     workflow_id = create_workflow(client, create_project(client), analysis_graph())
     run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
     with sessions() as db:
-        initial = runs_api.get_run(run_id, db)
+        user = SimpleNamespace(id=UUID(client.get("/api/me").json()["id"]))
+        initial = runs_api.get_run(run_id, db, user)
     dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     listening = Event()
     get_run = runs_api.get_run
@@ -209,7 +221,7 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
         return run
 
     monkeypatch.setattr(runs_api, "get_run", observed_read)
-    events = runs_api._run_events(initial, sessions, dsn)
+    events = runs_api._run_events(initial, sessions, dsn, user)
     assert '"status":"queued"' in next(events)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(next, events)
@@ -255,10 +267,14 @@ def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
     assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
 
-def test_project_credentials_are_encrypted_and_scoped(api):
+def test_project_credentials_are_encrypted_and_scoped(api, monkeypatch):
     client, sessions = api
     project_id = UUID(create_project(client))
-    other_project_id = UUID(create_project(client))
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        other_project_id = UUID(create_project(other))
+        assert other_project_id != project_id
+        assert other.get(f"/api/projects/{project_id}/credentials").status_code == 404
     route = f"/api/projects/{project_id}/credentials"
     settings = client.app.state.settings
     settings.credentials_encryption_key = None
@@ -302,6 +318,14 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
     settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
     settings.notify_telegram_recipients = [recipient] if kind == "telegram" else []
     settings.notify_email_recipients = [recipient] if kind == "smtp" else []
+    if kind == "telegram":
+        owner_id = UUID(client.get("/api/me").json()["id"])
+        with sessions.begin() as db:
+            cipher = require_cipher(db.get_bind().dialect)
+            db.add(TelegramDestination(
+                owner_id=owner_id, chat_id=recipient, label="Test destination",
+                verified_at=datetime.now(UTC), chat_key=telegram_chat_key(cipher, owner_id, recipient),
+            ))
     route = f"/api/projects/{project_id}/credentials"
     value = {"secret": "synthetic-old"}
     if kind == "smtp":
@@ -367,19 +391,35 @@ def api(monkeypatch):
     if not url:
         pytest.skip("Set TEST_DATABASE_URL to a dedicated PostgreSQL test database")
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", TEST_KEY)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     # Tests use the strict allowlist regardless of a developer's local .env.
-    app = create_app(Settings(database_url=url, allow_any_repository=False))
-    with TestClient(app) as client:
+    app = create_app(Settings(
+        database_url=url, allow_any_repository=False, app_base_url=ORIGIN,
+        github_client_id="fixture-github-app", github_client_secret="fixture-github-secret",
+    ))
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        login(client, monkeypatch, randbits(48) + 1)
         yield client, app.state.session_factory
+
+
+def login(client, monkeypatch, identity, *, name="Пользователь", login_name="test-user", next_path="/"):
+    monkeypatch.setattr(auth, "fetch_identity", lambda *args: GitHubIdentity(identity, login_name, name, None))
+    start = client.get("/api/auth/github/start", params={"next": next_path}, follow_redirects=False)
+    assert start.status_code == 303, start.text
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    callback = client.get("/api/auth/github/callback", params={"code": "fixture-code", "state": query["state"][0]}, follow_redirects=False)
+    assert callback.status_code == 303 and "cyberflow_session" in callback.headers["set-cookie"]
+    return callback
 
 
 def create_project(client):
     response = client.post("/api/projects", json={
         "name": "Учебный проект", "repository_url": "https://github.com/TBagirov/training.git",
     })
-    assert response.status_code == 201, response.text
+    assert response.status_code in {200, 201}, response.text
     return response.json()["id"]
 
 
@@ -481,6 +521,7 @@ def test_persisted_findings_are_filtered_and_exported(api):
     assert page["total"] == 1
     assert page["items"][0]["metadata"] == {"class": "password"}
     assert page["items"][0]["evidence"] == "***"
+    assert page["items"][0]["verification"] is None
     assert client.get(f"{base}/findings?category=sca").json()["total"] == 0
     assert client.get(f"{base}/report").json()["summary"]["high_count"] == 1
     export = client.get(f"{base}/export")
@@ -540,12 +581,17 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
     assert steps["branch"]["status"] == "skipped" and steps["branch"]["error"]["code"] == "INACTIVE_BRANCH"
     findings = client.get(f"{base}/findings").json()["items"]
     assert [(item["category"], item["evidence"]) for item in findings] == [("secrets", "***")]
+    assert findings[0]["verification"]["status"] == "confirmed"
+    assert findings[0]["verification"]["code"] == "SECRET_LITERAL"
+    assert "verification" not in findings[0]["metadata"]
     report = client.get(f"{base}/report").json()
     assert report["summary"]["total"] == 1
     assert report["coverage"]["status"] == "partial"
     markdown = client.get(f"{base}/export?format=markdown").text
     assert "**SECRET** — полное покрытие" in markdown
     assert "**SCA** — Для SCA требуется справочник Maven." in markdown
+    assert "Подтверждено" in markdown
+    assert "verification" not in client.get(f"{base}/export").json()["findings"][0]
     for url in (base, f"{base}/findings", f"{base}/report", f"{base}/export?format=markdown"):
         assert "fixture-pass-98" not in client.get(url).text
 

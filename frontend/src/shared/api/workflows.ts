@@ -32,10 +32,17 @@ export type NodeRun = {
 };
 export type RunDetail = Run & { graph_snapshot: ApiGraph; nodes: NodeRun[]; delivery?: RunReport['delivery'] };
 
+export type FindingVerification = {
+  status: 'confirmed' | 'needs_review' | 'false_positive';
+  code: string;
+  message: string;
+};
+
 export type Finding = {
   id: string; node_run_id: string; rule_id: string; category: 'secrets' | 'sca' | 'sast';
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; title: string; description: string; remediation: string;
   path: string; line: number | null; end_line: number | null; evidence: string; metadata: Record<string, string>;
+  verification?: FindingVerification | null;
 };
 type ScanCheck = { category: Finding['category']; status: NodeStatus; warnings: RunError[] };
 type RecipientDelivery = {
@@ -73,6 +80,10 @@ export const canonicalRepo = (url: string) => url.trim().replace(/\/+$/, '').rep
 
 export const listProjects = () => api<Page<Project>>('/api/projects?limit=200');
 export const getProject = (id: string) => api<Project>(`/api/projects/${id}`);
+export const createProject = (data: { name: string; repository_url: string; default_ref?: string }) =>
+  api<Project>('/api/projects', { method: 'POST', json: data });
+export const updateProject = (id: string, data: Pick<Project, 'name' | 'default_ref'>) =>
+  api<Project>(`/api/projects/${id}`, { method: 'PATCH', json: data });
 
 export async function ensureProject(repositoryUrl: string, knownId?: string | null): Promise<Project> {
   const wanted = canonicalRepo(repositoryUrl);
@@ -85,7 +96,7 @@ export async function ensureProject(repositoryUrl: string, knownId?: string | nu
   const existing = (await listProjects()).items.find(p => canonicalRepo(p.repository_url) === wanted);
   if (existing) return existing;
   const name = repositoryUrl.trim().replace(/\/+$/, '').split('/').slice(-2).join('/') || 'project';
-  return api<Project>('/api/projects', { method: 'POST', json: { name, repository_url: repositoryUrl.trim() } });
+  return createProject({ name, repository_url: repositoryUrl.trim() });
 }
 
 export const listWorkflows = (projectId: string) => api<Page<Workflow>>(`/api/projects/${projectId}/workflows?limit=200`);

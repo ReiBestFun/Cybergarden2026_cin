@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Iterator
 
@@ -344,8 +344,12 @@ def _sql_finding(function: Function, node: Node, sql: Node) -> Finding:
     inside_call = node.start_byte <= sql.start_byte < node.end_byte
     in_function = function.body.start_byte <= sql.start_byte < function.body.end_byte
     if in_function and not inside_call and sql.start_byte < node.start_byte:
-        return _finding("sql-injection", function, sql, node)
-    return _finding("sql-injection", function, node)
+        finding = _finding("sql-injection", function, sql, node)
+    else:
+        finding = _finding("sql-injection", function, node)
+    return replace(finding, metadata=finding.metadata | {
+        "sink_line": str(kt.line(node)), "sink_column": str(node.start_point.column),
+    })
 
 
 def _resolved_calls(

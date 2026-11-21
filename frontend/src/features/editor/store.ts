@@ -3,7 +3,7 @@ import { applyNodeChanges, applyEdgeChanges, addEdge, type NodeChange, type Edge
 import type { FlowNode, NodeKind } from './types';
 import { useNodeTypesStore } from './nodeTypesStore';
 import {
-  getSaved, saveDraft, setLastRunId, DEFAULT_NAME, DEFAULT_REPOSITORY,
+  browserTimeZone, setLastRunId, DEFAULT_NAME, DEFAULT_REPOSITORY,
   ciPreset, defaultSchedule, hasScheduleFields, scheduleFromServer, scheduleSettings, type ScheduleDraft,
 } from './defaults';
 import { validateConnection } from './validateConnection';
@@ -12,7 +12,7 @@ import { ApiError, errorMessage } from '../../shared/api/client';
 import { watchRun } from '../../shared/api/runEvents';
 import {
   createWorkflow, ensureProject, getProject, getSchedule, getWorkflow, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
-  type GeneratedWorkflow, type RunDetail, type Schedule,
+  type GeneratedWorkflow, type Project, type RunDetail, type Schedule,
 } from '../../shared/api/workflows';
 
 export type Notice = { kind: 'error' | 'info' | 'success'; text: string } | null;
@@ -22,6 +22,7 @@ type EditorState = {
   canvasRevision: number;
   project: string; name: string; projectId: string | null; workflowId: string | null;
   schedule: ScheduleDraft; serverSchedule: Schedule | null;
+  profileTimezone: string;
   busy: 'save' | 'run' | 'load' | null; notice: Notice; run: RunDetail | null;
   setNodes: (update: FlowNode[] | ((nodes: FlowNode[]) => FlowNode[])) => void;
   setEdges: (update: Edge[] | ((edges: Edge[]) => Edge[])) => void;
@@ -37,21 +38,17 @@ type EditorState = {
   renameSelected: (label: string) => void;
   removeSelected: () => void;
   setNotice: (notice: Notice) => void;
-  newWorkflow: (preset?: 'ci') => void;
+  setProfileTimezone: (timezone: string) => void;
+  newWorkflow: (preset?: 'ci', target?: Project) => void;
   applyGenerated: (draft: GeneratedWorkflow) => void;
   loadWorkflow: (id: string) => Promise<void>;
   save: () => Promise<string | null>;
   runWorkflow: (commitSha?: string) => Promise<void>;
 };
 
-const saved = getSaved();
 export const useEditorStore = create<EditorState>((set, get) => {
   let runUpdates: AbortController | undefined;
   let loadRequest = 0;
-  const persist = () => {
-    const s = get();
-    saveDraft({ nodes: s.nodes, edges: s.edges, project: s.project, name: s.name, projectId: s.projectId, workflowId: s.workflowId, schedule: s.schedule });
-  };
   // Shows an API error and, when it names a node, selects that node.
   const fail = (error: unknown) => {
     const nodeId = error instanceof ApiError ? error.body.node_id : null;
@@ -60,9 +57,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
   const clearStatuses = () => set(s => ({ nodes: s.nodes.map(n => ({ ...n, data: { ...n.data, status: undefined } })) }));
 
   return {
-    nodes: saved.nodes, edges: saved.edges, selected: null, canvasRevision: 0,
-    project: saved.project, name: saved.name, projectId: saved.projectId, workflowId: saved.workflowId,
-    schedule: { ...defaultSchedule(), ...saved.schedule }, serverSchedule: null,
+    nodes: [], edges: [], selected: null, canvasRevision: 0,
+    project: DEFAULT_REPOSITORY, name: DEFAULT_NAME, projectId: null, workflowId: null,
+    schedule: defaultSchedule(), serverSchedule: null, profileTimezone: browserTimeZone(),
     busy: null, notice: null, run: null,
     setNodes: (update) => set((state) => ({ nodes: typeof update === 'function' ? update(state.nodes) : update })),
     setEdges: (update) => set((state) => ({ edges: typeof update === 'function' ? update(state.edges) : update })),
@@ -89,14 +86,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
     renameSelected: (label) => set((state) => ({ nodes: state.nodes.map((n) => n.id === state.selected ? { ...n, data: { ...n.data, label } } : n) })),
     removeSelected: () => set((state) => ({ nodes: state.nodes.filter((n) => n.id !== state.selected), edges: state.edges.filter((e) => e.source !== state.selected && e.target !== state.selected), selected: null })),
     setNotice: (notice) => set({ notice }),
+    setProfileTimezone: (profileTimezone) => set(state => ({
+      profileTimezone,
+      schedule: state.nodes.length ? state.schedule : { ...state.schedule, timezone: profileTimezone },
+    })),
 
-    newWorkflow: (preset) => {
+    newWorkflow: (preset, target) => {
       runUpdates?.abort();
       runUpdates = undefined;
-      set({ nodes: [], edges: [], name: DEFAULT_NAME, project: DEFAULT_REPOSITORY, projectId: null, canvasRevision: get().canvasRevision + 1,
+      set({ nodes: [], edges: [], name: DEFAULT_NAME, project: target?.repository_url ?? DEFAULT_REPOSITORY, projectId: target?.id ?? null, canvasRevision: get().canvasRevision + 1,
         workflowId: null, selected: null, run: null, notice: null, busy: null,
-        schedule: defaultSchedule(), serverSchedule: null, ...(preset === 'ci' ? ciPreset : {}) });
-      persist();
+        schedule: defaultSchedule(get().profileTimezone), serverSchedule: null, ...(preset === 'ci' ? { ...ciPreset, projectId: null } : {}) });
     },
 
     applyGenerated: (draft) => {
@@ -104,7 +104,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (state.busy) return;
       const graph = fromApiGraph(draft.graph, useNodeTypesStore.getState().types);
       const scheduleNode = graph.nodes.find(node => node.data.kind === 'schedule_trigger');
-      const schedule = { ...defaultSchedule(), enabled: draft.issues.length === 0 };
+      const schedule = { ...defaultSchedule(state.profileTimezone), enabled: draft.issues.length === 0 };
       if (draft.schedule) {
         schedule.frequency = draft.schedule.frequency;
         schedule.time = draft.schedule.time ?? '';
@@ -121,7 +121,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
           ? { kind: 'info', text: draft.issues.map(issue => issue.message).join(' ') + (scheduleNode ? ' После настройки включите расписание.' : '') }
           : { kind: 'success', text: 'Черновик создан. Проверьте настройки и сохраните сценарий.' },
       });
-      persist();
     },
 
     loadWorkflow: async (id) => {
@@ -140,14 +139,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const serverSchedule = await getSchedule(workflow.id).catch(() => null);
         if (!isCurrent()) return;
         const configured = serverSchedule && (serverSchedule.time || serverSchedule.cron);
-        const fallback = get().workflowId === id ? get().schedule : defaultSchedule();
+        const fallback = get().workflowId === id ? get().schedule : defaultSchedule(get().profileTimezone);
         set({
           nodes, edges, name: workflow.name, workflowId: workflow.id, project: project.repository_url, projectId: workflow.project_id, selected: null, run: null,
           canvasRevision: revision + 1, busy: null,
-          serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule())
+          serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule(get().profileTimezone))
             : { ...fallback, enabled: serverSchedule?.enabled ?? fallback.enabled },
         });
-        persist();
       } catch (error) {
         if (!isCurrent()) return;
         fail(error);
@@ -181,7 +179,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
           if (!isCurrent()) return null;
           set({ serverSchedule });
         }
-        persist();
         if (get().busy === 'save') set({ notice: { kind: 'success', text: 'Сценарий сохранён на сервере.' } });
         return workflowId;
       } catch (error) {

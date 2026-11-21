@@ -1,12 +1,20 @@
 import httpx
 from fastapi.testclient import TestClient
 
+from backend.app.api.auth import _current_user
+
 from backend.app import llm
 from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.schemas.contracts import Graph
 from backend.app.workflows.generation import ModelAnswer
 from backend.app.workflows.validation import validate_graph
+
+
+def _client() -> TestClient:
+    app = create_app(Settings(_env_file=None))
+    app.dependency_overrides[_current_user] = lambda: None
+    return TestClient(app)
 
 
 def test_generation_returns_editable_graph_with_schedule_and_conditional_delivery(monkeypatch):
@@ -27,7 +35,7 @@ def test_generation_returns_editable_graph_with_schedule_and_conditional_deliver
     monkeypatch.setattr(llm.httpx, "Client", lambda **kwargs: client_class(
         transport=httpx.MockTransport(provider), **kwargs,
     ))
-    with TestClient(create_app(Settings(_env_file=None))) as client:
+    with _client() as client:
         response = client.post("/api/workflows/generate", json={
             "description": "По будням в 14:00 проверь секреты и зависимости в https://github.com/TBagirov/training. "
                            "При находках пиши на dev@example.org, иначе в Telegram.",
@@ -55,7 +63,7 @@ def test_generation_rejects_repository_outside_allowlist_before_calling_model(mo
         raise AssertionError("Provider should not be called")
 
     monkeypatch.setattr(llm.httpx, "Client", unexpected)
-    with TestClient(create_app(Settings(_env_file=None))) as client:
+    with _client() as client:
         response = client.post("/api/workflows/generate", json={
             "description": "Проверь https://github.com/example/out-of-scope.",
             "timezone": "UTC",

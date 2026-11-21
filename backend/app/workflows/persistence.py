@@ -5,7 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Finding, Warning
-from ..db.models import FindingRow, NodeRun, ScanRun
+from ..db.models import FindingRow, NodeRun, Project, ScanRun
 from ..notifications.queue import NotificationDraft, enqueue_notification
 from ..schemas.contracts import NodeStatus, RunStatus
 from .queue import ClaimedRun, fail_run
@@ -85,13 +85,19 @@ class RunProgress:
             node.error = error_payload(warning)
             node.finished_at = now
             if notification is not None:
-                enqueue_notification(db, node, notification)
+                owner_id = db.scalar(select(Project.owner_id).where(Project.id == run.project_id))
+                if owner_id is None:
+                    raise ClaimLost
+                enqueue_notification(db, node, notification, owner_id)
             for finding in findings:
+                details = dict(finding.metadata)
+                if finding.verification is not None:
+                    details["verification"] = asdict(finding.verification)
                 db.add(FindingRow(
                     run_id=run.id, node_run_id=node.id, rule_id=finding.rule_id, category=finding.category,
                     severity=finding.severity, title=finding.title, description=finding.description,
                     remediation=finding.remediation, path=finding.path, line=finding.line,
-                    end_line=finding.end_line, evidence=finding.evidence, details=finding.metadata,
+                    end_line=finding.end_line, evidence=finding.evidence, details=details,
                 ))
 
     def finish_run(

@@ -8,8 +8,10 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..db.models import NodeRun, NotificationBatch, NotificationDelivery, ScanRun
+from ..db.encryption import require_cipher
+from ..db.models import NodeRun, NotificationBatch, NotificationDelivery, Project, ScanRun
 from .base import Attachment, DeliveryError, Message
+from .destinations import verified_telegram_recipients
 from .email import ADDRESS
 from .telegram import CHAT_ID
 
@@ -32,7 +34,7 @@ def allowed_recipients(settings: Settings, channel: str) -> frozenset[str]:
 class NotificationDraft:
     channel: str
     recipients: tuple[str, ...]
-    allowed: frozenset[str]
+    allowed: frozenset[str] | None
     message: Message
 
 
@@ -46,9 +48,10 @@ class ClaimedDelivery:
     message: Message
     project_id: UUID | None = None
     credential_id: UUID | None = None
+    owner_id: UUID | None = None
 
 
-def enqueue_notification(db: Session, node: NodeRun, draft: NotificationDraft) -> None:
+def enqueue_notification(db: Session, node: NodeRun, draft: NotificationDraft, owner_id: UUID) -> None:
     attachment = next(iter(draft.message.attachments), None)
     batch = NotificationBatch(
         node_run_id=node.id, channel=draft.channel, subject=draft.message.subject, body=draft.message.text,
@@ -57,9 +60,18 @@ def enqueue_notification(db: Session, node: NodeRun, draft: NotificationDraft) -
     )
     db.add(batch)
     db.flush()
-    for recipient in dict.fromkeys(_recipient_key(draft.channel, value) for value in draft.recipients):
-        delivery = NotificationDelivery(batch_id=batch.id, recipient=recipient)
-        if recipient not in draft.allowed:
+    cipher = require_cipher(db.get_bind().dialect)
+    recipients = tuple(dict.fromkeys(_recipient_key(draft.channel, value) for value in draft.recipients))
+    verified = verified_telegram_recipients(db, owner_id, recipients) if draft.channel == "telegram" else None
+    for recipient in recipients:
+        delivery = NotificationDelivery(
+            batch_id=batch.id, recipient=recipient, recipient_key=cipher.digest(f"delivery:{batch.id}", recipient),
+        )
+        if verified is not None and recipient not in verified:
+            delivery.status = "failed"
+            delivery.error_code = "TELEGRAM_DESTINATION_UNVERIFIED"
+            delivery.error_message = "Подтвердите этот Telegram-чат в профиле владельца проекта."
+        elif draft.allowed is not None and recipient not in draft.allowed:
             delivery.status = "failed"
             delivery.error_code = "RECIPIENT_NOT_ALLOWED"
             delivery.error_message = "Получатель не входит в разрешённый список сервера."
@@ -88,20 +100,21 @@ def expire_deliveries(db: Session, now: datetime) -> None:
 
 def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> ClaimedDelivery | None:
     result = db.execute(
-        select(NotificationDelivery, NotificationBatch, ScanRun.project_id, ScanRun.graph_snapshot, NodeRun.node_id)
+        select(NotificationDelivery, NotificationBatch, ScanRun.project_id, ScanRun.graph_snapshot, NodeRun.node_id, Project.owner_id)
         .join(NotificationBatch, NotificationDelivery.batch_id == NotificationBatch.id)
         .join(NodeRun, NotificationBatch.node_run_id == NodeRun.id)
         .join(ScanRun, NodeRun.run_id == ScanRun.id)
+        .join(Project, Project.id == ScanRun.project_id)
         .where(
             NotificationDelivery.status == "queued", NotificationDelivery.next_attempt_at <= now,
-            ScanRun.status.in_(("succeeded", "partial")),
+            ScanRun.status.in_(("succeeded", "partial")), Project.owner_id.is_not(None),
         )
         .order_by(NotificationDelivery.next_attempt_at, NotificationDelivery.id).limit(1)
         .with_for_update(of=NotificationDelivery, skip_locked=True)
     ).first()
     if result is None:
         return None
-    delivery, batch, project_id, graph, node_id = result
+    delivery, batch, project_id, graph, node_id, owner_id = result
     config = next((node.get("config", {}) for node in graph["nodes"] if node["id"] == node_id), {})
     credential_id = config.get("credential_id")
     token = uuid4()
@@ -116,7 +129,7 @@ def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> Claim
     return ClaimedDelivery(
         delivery.id, token, batch.channel, delivery.recipient, delivery.phase,
         Message(batch.subject, batch.body, attachment),
-        project_id, UUID(credential_id) if credential_id is not None else None,
+        project_id, UUID(credential_id) if credential_id is not None else None, owner_id,
     )
 
 
@@ -177,7 +190,7 @@ def delivery_summary(db: Session, run_id: UUID) -> dict[str, dict]:
         select(NodeRun.node_id, NotificationBatch.channel, NotificationDelivery)
         .join(NotificationBatch, NodeRun.id == NotificationBatch.node_run_id)
         .join(NotificationDelivery, NotificationBatch.id == NotificationDelivery.batch_id)
-        .where(NodeRun.run_id == run_id).order_by(NodeRun.node_id, NotificationDelivery.recipient)
+        .where(NodeRun.run_id == run_id).order_by(NodeRun.node_id, NotificationDelivery.id)
     )
     summaries: dict[str, dict] = {}
     for node_id, channel, row in rows:

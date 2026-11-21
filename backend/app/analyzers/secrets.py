@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Iterator
 
@@ -156,7 +157,7 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
     for node in kotlin.walk(source.root, "property_declaration"):
         value = kotlin.property_value(node)
         if value is not None and (finding := check(value[1], _role(value[0]), node)):
-            yield finding
+            yield replace(finding, metadata=finding.metadata | {"property_offset": str(node.start_byte)})
 
     for node in kotlin.walk(source.root, "assignment"):
         left, right = (node.child_by_field_name(side) for side in ("left", "right"))
@@ -271,6 +272,21 @@ def _toml_entries(content: str) -> Iterator[tuple[tuple[str, ...], str, int, int
             yield keys, str(value), index, index
 
 
+def _configuration_entries(name: PurePosixPath, content: str) -> Iterator[tuple[tuple[str, ...], str, int, int]]:
+    extension = name.suffix
+    if extension == ".json":
+        json.loads(content)
+    if extension in {".yaml", ".yml", ".json"}:
+        return _yaml_entries(content)
+    if extension == ".toml":
+        return _toml_entries(content)
+    return _properties_entries(content, dotenv=_is_dotenv(name))
+
+
+def _is_dotenv(name: PurePosixPath) -> bool:
+    return name.name.startswith(".env") or name.suffix == ".env"
+
+
 def scan_secrets(snapshot: Snapshot) -> ScanResult:
     scan = Scan(snapshot, accepts_secrets_source)
     findings = []
@@ -284,16 +300,8 @@ def scan_secrets(snapshot: Snapshot) -> ScanResult:
             findings.extend(_kotlin_findings(path, source))
             continue
         try:
-            dotenv = name.name.startswith(".env") or extension == ".env"
-            if extension == ".json":
-                json.loads(content)
-            if extension in {".yaml", ".yml", ".json"}:
-                entries = _yaml_entries(content)
-            elif extension == ".toml":
-                entries = _toml_entries(content)
-            else:
-                entries = _properties_entries(content, dotenv=dotenv)
-            for keys, value, start, end in entries:
+            dotenv = _is_dotenv(name)
+            for keys, value, start, end in _configuration_entries(name, content):
                 if finding := _configuration_finding(path, keys, value, start, end, dotenv=dotenv):
                     findings.append(finding)
         except tomllib.TOMLDecodeError:

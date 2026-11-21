@@ -20,6 +20,8 @@ class TemplateRead(ReadModel):
     graph: Graph = Field(validation_alias="graph_json")
     schedule: ScheduleSettings | None
     created_at: datetime
+    updated_at: datetime
+    can_edit: bool
 
 
 class TemplateCopy(Input):

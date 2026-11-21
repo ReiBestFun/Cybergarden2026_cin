@@ -58,8 +58,9 @@ class ClaimedRun:
 
 def claim_next(db: Session) -> ClaimedRun | None:
     run = db.scalar(
-        select(ScanRun).where(ScanRun.status == "queued")
-        .order_by(ScanRun.created_at, ScanRun.id).limit(1).with_for_update(skip_locked=True)
+        select(ScanRun).join(Project, Project.id == ScanRun.project_id)
+        .where(ScanRun.status == "queued", Project.owner_id.is_not(None))
+        .order_by(ScanRun.created_at, ScanRun.id).limit(1).with_for_update(of=ScanRun, skip_locked=True)
     )
     if run is None:
         return None
@@ -89,10 +90,10 @@ def fail_run(db: Session, run: ScanRun, code: str, message: str) -> None:
 
 def expire_stale_runs(db: Session, cutoff: datetime) -> int:
     runs = db.scalars(
-        select(ScanRun).where(
-            ScanRun.status == "running",
+        select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
+            ScanRun.status == "running", Project.owner_id.is_not(None),
             func.coalesce(ScanRun.heartbeat_at, ScanRun.started_at, ScanRun.created_at) < cutoff,
-        ).with_for_update(skip_locked=True)
+        ).with_for_update(of=ScanRun, skip_locked=True)
     ).all()
     for run in runs:
         fail_run(db, run, "WORKER_EXPIRED", "Воркер перестал обновлять состояние запуска.")
@@ -107,8 +108,9 @@ def enqueue_due_schedules(db: Session, now: datetime, limit: int = 20) -> int:
     produce a single run, after which the schedule moves to the next future slot.
     """
     schedules = db.scalars(
-        select(Schedule).where(Schedule.enabled, Schedule.next_run_at <= now)
-        .order_by(Schedule.next_run_at).limit(limit).with_for_update(skip_locked=True)
+        select(Schedule).join(Workflow, Workflow.id == Schedule.workflow_id).join(Project, Project.id == Workflow.project_id)
+        .where(Schedule.enabled, Schedule.next_run_at <= now, Project.owner_id.is_not(None))
+        .order_by(Schedule.next_run_at).limit(limit).with_for_update(of=Schedule, skip_locked=True)
     ).all()
     created = 0
     for schedule in schedules:

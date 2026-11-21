@@ -10,7 +10,7 @@ export function watchRun(
   ));
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(signal.reason); return; }
-    const source = new EventSource(apiUrl(`/api/runs/${id}/events${waitForDelivery ? '?wait_for_delivery=true' : ''}`));
+    const source = new EventSource(apiUrl(`/api/runs/${id}/events${waitForDelivery ? '?wait_for_delivery=true' : ''}`), { withCredentials: true });
     const close = () => {
       source.close();
       signal.removeEventListener('abort', abort);

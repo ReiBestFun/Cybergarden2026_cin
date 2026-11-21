@@ -2,6 +2,7 @@
 
 import os
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -37,12 +38,22 @@ def _read_run(resource: str, **params: int) -> dict:
     except ValueError:
         raise ValueError("Для доступа к результатам укажите CYBERFLOW_MCP_RUN_ID в настройках MCP-клиента.") from None
     base = os.environ.get("CYBERFLOW_API_URL", "http://127.0.0.1:8000/api").rstrip("/")
+    token = os.environ.get("CYBERFLOW_MCP_SESSION_TOKEN")
+    cookies = {"cyberflow_session": token} if token else None
+    if token:
+        url = urlsplit(base)
+        if url.scheme != "https" and not (
+            url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
+        ):
+            raise ValueError("Для передачи сессии CyberFlow используйте HTTPS или локальный API.")
     try:
-        with httpx.Client(timeout=10, trust_env=False) as client:
+        with httpx.Client(timeout=10, trust_env=False, cookies=cookies) as client:
             response = client.get(f"{base}/runs/{run_id}/{resource}", params=params)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as error:
+        if error.response.status_code == 401:
+            raise ValueError("Задайте действующий CYBERFLOW_MCP_SESSION_TOKEN в настройках MCP-клиента.") from None
         raise ValueError(f"CyberFlow API вернул HTTP {error.response.status_code}.") from None
     except (httpx.RequestError, httpx.InvalidURL, ValueError):
         raise ValueError("Не удалось прочитать ответ CyberFlow API.") from None

@@ -1,14 +1,18 @@
 import json
+import re
 import smtplib
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email import message_from_bytes, policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from secrets import randbits
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+from sqlalchemy import select, text
 
 from backend.app.analyzers.models import Finding, Snapshot
 from backend.app.config import Settings
@@ -24,7 +28,7 @@ from backend.app.reports import RunReport
 from backend.app.schemas.contracts import Graph
 from backend.app.workflows import execution
 from backend.app.workflows.validation import validate_draft, validate_graph
-from backend.tests.test_api import api, enqueue_for_worker
+from backend.tests.test_api import ORIGIN, api, enqueue_for_worker, login
 
 TOKEN = "123456:TEST-token-value"
 
@@ -201,6 +205,14 @@ def _prepare_sources(monkeypatch):
 
 def test_worker_delivers_email_and_retries_only_telegram_attachment(api, telegram_api, monkeypatch):
     client, sessions = api
+    client.app.state.settings.telegram_bot_token = SecretStr(TOKEN)
+    client.app.state.settings.telegram_api_base = telegram_api
+    destination = client.post("/api/telegram-destinations", json={"label": "Тест", "chat_id": "-100429"}).json()
+    path_to_destination = f"/api/telegram-destinations/{destination['id']}"
+    client.post(path_to_destination + "/challenge").raise_for_status()
+    code = re.search(r"\b[0-9]{8}\b", json.loads(_FakeTelegram.calls[-1][2])["text"])[0]
+    client.post(path_to_destination + "/verify", json={"code": code}).raise_for_status()
+    _FakeTelegram.calls.clear()
     _prepare_sources(monkeypatch)
     graph = _graph(
         ("notify_email", {"recipients": ["dev1@example.org", "outside@example.org", "dev1@EXAMPLE.ORG"]}),
@@ -249,6 +261,55 @@ def test_worker_delivers_email_and_retries_only_telegram_attachment(api, telegra
     delivered, = report_response.json()["delivery"]["n1"]["recipients"]
     assert delivered["status"] == "accepted" and delivered["attachment_id"] != delivered["message_id"]
     assert client.get(path).json()["status"] == "succeeded"
+
+
+def test_telegram_confirmation_is_owner_scoped_and_removed_chat_cannot_receive_report(api, telegram_api, monkeypatch):
+    client, sessions = api
+    client.app.state.settings.telegram_bot_token = SecretStr(TOKEN)
+    client.app.state.settings.telegram_api_base = telegram_api
+    client.app.state.settings.notify_telegram_recipients = []
+    chat = "-100575321"
+    response = client.post("/api/telegram-destinations", json={"label": "Private chat", "chat_id": chat})
+    assert response.status_code == 201
+    destination_id = response.json()["id"]
+    path = f"/api/telegram-destinations/{destination_id}"
+    assert not _FakeTelegram.calls
+    challenge = client.post(path + "/challenge")
+    assert challenge.status_code == 200 and challenge.json()["verified_at"] is None
+    code = re.search(r"\b[0-9]{8}\b", json.loads(_FakeTelegram.calls[-1][2])["text"])[0]
+    assert code not in challenge.text
+    assert client.post(path + "/challenge").status_code == 429
+    wrong = "00000000" if code != "00000000" else "00000001"
+    assert client.post(path + "/verify", json={"code": wrong}).status_code == 422
+
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get("/api/telegram-destinations").json()["items"] == []
+        assert other.post(path + "/verify", json={"code": code}).status_code == 404
+        assert other.delete(path).status_code == 404
+        _prepare_sources(monkeypatch)
+        graph = _graph(("notify_telegram", {"recipients": [chat]}))
+        settings = Settings(telegram_bot_token=TOKEN, telegram_api_base=telegram_api, notify_telegram_recipients=[])
+        foreign_run = enqueue_for_worker((other, sessions), graph.model_dump())
+        assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+        delivery = other.get(f"/api/runs/{foreign_run}/report").json()["delivery"]["n0"]["recipients"][0]
+        assert delivery["error_code"] == "TELEGRAM_DESTINATION_UNVERIFIED"
+
+    with sessions() as db:
+        stored = db.execute(text(
+            "SELECT chat_id, label, challenge_hash FROM telegram_destinations WHERE id = :id",
+        ), {"id": UUID(destination_id)}).one()
+        assert all(value not in repr(stored) for value in (chat, "Private chat", code))
+    confirmed = client.post(path + "/verify", json={"code": code})
+    assert confirmed.json()["verified_at"] is not None
+
+    run_id = enqueue_for_worker(api, graph.model_dump(), priority=-1)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    assert client.delete(path).status_code == 204
+    assert process_next(sessions, settings)
+    delivery = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"][0]
+    assert delivery["error_code"] == "TELEGRAM_DESTINATION_UNVERIFIED"
+    assert len(_FakeTelegram.calls) == 1  # only the fake verification message was sent
 
 
 def test_expired_delivery_stays_unknown_and_cannot_be_taken_again(api, monkeypatch):

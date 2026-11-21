@@ -6,7 +6,7 @@ import { NodeInspector } from '../features/editor/NodeInspector';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
 import { watchRun } from '../shared/api/runEvents';
-import { exportUrl, getReport, isFinished, listFindings, type Finding, type RunDetail, type RunReport } from '../shared/api/workflows';
+import { exportUrl, getReport, isFinished, listFindings, type Finding, type FindingVerification, type RunDetail, type RunReport } from '../shared/api/workflows';
 
 // The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
 const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
@@ -16,6 +16,9 @@ const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
   low: { background: '#e0f2fe', color: '#075985' },
 };
 const CATEGORY_LABEL: Record<string, string> = { secrets: 'SECRET', sca: 'SCA', sast: 'SAST' };
+const VERIFICATION_LABEL: Record<FindingVerification['status'], string> = {
+  confirmed: 'Подтверждено', needs_review: 'Нужна проверка', false_positive: 'Ложное срабатывание',
+};
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частичное покрытие', failed: 'ошибка' };
 const CI_LABEL: Record<string, string> = {
   passed: 'Проверка CI пройдена', blocked: 'CI заблокирован по критичности', error: 'Проверка CI завершилась ошибкой',
@@ -202,7 +205,7 @@ export function Results() {
           {shown.length ? (
             <table>
               <thead>
-                <tr><th>Категория</th><th>Находка</th><th>Критичность</th><th>Путь</th><th>Строка</th></tr>
+                <tr><th>Категория</th><th>Находка</th><th>Критичность</th><th>Путь</th><th>Строка</th><th>Дополнительная проверка</th></tr>
               </thead>
               <tbody>
                 {shown.map((f) => (
@@ -212,6 +215,12 @@ export function Results() {
                     <td><span className="tag" style={SEVERITY_STYLE[f.severity]}>{f.severity.toUpperCase()}</span></td>
                     <td><code>{f.path}</code></td>
                     <td>{f.line ?? '—'}{f.end_line && f.end_line !== f.line ? `–${f.end_line}` : ''}</td>
+                    <td>
+                      {f.verification ? <>
+                        {VERIFICATION_LABEL[f.verification.status]}<br />
+                        <small className="muted">{f.verification.message}</small>
+                      </> : '—'}
+                    </td>
                   </tr>
                 ))}
               </tbody>

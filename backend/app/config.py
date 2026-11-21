@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://workflow:workflow@127.0.0.1:5432/workflow"
+    data_encryption_key: SecretStr | None = None
+    github_client_id: str = ""
+    github_client_secret: SecretStr | None = None
     frontend_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     allowed_repositories: list[str] = ["https://github.com/TBagirov/training"]
     # Development switch: accept any public GitHub repository instead of the allowlist above.

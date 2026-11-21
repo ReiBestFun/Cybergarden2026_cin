@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from multiprocessing.connection import Connection
 from pathlib import Path
 from queue import Empty, Queue
@@ -17,22 +18,26 @@ from time import monotonic
 from typing import Callable
 
 from .analyzers import Snapshot, VulnerabilityCatalog, scan_sast, scan_sca, scan_secrets
-from .analyzers.models import Category, ScanError, Warning
+from .analyzers.models import Category, FindingVerification, ScanError, Warning
 from .analyzers.sast import accepts_sast_source
 from .analyzers.sca import accepts_sca_source, catalog_missing
 from .analyzers.secrets import accepts_secrets_source
+from .analyzers.verification import verify_findings
 from .reports import NodeResult, RunReport, merge_findings, readable_report, submission_json
 
 ALL_SCANS: tuple[Category, ...] = ("secrets", "sca", "sast")
 _SCAN_FAILED = Warning("SCAN_INTERNAL_ERROR", "В анализаторе произошла внутренняя ошибка. Проверьте журнал воркера.")
 _PROCESS_EXIT = Warning("SCAN_PROCESS_EXIT", "Процесс анализатора завершился без полного результата.")
 _SCAN_TIMEOUT = Warning("SCAN_TIMEOUT", "Тестер превысил лимит времени.")
+_VERIFICATION_TIMEOUT = FindingVerification("needs_review", "VERIFICATION_TIMEOUT", "Дополнительная проверка превысила лимит времени.")
+_VERIFICATION_FAILED = FindingVerification("needs_review", "VERIFICATION_FAILED", "Дополнительная проверка не вернула результат.")
 log = logging.getLogger(__name__)
 
 
 def _scan_node(
     category: Category, snapshot: Snapshot, catalog_path: Path | None, output: Connection, run_id: str
 ) -> None:
+    catalog = None
     try:
         if category == "secrets":
             result = scan_secrets(snapshot)
@@ -41,7 +46,8 @@ def _scan_node(
         else:
             if catalog_path is None:
                 raise catalog_missing()
-            result = scan_sca(snapshot, VulnerabilityCatalog.from_file(catalog_path))
+            catalog = VulnerabilityCatalog.from_file(catalog_path)
+            result = scan_sca(snapshot, catalog)
         outcome = NodeResult(category, "succeeded", result)
     except ScanError as error:
         outcome = NodeResult(category, "failed", warning=error.warning)
@@ -50,13 +56,43 @@ def _scan_node(
         outcome = NodeResult(category, "failed", warning=_SCAN_FAILED)
     with output:
         output.send(outcome)
+        if outcome.result is not None and outcome.result.findings:
+            try:
+                verdicts = verify_findings(snapshot, outcome.result.findings, catalog)
+            except Exception as error:
+                log.error("Run %s, scanner %s, verification: %s", run_id, category, type(error).__name__)
+                verdicts = None
+            output.send(verdicts)
 
 
 def _receive_outcome(reader: Connection, received: Queue, category: Category) -> None:
     try:
-        received.put(reader.recv())
+        outcome = reader.recv()
     except Exception:
-        received.put(NodeResult(category, "failed", warning=_PROCESS_EXIT))
+        outcome = NodeResult(category, "failed", warning=_PROCESS_EXIT)
+    received.put(outcome)
+    if outcome.result is not None and outcome.result.findings:
+        try:
+            received.put(reader.recv())
+        except Exception:
+            received.put(None)
+
+
+def _verified_outcome(outcome: NodeResult, received: Queue, deadline: float) -> NodeResult:
+    result = outcome.result
+    if result is None or not result.findings:
+        return outcome
+    try:
+        verdicts = received.get(timeout=max(0, deadline - monotonic()))
+    except Empty:
+        verdicts = (_VERIFICATION_TIMEOUT,) * len(result.findings)
+    if verdicts is None or len(verdicts) != len(result.findings):
+        verdicts = (_VERIFICATION_FAILED,) * len(result.findings)
+    findings = tuple(
+        replace(finding, verification=verdict)
+        for finding, verdict in zip(result.findings, verdicts, strict=True)
+    )
+    return replace(outcome, result=replace(result, findings=findings))
 
 
 def run_scan(
@@ -80,13 +116,15 @@ def run_scan(
             process.close()
             return NodeResult(category, "failed", warning=_PROCESS_EXIT)
         writer.close()
-        received = Queue(maxsize=1)
+        received = Queue(maxsize=2)
         receive = Thread(target=_receive_outcome, args=(reader, received, category), daemon=True)
         receive.start()
         try:
             outcome = received.get(timeout=max(0, deadline - monotonic()))
         except Empty:
             outcome = NodeResult(category, "failed", warning=_SCAN_TIMEOUT)
+        else:
+            outcome = _verified_outcome(outcome, received, deadline)
         finally:
             process.join(min(0.1, max(0, deadline - monotonic())))
             if process.is_alive():

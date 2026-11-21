@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .analyzers.models import Warning
 from .config import Settings
+from .db.encryption import check_storage_key
 from .db.session import make_engine
 from .integrations.repository import Allowlist, repository_allowlist
 from .workflows.execution import GraphExecution
@@ -82,7 +83,9 @@ def main() -> int:
     allowed = repository_allowlist(settings.allowed_repositories, settings.allow_any_repository)
     if allowed is None:
         log.warning("ALLOW_ANY_REPOSITORY is on: any public GitHub repository can be scanned")
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url, settings.data_encryption_key)
+    with engine.connect() as connection:
+        check_storage_key(connection)
     sessions = sessionmaker(engine)
     stop = Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())

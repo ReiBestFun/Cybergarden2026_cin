@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from .analyzers.models import ScanError
 from .config import Settings
 from .credentials import resolve_credential
+from .db.encryption import check_storage_key
 from .db.session import make_engine
 from .notifications.base import DeliveryError, NotifierError
+from .notifications.destinations import verified_telegram_recipients
 from .notifications.email import EmailChannel
 from .notifications.queue import ClaimedDelivery, allowed_recipients, claim_delivery, expire_deliveries, finish_delivery
 from .notifications.telegram import TelegramChannel
@@ -46,13 +48,21 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
         now = datetime.now(UTC)
         expire_deliveries(db, now)
         job = claim_delivery(db, now, lease_seconds=max(60, settings.notify_timeout_seconds * 12))
+        unverified = job is not None and job.channel == "telegram" and not verified_telegram_recipients(
+            db, job.owner_id, [job.recipient],
+        )
     if job is None:
         return False
 
     provider_id = None
     error = None
     try:
-        if job.recipient not in allowed_recipients(settings, job.channel):
+        if job.owner_id is None:
+            raise DeliveryError("PROJECT_UNOWNED", "Назначьте владельца проекта перед отправкой отчётов.")
+        if unverified:
+            raise DeliveryError("TELEGRAM_DESTINATION_UNVERIFIED", "Подтвердите этот Telegram-чат в профиле владельца проекта.")
+        restricted = job.channel == "email" or settings.notify_telegram_recipients
+        if restricted and job.recipient not in allowed_recipients(settings, job.channel):
             raise DeliveryError("RECIPIENT_NOT_ALLOWED", "Получатель не входит в разрешённый список сервера.")
         credential = None
         if job.credential_id is not None and job.project_id is not None:
@@ -84,7 +94,9 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings()
-    engine = make_engine(settings.database_url)
+    engine = make_engine(settings.database_url, settings.data_encryption_key)
+    with engine.connect() as connection:
+        check_storage_key(connection)
     sessions = sessionmaker(engine)
     stop = Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())

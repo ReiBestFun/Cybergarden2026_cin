@@ -23,21 +23,28 @@ def accepts_password_source(path: PurePosixPath) -> bool:
 def _password_input(source: kt.KotlinFile, node: Node) -> bool:
     """Follow aliases and common conversions of the actual digest input."""
     seen: set[Node] = set()
-    while node not in seen:
+    pending = [node]
+    while pending:
+        node = pending.pop()
+        if node in seen:
+            continue
         seen.add(node)
         if node.type == "identifier" and _PASSWORD_NAME.fullmatch(kt.text(node)):
             return True
         resolved = source.resolve(node)
         if resolved != node:
-            node = resolved
+            pending.append(resolved)
+            continue
+        if node.type == "binary_expression" and kt.operator(node) == "+":
+            pending.extend(kt.children(node))
             continue
         if node.type == "navigation_expression":
-            return bool(_PASSWORD_NAME.fullmatch(kt.text(kt.children(node)[-1])))
+            if _PASSWORD_NAME.fullmatch(kt.text(kt.children(node)[-1])):
+                return True
+            continue
         call = kt.call(node)
         if call and call.receiver and call.name in {"toByteArray", "encodeToByteArray", "toCharArray", "toString"}:
-            node = call.receiver
-            continue
-        break
+            pending.append(call.receiver)
     return False
 
 

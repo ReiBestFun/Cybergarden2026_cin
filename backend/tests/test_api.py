@@ -87,15 +87,20 @@ def test_github_actions_template_and_gate_config():
     for mode, runner in [("local", ["self-hosted", "Windows", "cyberflow"]), ("hosted", "ubuntu-latest")]:
         workflow = yaml.load(security_workflow(workflow_id, "release/demo", mode), Loader=yaml.BaseLoader)
         assert workflow["on"]["push"]["branches"] == ["release/demo"]
-        assert workflow["on"]["pull_request"]["branches"] == ["release/demo"]
+        trigger = workflow["on"]["pull_request_target"]
+        assert trigger["branches"] == ["release/demo"]
+        assert set(trigger["types"]) == {"opened", "reopened", "synchronize", "edited"}
         assert workflow["permissions"] == {}
         job = workflow["jobs"]["cyberflow"]
-        assert "CyberFlow PR gate" in job["name"]
-        assert job["steps"][0]["env"]["SOURCE_SHA"] == "${{ github.sha }}"
-        if mode == "hosted":
-            assert job["runs-on"] == runner
-        else:
-            assert "ubuntu-latest" in job["runs-on"] and "self-hosted" in job["runs-on"]
+        assert job["runs-on"] == runner
+        assert job["env"]["SOURCE_SHA"] == "${{ github.sha }}"
+        pr = workflow["jobs"]["report-pr"]
+        assert pr["env"]["SOURCE_SHA"] == "${{ github.event.pull_request.head.sha }}"
+        assert pr["runs-on"] == "ubuntu-latest"
+        assert pr["permissions"] == {"statuses": "write"}
+        assert pr["steps"][-1]["if"] == "always()"
+        assert pr["steps"][-1]["env"]["SCAN_OUTCOME"] == "${{ steps.scan.outcome }}"
+        assert pr["steps"][-1]["env"]["DECISION"] == "${{ steps.scan.outputs.decision }}"
         assert job["steps"][0]["env"]["CYBERFLOW_TOKEN"] == "${{ secrets.CYBERFLOW_TOKEN }}"
     assert validate_graph(Graph.model_validate(ci_graph()), expected_trigger="ci_trigger") == []
     assert validate_graph(Graph.model_validate(ci_graph("LOW")))[0].code == "INVALID_CONFIG"

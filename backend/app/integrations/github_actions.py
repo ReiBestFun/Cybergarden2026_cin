@@ -9,26 +9,73 @@ _WORKFLOW = Template('''name: CyberFlow Security
 on:
   push:
     branches: [$branch]
-  pull_request:
+  pull_request_target:
     branches: [$branch]
+    types: [opened, reopened, synchronize, edited]
 permissions: {}
 jobs:
   cyberflow:
-    name: $${{ github.event_name == 'pull_request' && 'CyberFlow PR gate' || 'cyberflow' }}
-    if: $${{ !github.event.deleted }}
+    if: $${{ github.event_name == 'push' && !github.event.deleted }}
     runs-on: $runner
     defaults:
       run:
         shell: $shell
     timeout-minutes: 12
+    env:
+      SOURCE_SHA: $${{ github.sha }}
     steps:
-      - name: Check commit with CyberFlow
+$scan_step
+  report-pr:
+    name: Report CyberFlow verdict
+    if: github.event_name == 'pull_request_target' && github.repository == 'TBagirov/training'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh
+    permissions:
+      statuses: write
+    env:
+      SOURCE_SHA: $${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Mark PR check pending
+        shell: bash
+        env:
+          GH_TOKEN: $${{ github.token }}
+          STATE: pending
+          DESCRIPTION: CyberFlow is scanning this commit
+        run: $publish_status
+      - *scan
+      - name: Publish verdict on the checked commit
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: $${{ github.token }}
+          SCAN_OUTCOME: $${{ steps.scan.outcome }}
+          DECISION: $${{ steps.scan.outputs.decision }}
+        run: |
+          case "$$SCAN_OUTCOME/$$DECISION" in
+            success/*) STATE=success; DESCRIPTION='CyberFlow passed' ;;
+            failure/blocked) STATE=failure; DESCRIPTION='CyberFlow blocked the commit' ;;
+            *) STATE=error; DESCRIPTION='CyberFlow scan error' ;;
+          esac
+          $publish_status
+''')
+
+_PUBLISH_STATUS = (
+    'gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" '
+    '-f context="CyberFlow PR gate" -f state="$STATE" -f description="$DESCRIPTION" '
+    '-f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"'
+)
+
+_SCAN_STEP = Template('''      - &scan
+        name: Check commit with CyberFlow
+        id: scan
         env:
           CYBERFLOW_API_URL: $${{ vars.CYBERFLOW_API_URL }}
           CYBERFLOW_TOKEN: $${{ secrets.CYBERFLOW_TOKEN }}
           CYBERFLOW_WORKFLOW_ID: "$workflow_id"
           SOURCE_REPOSITORY: $${{ github.repository }}
-          SOURCE_SHA: $${{ github.sha }}
           SOURCE_RUN_ID: $${{ github.run_id }}
           SOURCE_RUN_ATTEMPT: $${{ github.run_attempt }}
         run: |
@@ -67,18 +114,17 @@ jobs:
             throw "CyberFlow error: incomplete scan for $$env:SOURCE_SHA."
           }
           Write-Output "Commit $$env:SOURCE_SHA. CyberFlow: $$($$result.gate.decision), $$($$result.gate.reason)."
+          if ($$result.gate.decision -eq 'blocked' -and $$env:GITHUB_OUTPUT) {
+            Add-Content -LiteralPath $$env:GITHUB_OUTPUT -Value 'decision=blocked' -Encoding utf8
+          }
           if ($$result.gate.decision -ne 'passed') { exit 1 }
 ''')
 
 
 def security_workflow(workflow_id: UUID, branch: str, mode: RunnerMode) -> str:
     local = mode == "local"
-    local_runner = "${{ github.event_name == 'push' && fromJSON('%s') || 'ubuntu-latest' }}" % json.dumps(
-        ["self-hosted", "Windows", "cyberflow"],
-    )
     return _WORKFLOW.substitute(
-        branch=json.dumps(branch), workflow_id=str(workflow_id),
-        runner=(local_runner if local else "ubuntu-latest"),
-        shell=("${{ github.event_name == 'push' && 'powershell' || 'pwsh' }}" if local else "pwsh"),
-        allow_loopback="$true" if local else "$false",
+        branch=json.dumps(branch), runner="[self-hosted, Windows, cyberflow]" if local else "ubuntu-latest",
+        shell="powershell" if local else "pwsh", publish_status=_PUBLISH_STATUS,
+        scan_step=_SCAN_STEP.substitute(workflow_id=workflow_id, allow_loopback="$true" if local else "$false").rstrip(),
     )

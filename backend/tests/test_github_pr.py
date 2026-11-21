@@ -10,20 +10,20 @@ import yaml
 from backend.app.integrations.github_actions import security_workflow
 
 
-@pytest.mark.parametrize(("decision", "status", "stale", "success", "message"), [
-    ("passed", "succeeded", False, True, "passed"),
-    ("blocked", "succeeded", False, False, "blocked"),
-    ("error", "failed", False, False, "error"),
-    ("passed", "succeeded", True, False, "SHA mismatch"),
-    ("passed", "partial", False, False, "incomplete"),
+@pytest.mark.parametrize(("decision", "status", "stale", "expected", "message"), [
+    ("passed", "succeeded", False, "success", "passed"),
+    ("blocked", "succeeded", False, "failure", "blocked"),
+    ("error", "failed", False, "error", "error"),
+    ("passed", "succeeded", True, "error", "SHA mismatch"),
+    ("passed", "partial", False, "error", "incomplete"),
 ])
-def test_exported_pr_step(tmp_path, decision, status, stale, success, message):
+def test_exported_pr_step(tmp_path, decision, status, stale, expected, message):
     shell = shutil.which("pwsh") or shutil.which("powershell")
     if not shell:
         pytest.skip("Install PowerShell to execute the exported GitHub Actions step.")
     workflow_id = UUID(int=13)
     workflow = yaml.load(security_workflow(workflow_id, "main", "hosted"), Loader=yaml.BaseLoader)
-    step = workflow["jobs"]["cyberflow"]["steps"][0]
+    pending, step, publish = workflow["jobs"]["report-pr"]["steps"]
     sha = "a" * 40
     run_id = str(UUID(int=1))
     result = {
@@ -48,12 +48,28 @@ function Invoke-RestMethod($Method, $Uri, $Headers, $ContentType, $Body, $Timeou
 """
     script = tmp_path / "check.ps1"
     script.write_text(simulator + step["run"], encoding="utf-8")
+    outputs = tmp_path / "outputs"
     process = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-File", str(script)], env={
         **os.environ, "CYBERFLOW_API_URL": "https://ci.example", "CYBERFLOW_TOKEN": "simulator-token",
         "CYBERFLOW_WORKFLOW_ID": step["env"]["CYBERFLOW_WORKFLOW_ID"], "SOURCE_REPOSITORY": "TBagirov/training",
-        "SOURCE_SHA": sha, "SOURCE_RUN_ID": "13", "SOURCE_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "pull_request",
+        "SOURCE_SHA": sha, "SOURCE_RUN_ID": "13", "SOURCE_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "pull_request_target",
+        "GITHUB_OUTPUT": str(outputs),
         "SIM_RUN_ID": run_id, "SIM_RESULT": json.dumps(result),
     }, capture_output=True, text=True, timeout=15)
     output = process.stdout + process.stderr
-    assert (process.returncode == 0) == success, output
+    outcome = "success" if process.returncode == 0 else "failure"
+    assert (outcome == "success") == (expected == "success"), output
     assert message in output, output
+    step_outputs = {}
+    if outputs.exists():
+        step_outputs = dict(line.split("=", 1) for line in outputs.read_text(encoding="utf-8-sig").splitlines())
+    for publication, state in [(pending, "pending"), (publish, expected)]:
+        # Capture the actual GitHub CLI request without sending a status to GitHub.
+        command = "gh() { printf '%s\\n' \"$@\"; }\n" + publication["run"]
+        request = subprocess.run(["bash", "-eu", "-c", command], capture_output=True, text=True, check=True, env={
+            **os.environ, **publication["env"], "GITHUB_REPOSITORY": "TBagirov/training", "SOURCE_SHA": sha,
+            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "13",
+            "SCAN_OUTCOME": outcome, "DECISION": step_outputs.get("decision", ""),
+        }).stdout.splitlines()
+        assert request[:4] == ["api", "--method", "POST", f"repos/TBagirov/training/statuses/{sha}"]
+        assert "context=CyberFlow PR gate" in request and f"state={state}" in request

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from ..analyzers.models import Category, ScanError, Warning, finding_key
 from ..config import Settings
-from ..integrations.repository import RepositorySnapshot, prepare_repository
+from ..integrations.repository import Allowlist, RepositorySnapshot, prepare_repository
 from ..nodes.catalog import ConditionConfig
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import Edge, Graph, Node
@@ -74,7 +74,7 @@ def _scan_preview(outcome: NodeResult) -> dict:
 
 
 class GraphExecution:
-    def __init__(self, progress: RunProgress, settings: Settings, allowed: frozenset[str]):
+    def __init__(self, progress: RunProgress, settings: Settings, allowed: Allowlist):
         self.progress = progress
         self.settings = settings
         self.allowed = allowed

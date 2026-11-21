@@ -12,7 +12,7 @@ from .api import projects, runs, workflows
 from .api.common import ApiError
 from .config import Settings
 from .db.session import Database, make_engine
-from .integrations.repository import allowed_repository_urls
+from .integrations.repository import repository_allowlist
 from .schemas.contracts import ErrorResponse
 
 
@@ -29,7 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="AI Security Workflow", lifespan=lifespan)
     app.state.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
-    app.state.allowed_repositories = allowed_repository_urls(settings.allowed_repositories)
+    app.state.allowed_repositories = repository_allowlist(settings.allowed_repositories, settings.allow_any_repository)
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.frontend_origins,
         allow_methods=["GET", "POST", "PATCH", "PUT"], allow_headers=["Content-Type"],

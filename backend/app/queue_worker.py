@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .analyzers.models import Warning
 from .config import Settings
 from .db.session import make_engine
-from .integrations.repository import allowed_repository_urls
+from .integrations.repository import Allowlist, repository_allowlist
 from .workflows.execution import GraphExecution
 from .workflows.persistence import ClaimLost, RunProgress
 from .workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
@@ -39,7 +39,7 @@ def tick_schedules(sessions: sessionmaker[Session]) -> int:
 
 
 def run_next(
-    sessions: sessionmaker[Session], settings: Settings, allowed: frozenset[str]
+    sessions: sessionmaker[Session], settings: Settings, allowed: Allowlist
 ) -> bool:
     cutoff = datetime.now(UTC) - timedelta(seconds=settings.worker_stale_seconds)
     with sessions.begin() as db:
@@ -79,7 +79,9 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = Settings()
-    allowed = allowed_repository_urls(settings.allowed_repositories)
+    allowed = repository_allowlist(settings.allowed_repositories, settings.allow_any_repository)
+    if allowed is None:
+        log.warning("ALLOW_ANY_REPOSITORY is on: any public GitHub repository can be scanned")
     engine = make_engine(settings.database_url)
     sessions = sessionmaker(engine)
     stop = Event()

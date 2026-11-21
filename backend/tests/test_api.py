@@ -14,7 +14,9 @@ from sqlalchemy import select
 from backend.app.analyzers.models import ScanError, Snapshot, Warning
 from backend.app.config import Settings
 from backend.app.db.models import FindingRow, NodeRun, ScanRun, Schedule, Workflow
-from backend.app.integrations.repository import RepositorySnapshot, allowed_repository_urls, prepare_repository
+from backend.app.integrations.repository import (
+    RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
+)
 from backend.app.main import create_app
 from backend.app.queue_worker import run_next
 from backend.app.schemas.contracts import Graph
@@ -58,6 +60,13 @@ def test_graph_validation_types_ports_and_cycles():
     assert {"UNKNOWN_PORT", "WRONG_TRIGGER", "GRAPH_CYCLE", "MISSING_INPUT", "UNREACHABLE_NODE", "INVALID_CONFIG"} <= codes
 
 
+def test_allow_any_repository_switch():
+    strict = repository_allowlist(["https://github.com/TBagirov/training"], allow_any=False)
+    assert is_repository_allowed("https://github.com/tbagirov/TRAINING", strict)
+    assert not is_repository_allowed("https://github.com/other/project", strict)
+    assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
+
+
 def test_daily_schedule_skips_nonexistent_local_time():
     now = datetime(2026, 3, 28, 15, 0, tzinfo=UTC)
     assert next_daily_slot(time(2, 30), ZoneInfo("Europe/Berlin"), now) == datetime(2026, 3, 30, 0, 30, tzinfo=UTC)
@@ -71,7 +80,8 @@ def api(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", url)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
-    app = create_app(Settings(database_url=url))
+    # Tests use the strict allowlist regardless of a developer's local .env.
+    app = create_app(Settings(database_url=url, allow_any_repository=False))
     with TestClient(app) as client:
         yield client, app.state.session_factory
 
@@ -219,7 +229,7 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
 
     monkeypatch.setattr(execution, "prepare_repository", prepared)
     run_id = enqueue_for_worker(api, graph)
-    settings = Settings()
+    settings = Settings(allow_any_repository=False)
     assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
 
     base = f"/api/runs/{run_id}"
@@ -251,7 +261,7 @@ def test_queue_worker_reports_repository_failure(api, monkeypatch):
 
     monkeypatch.setattr(execution, "prepare_repository", unavailable)
     run_id = enqueue_for_worker(api, analysis_graph())
-    settings = Settings()
+    settings = Settings(allow_any_repository=False)
     assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
     detail = client.get(f"/api/runs/{run_id}").json()
     assert detail["status"] == "failed"

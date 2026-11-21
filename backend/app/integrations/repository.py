@@ -34,6 +34,18 @@ def allowed_repository_urls(urls: list[str]) -> frozenset[str]:
     return frozenset(canonical_repository_url(url).casefold() for url in urls)
 
 
+# None means "any public GitHub repository" (ALLOW_ANY_REPOSITORY=true).
+Allowlist = frozenset[str] | None
+
+
+def repository_allowlist(urls: list[str], allow_any: bool) -> Allowlist:
+    return None if allow_any else allowed_repository_urls(urls)
+
+
+def is_repository_allowed(canonical_url: str, allowed: Allowlist) -> bool:
+    return allowed is None or canonical_url.casefold() in allowed
+
+
 @dataclass(frozen=True)
 class RepositorySnapshot:
     snapshot: Snapshot
@@ -69,7 +81,7 @@ def prepare_repository(
     url: str,
     ref: str,
     *,
-    allowed: frozenset[str],
+    allowed: Allowlist,
     timeout: float,
     catalog_path: Path | None,
 ) -> Iterator[RepositorySnapshot]:
@@ -77,7 +89,7 @@ def prepare_repository(
         canonical = canonical_repository_url(url)
     except ValueError:
         raise ScanError(Warning("INVALID_REPOSITORY", "Указана некорректная ссылка на GitHub.")) from None
-    if canonical.casefold() not in allowed:
+    if not is_repository_allowed(canonical, allowed):
         raise ScanError(Warning("REPOSITORY_NOT_ALLOWED", "Репозиторий отсутствует в списке учебных источников."))
     if len(ref) > 255 or not re.fullmatch(REF_PATTERN, ref):
         raise ScanError(Warning("INVALID_REF", "Указана некорректная ветка, тег или коммит."))

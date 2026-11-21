@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from ..db.models import Project
 from ..db.session import Database
+from ..integrations.repository import is_repository_allowed
 from ..schemas.contracts import Page, ProjectCreate, ProjectRead
 from .common import ApiError, PageQuery, normalize_repository, page
 
@@ -27,7 +28,7 @@ def list_projects(db: Database, pagination: PageQuery) -> dict:
 @router.post("/projects", status_code=201, response_model=ProjectRead)
 def create_project(data: ProjectCreate, request: Request, db: Database) -> Project:
     url = normalize_repository(data.repository_url)
-    if url.casefold() not in request.app.state.allowed_repositories:
+    if not is_repository_allowed(url, request.app.state.allowed_repositories):
         raise ApiError(422, "REPOSITORY_NOT_ALLOWED", "Репозиторий отсутствует в списке учебных источников.", field="repository_url")
     project = Project(name=data.name, repository_url=url, default_ref=data.default_ref)
     db.add(project)

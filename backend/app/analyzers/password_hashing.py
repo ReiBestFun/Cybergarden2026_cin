@@ -1,6 +1,7 @@
 """Detect direct fast digests of password inputs in Kotlin code."""
 
 import re
+from collections.abc import Iterator
 from pathlib import PurePosixPath
 
 from tree_sitter import Node
@@ -48,20 +49,47 @@ def _password_input(source: kt.KotlinFile, node: Node) -> bool:
     return False
 
 
-def _algorithm(source: kt.KotlinFile, call: kt.Call) -> str | None:
-    if call.receiver is None:
-        return None
-    receiver = source.resolve(call.receiver)
-    if kt.text(receiver) in {"DigestUtils", "org.apache.commons.codec.digest.DigestUtils", "org.springframework.util.DigestUtils"}:
-        return _DIGEST_UTILS.get(call.name)
+def _digest_algorithm(source: kt.KotlinFile, receiver: Node) -> str | None:
     factory = kt.call(receiver)
-    if (call.name == "digest" and factory and factory.name == "getInstance"
+    if (factory and factory.name == "getInstance"
             and factory.receiver and kt.text(factory.receiver) in {"MessageDigest", "java.security.MessageDigest"}
             and factory.args):
         name = kt.literal(source.resolve(factory.args[0]))
         if name:
             return _ALGORITHMS.get(name.upper().replace("-", ""))
     return None
+
+
+def _password_digests(source: kt.KotlinFile) -> Iterator[tuple[Node, str]]:
+    pending: set[tuple[Node | None, Node]] = set()
+    for node in kt.walk(source.root, "call_expression"):
+        call = kt.call(node)
+        if not call or call.receiver is None:
+            continue
+        if call.name in _DIGEST_UTILS and len(call.args) == 1:
+            if kt.text(call.receiver) in {
+                "DigestUtils", "org.apache.commons.codec.digest.DigestUtils", "org.springframework.util.DigestUtils",
+            } and _password_input(source, call.args[0]):
+                yield node, _DIGEST_UTILS[call.name]
+            continue
+        if call.name not in {"digest", "update", "reset"}:
+            continue
+        receiver = source.resolve(call.receiver)
+        algorithm = _digest_algorithm(source, receiver)
+        if algorithm is None:
+            continue
+        scope = node.parent
+        while scope and scope.type not in {"block", "lambda_literal", "function_declaration"}:
+            scope = scope.parent
+        key = (scope, receiver)
+        if call.name == "update":
+            if call.args and _password_input(source, call.args[0]):
+                pending.add(key)
+        else:
+            direct = len(call.args) == 1 and _password_input(source, call.args[0])
+            if call.name == "digest" and (key in pending or direct):
+                yield node, algorithm
+            pending.discard(key)
 
 
 def scan_password_hashing(snapshot: Snapshot) -> ScanResult:
@@ -71,18 +99,13 @@ def scan_password_hashing(snapshot: Snapshot) -> ScanResult:
         source = kt.KotlinFile(data)
         if source.root.has_error:
             scan.skip(path, "KOTLIN_PARSE_ERROR", "Файл Kotlin разобран частично.")
-        for node in kt.walk(source.root, "call_expression"):
-            call = kt.call(node)
-            if not call or len(call.args) != 1:
-                continue
-            algorithm = _algorithm(source, call)
-            if algorithm and _password_input(source, call.args[0]):
-                findings.append(Finding(
-                    rule_id="sast.weak-password-hash", category="sast", severity="high",
-                    title="Быстрый хеш пароля",
-                    description=f"{algorithm} позволяет быстро перебирать варианты пароля по сохранённому хешу.",
-                    remediation="Используйте Argon2id или BCrypt. В Spring Security используйте PasswordEncoder для сохранения и проверки пароля.",
-                    path=path, line=kt.line(node), end_line=kt.end_line(node), evidence=algorithm,
-                    metadata={"class": "weak-password-hash", "algorithm": algorithm},
-                ))
+        for node, algorithm in _password_digests(source):
+            findings.append(Finding(
+                rule_id="sast.weak-password-hash", category="sast", severity="high",
+                title="Быстрый хеш пароля",
+                description=f"{algorithm} позволяет быстро перебирать варианты пароля по сохранённому хешу.",
+                remediation="Используйте Argon2id или BCrypt. В Spring Security используйте PasswordEncoder для сохранения и проверки пароля.",
+                path=path, line=kt.line(node), end_line=kt.end_line(node), evidence=algorithm,
+                metadata={"class": "weak-password-hash", "algorithm": algorithm},
+            ))
     return scan.result("sast", "Прямое хеширование паролей в Kotlin", findings)

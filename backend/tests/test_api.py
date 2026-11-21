@@ -566,6 +566,13 @@ fun checksum(file: File) = MessageDigest.getInstance("SHA-256").digest(file.read
 fun secure(password: String) = BCryptPasswordEncoder().encode(password)
 fun matches(password: String, stored: String) = Argon2PasswordEncoder.defaultsForSpringSecurity_v5_8().matches(password, stored)
 fun salted(password: String, salt: String) = DigestUtils.sha256Hex(salt + password)
+fun storeInParts(password: String, file: File) {
+    val md = MessageDigest.getInstance("SHA-1")
+    md.update(password.toByteArray())
+    save(md.digest())
+    md.update(file.readBytes())
+    checksum(md.digest())
+}
 """
 
     @contextmanager
@@ -581,13 +588,15 @@ fun salted(password: String, salt: String) = DigestUtils.sha256Hex(salt + passwo
     assert history["status"] == "succeeded"
     step = next(item for item in history["nodes"] if item["node_id"] == "scan")
     assert step["type"] == scanner["type"]
-    assert step["output_preview"]["finding_count"] == 4
+    assert step["output_preview"]["finding_count"] == 5
     findings = client.get(f"{base}/findings").json()["items"]
     assert [(f["metadata"]["algorithm"], f["line"]) for f in findings] == [
-        ("MD5", 1), ("SHA-1", 2), ("SHA-256", 5), ("SHA-256", 10),
+        ("MD5", 1), ("SHA-1", 2), ("SHA-256", 5), ("SHA-256", 10), ("SHA-1", 14),
     ]
     exported = client.get(f"{base}/export").json()["findings"]
-    assert [(f["path"], f["line"]) for f in exported] == [("Auth.kt", 1), ("Auth.kt", 2), ("Auth.kt", 5), ("Auth.kt", 10)]
+    assert [(f["path"], f["line"]) for f in exported] == [
+        ("Auth.kt", 1), ("Auth.kt", 2), ("Auth.kt", 5), ("Auth.kt", 10), ("Auth.kt", 14),
+    ]
     assert all("Argon2id" in f["remediation"] for f in exported)
 
 

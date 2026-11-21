@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from ..ai_reports import ReportError, explain_report
 from ..analyzers.models import Finding, ScanError, Warning, finding_key
+from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
@@ -18,13 +19,10 @@ from ..notifications import build_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import CiVerdict, Edge, Graph, Node
-from ..worker import Scanner, run_scan, scan_category
+from ..worker import run_scan
 from .persistence import RunProgress, error_payload
 from .validation import validate_graph
 
-SCANS: dict[str, Scanner] = {
-    "scan_secrets": "secrets", "scan_sca": "sca", "scan_sast": "sast", "scan_password_hashing": "password_hashing",
-}
 _COMPARISONS = {"eq": eq, "ne": ne, "gt": gt, "gte": ge, "lt": lt, "lte": le}
 _INACTIVE = Warning("INACTIVE_BRANCH", "Вход находится в невыбранной ветке.")
 _UPSTREAM_FAILED = Warning("UPSTREAM_FAILED", "Вход недоступен из-за ошибки предыдущей ноды.")
@@ -146,10 +144,10 @@ class GraphExecution:
                 raise ScanError(Warning("CI_SHA_MISMATCH", "Полученный коммит не совпадает с SHA из CI."))
             self.prepared = prepared
             return Step(ports=("snapshot",), preview={"commit_sha": self.sha, "files": len(self.prepared.snapshot.files)})
-        if node.type in SCANS:
+        if node.type in SCANNER_NODES:
             assert self.prepared is not None
             outcome = run_scan(
-                SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
+                SCANNER_NODES[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
                 run_id=str(self.progress.claim.id),
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
@@ -237,8 +235,9 @@ class GraphExecution:
     def _record(self, node: Node, step: Step) -> None:
         self.steps[node.id] = step
         findings = []
-        if node.type in SCANS:
-            outcome = step.scan or NodeResult(scan_category(SCANS[node.type]), step.status, warning=step.warning)
+        if node.type in SCANNER_NODES:
+            category = SCANNERS[SCANNER_NODES[node.type]].category
+            outcome = step.scan or NodeResult(category, step.status, warning=step.warning)
             self.scans[node.id] = outcome
             if outcome.result is not None:
                 for finding in outcome.result.findings:
@@ -277,7 +276,7 @@ class GraphExecution:
                 ready = order.get_ready()
                 scans = {
                     node_id: pool.submit(self._run_node, nodes[node_id], incoming[node_id], resources)
-                    for node_id in ready if nodes[node_id].type in SCANS
+                    for node_id in ready if nodes[node_id].type in SCANNER_NODES
                 }
                 for node_id in ready:
                     node = nodes[node_id]

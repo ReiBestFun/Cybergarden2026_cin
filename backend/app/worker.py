@@ -14,24 +14,14 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import monotonic
-from typing import Callable, Literal
+from typing import Callable
 
-from .analyzers import Snapshot, VulnerabilityCatalog, scan_password_hashing, scan_sast, scan_sca, scan_secrets
+from .analyzers import Snapshot
 from .analyzers.models import Category, ScanError, Warning
-from .analyzers.password_hashing import accepts_password_source
-from .analyzers.sast import accepts_sast_source
-from .analyzers.sca import accepts_sca_source, catalog_missing
-from .analyzers.secrets import accepts_secrets_source
+from .analyzers.registry import SCANNERS
 from .reports import NodeResult, RunReport, merge_findings, readable_report, submission_json
 
 ALL_SCANS: tuple[Category, ...] = ("secrets", "sca", "sast")
-Scanner = Category | Literal["password_hashing"]
-
-
-def scan_category(scanner: Scanner) -> Category:
-    return "sast" if scanner == "password_hashing" else scanner
-
-
 _SCAN_FAILED = Warning("SCAN_INTERNAL_ERROR", "В анализаторе произошла внутренняя ошибка. Проверьте журнал воркера.")
 _PROCESS_EXIT = Warning("SCAN_PROCESS_EXIT", "Процесс анализатора завершился без полного результата.")
 _SCAN_TIMEOUT = Warning("SCAN_TIMEOUT", "Тестер превысил лимит времени.")
@@ -39,20 +29,12 @@ log = logging.getLogger(__name__)
 
 
 def _scan_node(
-    scanner: Scanner, snapshot: Snapshot, catalog_path: Path | None, output: Connection, run_id: str
+    name: str, snapshot: Snapshot, catalog_path: Path | None, output: Connection, run_id: str
 ) -> None:
-    category = scan_category(scanner)
+    scanner = SCANNERS[name]
+    category = scanner.category
     try:
-        if scanner == "password_hashing":
-            result = scan_password_hashing(snapshot)
-        elif scanner == "secrets":
-            result = scan_secrets(snapshot)
-        elif category == "sast":
-            result = scan_sast(snapshot)
-        else:
-            if catalog_path is None:
-                raise catalog_missing()
-            result = scan_sca(snapshot, VulnerabilityCatalog.from_file(catalog_path))
+        result = scanner.analyze(snapshot, catalog_path)
         outcome = NodeResult(category, "succeeded", result)
     except ScanError as error:
         outcome = NodeResult(category, "failed", warning=error.warning)
@@ -71,22 +53,16 @@ def _receive_outcome(reader: Connection, received: Queue, category: Category) ->
 
 
 def run_scan(
-    category: Scanner, snapshot: Snapshot, catalog: Path | None, timeout: float, *, run_id: str = "local"
+    category: str, snapshot: Snapshot, catalog: Path | None, timeout: float, *, run_id: str = "local"
 ) -> NodeResult:
-    scanner = category
-    category = scan_category(scanner)
+    name = category
+    scanner = SCANNERS[name]
+    category = scanner.category
     deadline = monotonic() + timeout
-    if scanner == "password_hashing":
-        snapshot = snapshot.select(accepts_password_source)
-    elif category == "secrets":
-        snapshot = snapshot.select(accepts_secrets_source)
-    elif category == "sca":
-        snapshot = snapshot.select(accepts_sca_source)
-    else:
-        snapshot = snapshot.select(accepts_sast_source)
+    snapshot = snapshot.select(scanner.accepts)
     context = multiprocessing.get_context("spawn")
     reader, writer = context.Pipe(duplex=False)
-    process = context.Process(target=_scan_node, args=(scanner, snapshot, catalog, writer, run_id), daemon=True)
+    process = context.Process(target=_scan_node, args=(name, snapshot, catalog, writer, run_id), daemon=True)
     with reader, writer:
         try:
             process.start()

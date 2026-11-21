@@ -4,10 +4,10 @@ from typing import get_args
 
 from pydantic import ValidationError
 
+from ..analyzers.registry import SCANNER_NODES
 from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
 from ..schemas.contracts import CiDecision, Graph, Issue, Node
 
-_ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast", "scan_password_hashing"}
 _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
 
 
@@ -99,7 +99,7 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
     for kind in ("repository", "merge_findings"):
         if counts[kind] != 1:
             issues.append(Issue(code="REQUIRED_NODE_COUNT", message=f"Требуется одна нода {kind}."))
-    if not _ANALYZERS & counts.keys():
+    if not SCANNER_NODES.keys() & counts.keys():
         issues.append(Issue(code="ANALYZER_REQUIRED", message="Подключите хотя бы один анализатор."))
     for kind in ("ai_report", "ci_gate"):
         if counts[kind] > 1:
@@ -175,6 +175,6 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
         if gate.id not in outgoing[merge.id]:
             return [Issue(code="CI_GATE_INPUT", message="Подключите порог CI напрямую к объединению находок.", node_id=gate.id)]
         for node in nodes.values():
-            if node.type in _ANALYZERS and merge.id not in outgoing[node.id]:
+            if node.type in SCANNER_NODES and merge.id not in outgoing[node.id]:
                 issues.append(Issue(code="CI_SCAN_INPUT", message="Подключите анализатор к объединению находок.", node_id=node.id))
     return issues

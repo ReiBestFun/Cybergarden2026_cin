@@ -79,6 +79,18 @@ class WorkspaceMembership(Base):
     role: Mapped[str] = mapped_column(String(16))
 
 
+class WorkspaceDeliverySetting(Base):
+    __tablename__ = "workspace_delivery_settings"
+    __table_args__ = (CheckConstraint("channel IN ('email', 'telegram')", name="ck_workspace_delivery_channel"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    recipients: Mapped[list[str]] = mapped_column(EncryptedJSON("workspace_delivery_settings.recipients"))
+    username: Mapped[str | None] = mapped_column(EncryptedText("workspace_delivery_settings.username"))
+    secret: Mapped[str | None] = mapped_column(EncryptedText("workspace_delivery_settings.secret"))
+
+
 class WorkspaceInvitation(Base):
     __tablename__ = "workspace_invitations"
     __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_invitation_role"),)
@@ -289,6 +301,7 @@ class FindingRow(Base):
 
 class NotificationBatch(Base):
     __tablename__ = "notification_batches"
+    settings_workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"))
     __table_args__ = (
         CheckConstraint("channel IN ('email', 'telegram')", name="ck_notification_channel"),
     )

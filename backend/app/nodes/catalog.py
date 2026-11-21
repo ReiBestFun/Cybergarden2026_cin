@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, RootModel, StringConstraints
+from pydantic import BaseModel, Field, RootModel, StringConstraints, ValidationInfo, field_validator
 
 from ..notifications.email import ADDRESS
 from ..notifications.telegram import CHAT_ID
@@ -46,21 +46,34 @@ EmailAddress = Annotated[str, StringConstraints(strip_whitespace=True, max_lengt
 
 
 class NotificationConfig(Input):
+    use_workspace_settings: bool = Field(default=False, title="Получатели и реквизиты команды")
     credential_id: UUID | None = Field(default=None, title="Учётные данные")
     attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
 
+    @field_validator("recipients", mode="before", check_fields=False)
+    @classmethod
+    def ignore_manual_recipients(cls, recipients: object, info: ValidationInfo) -> object:
+        return [] if info.data.get("use_workspace_settings") else recipients
+
+    @field_validator("recipients", check_fields=False)
+    @classmethod
+    def require_recipients(cls, recipients: list[str], info: ValidationInfo) -> list[str]:
+        if not recipients and not info.data.get("use_workspace_settings"):
+            raise ValueError("Укажите получателей уведомления.")
+        return recipients
+
 
 class TelegramConfig(NotificationConfig):
-    recipients: Annotated[list[ChatId], Field(
-        min_length=1, max_length=50, title="Получатели",
+    recipients: list[ChatId] = Field(
+        default_factory=list, validate_default=True, max_length=50, title="Получатели",
         description="chat_id или @username канала, по одному в строке. Бот должен быть добавлен в чат.",
-    )]
+    )
 
 
 class EmailConfig(NotificationConfig):
-    recipients: Annotated[list[EmailAddress], Field(
-        min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
-    )]
+    recipients: list[EmailAddress] = Field(
+        default_factory=list, validate_default=True, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
+    )
     subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200, pattern=r"^[^\r\n]*$")] | None = Field(
         default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
     )

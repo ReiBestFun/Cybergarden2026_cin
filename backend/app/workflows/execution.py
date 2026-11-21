@@ -210,9 +210,15 @@ class GraphExecution:
             explanation = (upstream.preview or {}).get("text") or "AI-рекомендации недоступны."
             message = replace(message, text=message.text + "\n\n" + explanation)
         channel = node.type.removeprefix("notify_")
-        restricted = channel == "email" or self.settings.notify_telegram_recipients
-        allowed = allowed_recipients(self.settings, channel) if restricted else None
-        draft = NotificationDraft(channel, tuple(config.recipients), allowed, message)
+        allowed = allowed_recipients(self.settings, channel)
+        recipients = tuple(config.recipients)
+        workspace_id = None
+        if config.use_workspace_settings:
+            settings = self.progress.delivery_settings(channel)
+            if settings is None or not settings.recipients:
+                raise ScanError(Warning("WORKSPACE_DELIVERY_UNCONFIGURED", "Настройте получателей команды для этого канала."))
+            workspace_id, recipients = settings.workspace_id, tuple(settings.recipients)
+        draft = NotificationDraft(channel, recipients, allowed, message, workspace_id)
         return Step(
             ports=("delivery",),
             preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},

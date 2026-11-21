@@ -1036,3 +1036,9 @@ tr.clickable:hover td { background: #faf6f1; }
   .workspace-select, .workspace-create > label { flex-basis: 100%; }
   .workspace-switcher button { width: 100%; }
 }
+.workspace-delivery-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  gap: 20px;
+}
+.workspace-delivery-settings > form { min-width: 0; }

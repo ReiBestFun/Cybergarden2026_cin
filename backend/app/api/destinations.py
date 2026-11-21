@@ -14,7 +14,7 @@ from ..db.encryption import require_cipher
 from ..db.models import TelegramChallengeLimit, TelegramDestination
 from ..db.session import Database
 from ..notifications.base import NotifierError
-from ..notifications.destinations import telegram_chat_key
+from ..notifications.destinations import numeric_chat_id, telegram_chat_key
 from ..notifications.queue import allowed_recipients
 from ..notifications.telegram import TelegramChannel
 from ..schemas.contracts import Input, Name, Page, ReadModel
@@ -63,10 +63,10 @@ def list_destinations(db: Database, user: CurrentUser, pagination: PageQuery) ->
 
 @router.post("", status_code=201, response_model=DestinationRead)
 def create_destination(data: DestinationCreate, db: Database, user: CurrentUser) -> TelegramDestination:
-    numeric_id = int(data.chat_id)
-    if not numeric_id or abs(numeric_id) >= 2**52:
-        raise ApiError(422, "INVALID_TELEGRAM_CHAT", "Укажите числовой chat_id Telegram.", field="chat_id")
-    chat_id = str(numeric_id)
+    try:
+        chat_id = numeric_chat_id(data.chat_id)
+    except ValueError as error:
+        raise ApiError(422, "INVALID_TELEGRAM_CHAT", str(error), field="chat_id") from None
     key = telegram_chat_key(require_cipher(db.get_bind().dialect), user.id, chat_id)
     destination = db.scalar(insert(TelegramDestination).values(
         owner_id=user.id, chat_key=key, chat_id=chat_id, label=data.label,
@@ -118,7 +118,8 @@ def challenge_destination(destination_id: UUID, db: Database, user: CurrentUser,
     token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else ""
     if not token:
         raise ApiError(503, "TELEGRAM_NOT_CONFIGURED", "На сервере CyberFlow не настроен Telegram-бот.")
-    if settings.notify_telegram_recipients and destination.chat_id not in allowed_recipients(settings, "telegram"):
+    allowed = allowed_recipients(settings, "telegram")
+    if allowed is not None and destination.chat_id not in allowed:
         raise ApiError(403, "RECIPIENT_NOT_ALLOWED", "Этот Telegram-чат не входит в разрешённый список сервера.")
     now = datetime.now(UTC)
     _reserve_delivery(db, user.id, destination.chat_id, now)

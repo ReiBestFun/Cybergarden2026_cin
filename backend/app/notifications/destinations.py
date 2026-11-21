@@ -1,5 +1,6 @@
 """Owner-scoped membership checks for saved Telegram destinations."""
 
+import re
 from collections.abc import Iterable
 from uuid import UUID
 
@@ -8,6 +9,15 @@ from sqlalchemy.orm import Session
 
 from ..db.encryption import StorageCipher, require_cipher
 from ..db.models import TelegramDestination
+
+
+def numeric_chat_id(value: str) -> str:
+    if not re.fullmatch(r"-?[0-9]{1,16}", value):
+        raise ValueError("Укажите числовой chat_id Telegram.")
+    number = int(value)
+    if not number or abs(number) >= 2**52:
+        raise ValueError("Укажите числовой chat_id Telegram.")
+    return str(number)
 
 
 def telegram_chat_key(cipher: StorageCipher, owner_id: UUID, chat_id: str) -> str:

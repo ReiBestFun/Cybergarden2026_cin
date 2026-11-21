@@ -17,7 +17,7 @@ from .email import ADDRESS
 from .telegram import CHAT_ID
 
 
-def _recipient_key(channel: str, address: str) -> str:
+def recipient_key(channel: str, address: str) -> str:
     address = address.strip()
     if channel == "telegram":
         return address.lower() if address.startswith("@") else str(int(address))
@@ -25,10 +25,12 @@ def _recipient_key(channel: str, address: str) -> str:
     return f"{local}@{domain.lower()}"
 
 
-def allowed_recipients(settings: Settings, channel: str) -> frozenset[str]:
+def allowed_recipients(settings: Settings, channel: str) -> frozenset[str] | None:
     values = settings.notify_email_recipients if channel == "email" else settings.notify_telegram_recipients
+    if channel == "telegram" and not values:
+        return None
     pattern = ADDRESS if channel == "email" else CHAT_ID
-    return frozenset(_recipient_key(channel, address) for address in values if pattern.fullmatch(address.strip()))
+    return frozenset(recipient_key(channel, address) for address in values if pattern.fullmatch(address.strip()))
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class NotificationDraft:
     recipients: tuple[str, ...]
     allowed: frozenset[str] | None
     message: Message
+    settings_workspace_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class ClaimedDelivery:
     project_id: UUID | None = None
     credential_id: UUID | None = None
     owner_id: UUID | None = None
+    workspace_id: UUID | None = None
+    settings_workspace_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -66,14 +71,17 @@ def enqueue_notification(db: Session, node: NodeRun, draft: NotificationDraft, o
     attachment = next(iter(draft.message.attachments), None)
     batch = NotificationBatch(
         node_run_id=node.id, channel=draft.channel, subject=draft.message.subject, body=draft.message.text,
+        settings_workspace_id=draft.settings_workspace_id,
         attachment_name=attachment.filename if attachment else None,
         attachment_content=attachment.content if attachment else None,
     )
     db.add(batch)
     db.flush()
     cipher = require_cipher(db.get_bind().dialect)
-    recipients = tuple(dict.fromkeys(_recipient_key(draft.channel, value) for value in draft.recipients))
-    verified = verified_telegram_recipients(db, owner_id, recipients) if draft.channel == "telegram" else None
+    recipients = tuple(dict.fromkeys(recipient_key(draft.channel, value) for value in draft.recipients))
+    verified = verified_telegram_recipients(db, owner_id, recipients) if (
+        draft.channel == "telegram" and draft.settings_workspace_id is None
+    ) else None
     deliveries = []
     for recipient in recipients:
         delivery = NotificationDelivery(
@@ -129,7 +137,7 @@ def expire_deliveries(db: Session, now: datetime) -> list[RecoveredDelivery]:
 def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> ClaimedDelivery | None:
     result = db.execute(
         select(NotificationDelivery, NotificationBatch, NodeRun.run_id, ScanRun.project_id,
-               ScanRun.graph_snapshot, NodeRun.node_id, Project.owner_id)
+               ScanRun.graph_snapshot, NodeRun.node_id, Project.owner_id, Project.workspace_id)
         .join(NotificationBatch, NotificationDelivery.batch_id == NotificationBatch.id)
         .join(NodeRun, NotificationBatch.node_run_id == NodeRun.id)
         .join(ScanRun, NodeRun.run_id == ScanRun.id)
@@ -143,9 +151,9 @@ def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> Claim
     ).first()
     if result is None:
         return None
-    delivery, batch, run_id, project_id, graph, node_id, owner_id = result
+    delivery, batch, run_id, project_id, graph, node_id, owner_id, workspace_id = result
     config = next((node.get("config", {}) for node in graph["nodes"] if node["id"] == node_id), {})
-    credential_id = config.get("credential_id")
+    credential_id = config.get("credential_id") if batch.settings_workspace_id is None else None
     token = uuid4()
     delivery.status = "sending"
     delivery.attempts += 1
@@ -158,7 +166,7 @@ def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> Claim
     return ClaimedDelivery(
         delivery.id, run_id, batch.node_run_id, token, batch.channel, delivery.recipient, delivery.phase,
         Message(batch.subject, batch.body, attachment),
-        project_id, UUID(credential_id) if credential_id is not None else None, owner_id,
+        project_id, UUID(credential_id) if credential_id is not None else None, owner_id, workspace_id, batch.settings_workspace_id,
     )
 
 

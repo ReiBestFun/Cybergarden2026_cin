@@ -26,6 +26,7 @@ function encodeConfig(data: FlowData, properties: Record<string, ParamField>): R
   }
   const config: Record<string, JsonValue> = {};
   for (const [key, value] of Object.entries(data.config ?? {})) {
+    if (data.config?.use_workspace_settings === 'true' && (key === 'recipients' || key === 'credential_id')) continue;
     if (value === '' || !(key in properties)) continue;
     if (properties[key].type === 'array' && splitList(value).length === 0) continue;
     config[key] = toConfigValue(properties[key], value);

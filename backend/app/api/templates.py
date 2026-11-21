@@ -5,9 +5,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Response
 from pydantic import StringConstraints
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
-from ..db.models import Schedule, Workflow, WorkflowTemplate
+from ..db.models import Schedule, Workflow, WorkflowTemplate, WorkspaceMembership
 from ..db.session import Database
 from ..nodes.catalog import NOTIFIER_CONFIGS
 from ..schemas.contracts import Graph, Input, Name, Page, ScheduleSettings, WorkflowRead
@@ -17,6 +17,7 @@ from .auth import CurrentUser
 from .common import ApiError, PageQuery, page
 from .projects import get_project
 from .workflows import checked_draft, get_workflow
+from .workspaces import require_workspace_owner, workspace_role
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 Description = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
@@ -29,7 +30,9 @@ class TemplatePatch(Input):
 
 
 def _visible_template(owner_id: UUID):
-    return or_(WorkflowTemplate.owner_id == owner_id, WorkflowTemplate.owner_id.is_(None))
+    teams = select(WorkspaceMembership.workspace_id).where(WorkspaceMembership.user_id == owner_id)
+    return or_(WorkflowTemplate.owner_id == owner_id, WorkflowTemplate.workspace_id.in_(teams),
+               and_(WorkflowTemplate.owner_id.is_(None), WorkflowTemplate.workspace_id.is_(None)))
 
 
 def _template(template_id: UUID, owner_id: UUID, db: Database, *, lock: bool = False) -> WorkflowTemplate:
@@ -62,18 +65,27 @@ def _saved_schedule(db: Database, workflow: Workflow) -> dict | None:
 
 
 @router.get("", response_model=Page[TemplateRead])
-def list_templates(db: Database, user: CurrentUser, pagination: PageQuery) -> dict:
+def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, workspace_id: UUID | None = None) -> dict:
     query = select(WorkflowTemplate).where(_visible_template(user.id)).order_by(
         WorkflowTemplate.updated_at.desc(), WorkflowTemplate.id,
     )
+    if workspace_id is not None:
+        workspace_role(db, workspace_id, user.id)
+        query = query.where(or_(WorkflowTemplate.workspace_id == workspace_id, WorkflowTemplate.workspace_id.is_(None)))
     return page(db, query, pagination.limit, pagination.offset)
 
 
 @router.post("", status_code=201, response_model=TemplateRead)
 def create_template(data: TemplatePublish, db: Database, user: CurrentUser) -> WorkflowTemplate:
     workflow = get_workflow(data.workflow_id, db, user.id)
+    if data.workspace_id is not None:
+        require_workspace_owner(db, data.workspace_id, user.id)
+        project = get_project(workflow.project_id, db, user.id)
+        if data.workspace_id != project.workspace_id or data.workspace_id == user.id:
+            raise ApiError(409, "TEAM_WORKSPACE_REQUIRED", "Выберите командное пространство исходного сценария.")
     template = WorkflowTemplate(
-        owner_id=user.id, name=data.name, description=data.description, graph_json=_reusable_graph(workflow),
+        workspace_id=data.workspace_id, owner_id=user.id if data.workspace_id is None else None,
+        name=data.name, description=data.description, graph_json=_reusable_graph(workflow),
         schedule=_saved_schedule(db, workflow),
     )
     db.add(template)

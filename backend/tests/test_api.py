@@ -32,7 +32,7 @@ from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
 from backend.app.db.encryption import require_cipher
 from backend.app.notifications.destinations import telegram_chat_key
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceMembership
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceInvitation
 from backend.app.integrations.github_actions import security_workflow
 from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
@@ -502,7 +502,7 @@ def create_workflow(client, project, graph=None):
 
 
 def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypatch):
-    client, sessions = api
+    client, _ = api
     [personal] = client.get("/api/workspaces").json()["items"]
     assert personal["personal"] and personal["role"] == "owner"
     response = client.post("/api/workspaces", json={"name": "Команда"})
@@ -528,10 +528,14 @@ def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypa
         assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 404
         assert other.get(f"/api/workflows/{workflow}").status_code == 404
         assert other.get(f"/api/runs/{run}/findings").status_code == 404
-        # Membership management belongs to issue #4. Seed an existing membership at the boundary.
         other_id = UUID(other.get("/api/me").json()["id"])
-        with sessions.begin() as db:
-            db.add(WorkspaceMembership(workspace_id=UUID(team), user_id=other_id, role="member"))
+        route = f"/api/workspaces/{team}"
+        invitation = client.post(route + "/invitations", json={"role": "member", "days": 2})
+        assert invitation.status_code == 201, invitation.text
+        token = invitation.json()["token"]
+        accept = route + "/join"
+        assert other.post(accept, json={"token": token}).status_code == 200
+        assert other.post(accept, json={"token": token}).status_code == 410
         spaces = other.get("/api/workspaces").json()["items"]
         assert next(space for space in spaces if space["id"] == team)["role"] == "member"
         assert other.get("/api/projects", params={"workspace_id": team}).json()["items"][0]["id"] == project
@@ -540,6 +544,64 @@ def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypa
         assert other.post(f"/api/workflows/{workflow}/runs").status_code == 403
         assert other.get(f"/api/projects/{project}/credentials").status_code == 403
         assert other.post(f"/api/projects/{create_project(other)}/move", json={"workspace_id": team}).status_code == 403
+        assert other.post(route + "/invitations", json={"role": "owner"}).status_code == 403
+        assert client.patch(route + f"/members/{other_id}", json={"role": "owner"}).status_code == 200
+        assert other.get(route + "/invitations").status_code == 200
+        published = other.post("/api/templates", json={"workflow_id": workflow, "workspace_id": team, "name": "Командный"})
+        assert published.status_code == 201, published.text
+        template = "/api/templates/" + published.json()["id"]
+        assert client.delete(route + f"/members/{other_id}").status_code == 204
+        assert other.get(f"/api/runs/{run}").status_code == 404
+        assert other.get(template).status_code == 404
+        assert client.get(template).status_code == 200
+        assert client.get(f"/api/runs/{run}").status_code == 200
+        assert client.get(f"/api/workflows/{workflow}").status_code == 200
+
+
+def test_workspace_invitations_expiry_revocation_and_scope(api, monkeypatch):
+    client, sessions = api
+    owner = client.get("/api/me").json()["id"]
+    team = client.post("/api/workspaces", json={"name": "Team A"}).json()["id"]
+    route = f"/api/workspaces/{team}"
+    assert client.delete(route + "/members/" + owner).status_code == 409
+    assert client.patch(route + "/members/" + owner, json={"role": "member"}).status_code == 409
+    assert client.post(f"/api/workspaces/{owner}/invitations", json={"role": "owner"}).status_code == 404
+    revoked, expired, active = [client.post(route + "/invitations", json={"role": "owner"}).json() for _ in range(3)]
+    assert client.delete(route + "/invitations/" + revoked["id"]).status_code == 204
+    with sessions.begin() as db:
+        db.get(WorkspaceInvitation, UUID(expired["id"])).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert [row["id"] for row in client.get(route + "/invitations").json()] == [active["id"]]
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        assert other.post(route + "/join", json={"token": active["token"]}).status_code == 401
+        login(other, monkeypatch, randbits(48) + 1)
+        second = other.post("/api/workspaces", json={"name": "Team B"}).json()["id"]
+        assert other.get(route + "/members").status_code == 404
+        assert other.post(f"/api/workspaces/{second}/join", json={"token": active["token"]}).status_code == 410
+        for invalid in [revoked, expired]:
+            assert other.post(route + "/join", json={"token": invalid["token"]}).status_code == 410
+        assert other.post(route + "/join", json={"token": active["token"]}).json()["role"] == "owner"
+        assert client.get(f"/api/workspaces/{second}/members").status_code == 404
+
+
+def test_workspace_invitation_two_github_users_redeem_concurrently(api, monkeypatch):
+    owner, _ = api
+    team = owner.post("/api/workspaces", json={"name": "Одно приглашение"}).json()["id"]
+    path = f"/api/workspaces/{team}"
+    invite = owner.post(path + "/invitations", json={"role": "member"}).json()
+    ready = Barrier(2)
+
+    def accept(client):
+        ready.wait(timeout=5)
+        return client.post(path + "/join", json={"token": invite["token"]}).status_code
+
+    with TestClient(owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as first, TestClient(
+        owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN},
+    ) as second:
+        for client in (first, second):
+            login(client, monkeypatch, randbits(48) + 1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(accept, (first, second))) == [200, 410]
+    assert len(owner.get(path + "/members").json()) == 2
 
 
 def test_workspace_repository_conflict_preserves_personal_project(api):

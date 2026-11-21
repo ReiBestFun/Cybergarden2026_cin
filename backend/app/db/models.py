@@ -79,6 +79,18 @@ class WorkspaceMembership(Base):
     role: Mapped[str] = mapped_column(String(16))
 
 
+class WorkspaceInvitation(Base):
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_invitation_role"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    issuer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(16))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
@@ -102,6 +114,7 @@ class WorkflowTemplate(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(EncryptedText("workflow_templates.name"))
     description: Mapped[str] = mapped_column(EncryptedText("workflow_templates.description"))
     graph_json: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("workflow_templates.graph_json"))

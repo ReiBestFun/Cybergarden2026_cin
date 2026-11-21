@@ -8,6 +8,7 @@ from .contracts import Graph, Input, Name, ReadModel, ScheduleSettings
 
 
 class TemplatePublish(Input):
+    workspace_id: UUID | None = None
     workflow_id: UUID
     name: Name
     description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ""

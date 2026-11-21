@@ -10,6 +10,8 @@ import { History } from '../pages/History';
 import { Credentials } from '../pages/Credentials';
 import { Repositories } from '../pages/Repositories';
 import { Templates } from '../pages/Templates';
+import { TeamSettings } from '../pages/TeamSettings';
+import { JoinTeam } from '../pages/JoinTeam';
 import { AccountProfile } from '../pages/Profile';
 import { ApiError, apiUrl, errorMessage, SESSION_EXPIRED, WORKSPACE_UNAVAILABLE } from '../shared/api/client';
 import { getProfile, logout, type Profile } from '../shared/api/account';
@@ -146,6 +148,8 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
           <NavLink to="/profile">
             <UserRound size={18} /> Профиль
           </NavLink>
+          {workspace && !workspace.personal && workspace.role === 'owner' &&
+            <NavLink to="/team"><UserRound size={18} /> Настройки команды</NavLink>}
         </div>
         <div className="nav-footer account-nav-footer">
           <span>@{user.github_login}</span>
@@ -172,6 +176,8 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
           <Route path="/scenarios" element={<Scenarios />} />
           <Route path="/templates" element={<Templates />} />
           <Route path="/profile" element={<AccountProfile profile={user} onChange={onProfileChanged} />} />
+          <Route path="/team" element={!workspace.personal && workspace.role === 'owner'
+            ? <TeamSettings userId={user.id} /> : <Navigate to="/" replace />} />
           <Route path="/editor" element={<WorkspaceResource param="workflow" onSwitch={id => selectWorkspace(id, true)}>
             <ReactFlowProvider><Editor /></ReactFlowProvider>
           </WorkspaceResource>} />
@@ -225,6 +231,8 @@ function SessionGate() {
     };
   }, []);
 
+  const teamId = /^\/join\/([0-9a-f-]{36})$/.exec(location.pathname)?.[1];
+  if (user && teamId) return <JoinTeam teamId={teamId} user={user} />;
   if (user) return <Shell user={user} onProfileChanged={storeProfile} />;
 
   const query = new URLSearchParams(location.search);
@@ -248,7 +256,9 @@ function SessionGate() {
             </button>
           </>
         ) : (
-          <a className="btn primary" href={loginUrl}><Github size={19} /> Войти через GitHub</a>
+          <a className="btn primary" href={loginUrl} onClick={() => {
+            if (teamId && location.hash) sessionStorage.setItem('invite:' + teamId, location.hash.slice(1));
+          }}><Github size={19} /> Войти через GitHub</a>
         )}
       </section>
     </main>

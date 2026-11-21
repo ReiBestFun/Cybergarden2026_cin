@@ -28,13 +28,13 @@ export function Templates() {
     const controller = new AbortController();
     setPage(null);
     setCatalogError('');
-    void listTemplates(offset, PAGE_SIZE, controller.signal).then(result => {
+    void listTemplates(workspace.id, offset, PAGE_SIZE, controller.signal).then(result => {
       if (!controller.signal.aborted) setPage(result);
     }).catch(error => {
       if (!controller.signal.aborted) setCatalogError(errorMessage(error));
     });
     return () => controller.abort();
-  }, [offset, refresh]);
+  }, [workspace.id, offset, refresh]);
 
   useEffect(() => {
     const controller = new AbortController();

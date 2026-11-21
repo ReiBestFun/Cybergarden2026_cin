@@ -12,11 +12,11 @@ export type WorkflowTemplate = {
   can_edit: boolean;
 };
 
-export const listTemplates = (offset: number, limit: number, signal: AbortSignal) =>
-  api<Page<WorkflowTemplate>>(`/api/templates?limit=${limit}&offset=${offset}`, { signal });
+export const listTemplates = (workspaceId: string, offset: number, limit: number, signal: AbortSignal) =>
+  api<Page<WorkflowTemplate>>(`/api/templates?workspace_id=${workspaceId}&limit=${limit}&offset=${offset}`, { signal });
 
-export const publishTemplate = (workflowId: string, name: string, description: string) =>
-  api<WorkflowTemplate>('/api/templates', { method: 'POST', json: { workflow_id: workflowId, name, description } });
+export const publishTemplate = (workflowId: string, name: string, description: string, workspaceId?: string) =>
+  api<WorkflowTemplate>('/api/templates', { method: 'POST', json: { workflow_id: workflowId, name, description, workspace_id: workspaceId } });
 
 export const copyTemplate = (id: string, projectId: string, name: string, signal?: AbortSignal) =>
   api<Workflow>(`/api/templates/${id}/copy`, { method: 'POST', json: { project_id: projectId, name }, signal });

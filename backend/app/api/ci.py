@@ -82,6 +82,7 @@ def start_ci_test(workflow_id: UUID, body: CiTestRequest, db: Database, request:
     graph = _ci_graph(workflow.graph_json)
     run = enqueue_ci_run(db, project, workflow, graph, body.commit_sha, f"web-{uuid4()}")
     db.commit()
+    request.state.run_id = run.id
     return {"id": run.id}
 
 
@@ -112,7 +113,7 @@ def download_workflow(workflow_id: UUID, db: Database, request: Request, user: C
 
 
 @router.post("/hooks/{workflow_id}", status_code=202)
-def start_ci_run(workflow_id: UUID, body: CiRunCreate, db: Database, auth: CiAuth) -> dict[str, UUID]:
+def start_ci_run(workflow_id: UUID, body: CiRunCreate, db: Database, auth: CiAuth, request: Request) -> dict[str, UUID]:
     workflow = get_workflow(workflow_id, db, auth.owner_id, lock=True)
     project = get_project(workflow.project_id, db, auth.owner_id)
     _check_repository(project, auth.settings)
@@ -124,20 +125,23 @@ def start_ci_run(workflow_id: UUID, body: CiRunCreate, db: Database, auth: CiAut
     if existing is not None:
         if existing.source_snapshot["ref"] != body.commit_sha:
             raise ApiError(409, "CI_REQUEST_CONFLICT", "С этим идентификатором CI уже проверяется другой коммит.")
+        request.state.run_id = existing.id
         return {"id": existing.id}
     graph = _ci_graph(workflow.graph_json)
     run = enqueue_ci_run(db, project, workflow, graph, body.commit_sha, body.request_id)
     db.commit()
+    request.state.run_id = run.id
     return {"id": run.id}
 
 
 @router.get("/hooks/{workflow_id}/runs/{run_id}", response_model=CiRunStatus)
-def get_ci_run(workflow_id: UUID, run_id: UUID, db: Database, auth: CiAuth) -> CiRunStatus:
+def get_ci_run(workflow_id: UUID, run_id: UUID, db: Database, auth: CiAuth, request: Request) -> CiRunStatus:
     run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
         ScanRun.id == run_id, ScanRun.workflow_id == workflow_id, ScanRun.trigger == "ci", Project.owner_id == auth.owner_id,
     ))
     if run is None:
         raise ApiError(404, "CI_RUN_NOT_FOUND", "Запуск CI не найден.")
+    request.state.run_id = run.id
     result = CiRunStatus(id=run.id, status=run.status, commit_sha=run.commit_sha)
     if run.status in {"queued", "running"}:
         return result

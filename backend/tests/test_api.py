@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from base64 import urlsafe_b64encode
@@ -18,7 +19,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from cryptography.fernet import Fernet
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
@@ -39,7 +42,7 @@ from backend.app.main import create_app
 from backend.app import notification_worker
 from backend.app.queue_worker import run_next
 from backend.app.reports import NodeResult
-from backend.app.schemas.contracts import Graph
+from backend.app.schemas.contracts import Graph, RunDetail
 from backend.app.schemas.credentials import CredentialKind
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
@@ -49,6 +52,49 @@ from backend.app.workflows.validation import validate_graph
 
 ORIGIN = "http://localhost:5173"
 TEST_KEY = urlsafe_b64encode(b"fixture-only-encryption-key-2026").decode()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_api_logs_errors_without_exposing_the_exception(caplog, monkeypatch, streaming):
+    app = create_app(Settings(_env_file=None, frontend_origins=[ORIGIN]))
+    logger = logging.getLogger("cyberflow.events")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    caplog.set_level(logging.INFO, logger=logger.name)
+    secret = "synthetic-private-exception-detail"
+
+    @app.get("/api/fixture-failure")
+    async def fail():
+        if not streaming:
+            raise RuntimeError(secret)
+
+        async def chunks():
+            yield b"partial response"
+            raise RuntimeError(secret)
+
+        return StreamingResponse(chunks())
+
+    with TestClient(app, headers={"Origin": ORIGIN}) as client:
+        if streaming:
+            with pytest.raises(RuntimeError, match="CyberFlow API response was interrupted") as error:
+                client.get("/api/fixture-failure", params={"key": secret})
+            assert secret not in str(error.value)
+        else:
+            response = client.get("/api/fixture-failure", params={"key": secret})
+            assert response.status_code == 500 and secret not in response.text
+            assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
+            assert "X-Request-ID" in response.headers["Access-Control-Expose-Headers"]
+    [event] = [json.loads(record.getMessage()) for record in caplog.records if record.name == logger.name]
+    assert event["action"] == "http.request" and event["result"] == "failed"
+    assert event["http_status"] == (200 if streaming else 500)
+    UUID(event["request_id"])
+    assert secret not in caplog.text
+
+
+def test_invalid_token_settings_omit_input_values_from_startup_errors():
+    secret = "synthetic-private-configuration-token"
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None, ci_workflow_tokens=[secret])
+    assert secret not in str(error.value)
 
 
 def node(node_id, kind, config=None):
@@ -208,19 +254,18 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
     client, sessions = api
     workflow_id = create_workflow(client, create_project(client), analysis_graph())
     run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
-    with sessions() as db:
-        user = SimpleNamespace(id=UUID(client.get("/api/me").json()["id"]))
-        initial = runs_api.get_run(run_id, db, user)
+    user = SimpleNamespace(id=UUID(client.get("/api/me").json()["id"]))
+    initial = RunDetail.model_validate(client.get(f"/api/runs/{run_id}").json())
     dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     listening = Event()
-    get_run = runs_api.get_run
+    run_detail = runs_api._run_detail
 
     def observed_read(*args):
-        run = get_run(*args)
+        run = run_detail(*args)
         listening.set()
         return run
 
-    monkeypatch.setattr(runs_api, "get_run", observed_read)
+    monkeypatch.setattr(runs_api, "_run_detail", observed_read)
     events = runs_api._run_events(initial, sessions, dsn, user)
     assert '"status":"queued"' in next(events)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -670,13 +715,16 @@ def test_queue_claims_are_exclusive_and_expired_workers_cannot_write(api):
             second_claim = claim_next(second_transaction)
             assert second_claim.id == second
     stale = datetime.now(UTC) - timedelta(minutes=10)
+    progress = RunProgress(sessions, claim)
+    progress.start_node("entry", {})
     with sessions.begin() as db:
         db.get(ScanRun, first).heartbeat_at = stale
     with sessions.begin() as db:
-        assert expire_stale_runs(db, stale + timedelta(seconds=1)) == 1
+        [expired] = expire_stale_runs(db, stale + timedelta(seconds=1))
+        assert expired.id == claim.id
+        assert ("manual_trigger", "failed") in {(kind, status) for _, kind, status in expired.nodes}
     detail = client.get(f"/api/runs/{first}").json()
     assert detail["status"] == "failed" and detail["error"]["code"] == "WORKER_EXPIRED"
-    progress = RunProgress(sessions, claim)
     assert progress.heartbeat() is False
     with pytest.raises(ClaimLost):
         progress.finish_node("entry", "succeeded", ports=["params"])

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import smtplib
 import threading
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select, text
 
-from backend.app.analyzers.models import Finding, Snapshot
+from backend.app.analyzers.models import Finding, ScanError, Snapshot, Warning
 from backend.app.config import Settings
 from backend.app.db.models import NotificationDelivery, ScanRun
 from backend.app.devtools.mail_sink import SmtpSink
@@ -28,7 +29,7 @@ from backend.app.reports import RunReport
 from backend.app.schemas.contracts import Graph
 from backend.app.workflows import execution
 from backend.app.workflows.validation import validate_draft, validate_graph
-from backend.tests.test_api import ORIGIN, api, enqueue_for_worker, login
+from backend.tests.test_api import ORIGIN, api, create_project, create_workflow, enqueue_for_worker, login
 
 TOKEN = "123456:TEST-token-value"
 
@@ -203,6 +204,74 @@ def _prepare_sources(monkeypatch):
     monkeypatch.setattr(execution, "prepare_repository", prepared)
 
 
+@pytest.mark.parametrize("failure", [None, "repository", "delivery"])
+def test_technical_logs_link_request_run_nodes_and_delivery_without_sensitive_data(api, caplog, monkeypatch, failure):
+    client, sessions = api
+    logger = logging.getLogger("cyberflow.events")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    caplog.set_level(logging.INFO, logger=logger.name)
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        if failure == "repository":
+            raise ScanError(Warning("TEST_SOURCE_FAILED", "private-repository-error"))
+        yield RepositorySnapshot(Snapshot("b" * 40, {"App.kt": 'val password = "fixture-source-password"'}), None)
+
+    def send_email(*args, **kwargs):
+        if failure == "delivery":
+            raise RuntimeError("private-provider-response")
+        return "private-provider-message-id"
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    monkeypatch.setattr(EmailChannel, "send_one", send_email)
+    recipient = "fixture-recipient@example.org"
+    graph = _graph(("notify_email", {"recipients": [recipient], "subject": "private-message-subject"}))
+    workflow = create_workflow(client, create_project(client), graph.model_dump())
+    response = client.post(
+        f"/api/workflows/{workflow}/runs", params={"key": "private-query-token"},
+        headers={"Authorization": "Bearer private-header-token", "X-Request-ID": "private-client-id"},
+        json={"ref": "private-body-ref"},
+    )
+    assert response.status_code == 202
+    request_id = response.headers["X-Request-ID"]
+    UUID(request_id)
+    run_id = response.json()["id"]
+    # The PostgreSQL fixture is shared with tests that leave runs queued.
+    with sessions.begin() as db:
+        db.get(ScanRun, UUID(run_id)).created_at = datetime(2000, 1, 1, tzinfo=UTC)
+    settings = Settings(_env_file=None, smtp_host="localhost", smtp_from="cyberflow@localhost",
+                        notify_email_recipients=[recipient])
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    assert process_next(sessions, settings) is (failure != "repository")
+
+    records = [json.loads(record.getMessage()) for record in caplog.records if record.name == logger.name]
+    run_events = [event for event in records if event.get("run_id") == run_id]
+    [http_event] = [event for event in run_events if event["component"] == "api"]
+    assert http_event["request_id"] == request_id and http_event["http_status"] == 202
+    outcomes = {(event["action"], event["result"]) for event in run_events}
+    assert ("run.claim", "running") in outcomes
+    assert ("run.finish", "failed" if failure == "repository" else "succeeded") in outcomes
+    node_events = [event for event in run_events if event["action"] == "node.finish"]
+    assert node_events and all(UUID(event["node_run_id"]) for event in node_events)
+    assert {"manual_trigger", "repository", "scan_secrets", "merge_findings", "notify_email"} == {
+        event["node_type"] for event in node_events
+    }
+    delivery_events = [event for event in run_events if event["component"] == "notification_worker"]
+    if failure == "repository":
+        assert ("node.finish", "failed") in outcomes and not delivery_events
+    else:
+        assert ("delivery.finish", "unknown" if failure == "delivery" else "accepted") in outcomes
+        assert len({UUID(event["delivery_id"]) for event in delivery_events}) == 1
+        [queued] = [event for event in run_events if event["action"] == "delivery.enqueue"]
+        assert all((event["delivery_id"], event["node_run_id"]) == (queued["delivery_id"], queued["node_run_id"])
+                   for event in delivery_events)
+    assert all(event["timestamp"].endswith("+00:00") and event["level"] for event in run_events)
+    cookie = client.cookies.get("cyberflow_session")
+    assert cookie
+    for sensitive in (cookie, recipient, "fixture-source-password", "private-"):
+        assert sensitive not in caplog.text
+
+
 def test_worker_delivers_email_and_retries_only_telegram_attachment(api, telegram_api, monkeypatch):
     client, sessions = api
     client.app.state.settings.telegram_bot_token = SecretStr(TOKEN)
@@ -333,8 +402,11 @@ def test_expired_delivery_stays_unknown_and_cannot_be_taken_again(api, monkeypat
     assert report["status"] == "succeeded" and report["delivery"]["n0"]["status"] == "unknown"
 
 
-def test_delivery_requires_finished_report_and_cancels_failed_run(api, monkeypatch):
+def test_delivery_requires_finished_report_and_cancels_failed_run(api, caplog, monkeypatch):
     client, sessions = api
+    logger = logging.getLogger("cyberflow.events")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    caplog.set_level(logging.INFO, logger=logger.name)
     _prepare_sources(monkeypatch)
     graph = _graph(("notify_email", {"recipients": ["dev@example.org"]}))
     run_id = enqueue_for_worker(api, graph.model_dump())
@@ -348,3 +420,7 @@ def test_delivery_requires_finished_report_and_cancels_failed_run(api, monkeypat
     assert not process_next(sessions, settings)
     report = client.get(f"/api/runs/{run_id}/report").json()
     assert report["delivery"]["n0"]["status"] == "cancelled"
+    events = [json.loads(record.getMessage()) for record in caplog.records if record.name == logger.name]
+    [recovered] = [event for event in events if event["action"] == "delivery.recover" and event["run_id"] == str(run_id)]
+    assert recovered["result"] == "cancelled"
+    assert recovered["delivery_id"] == report["delivery"]["n0"]["recipients"][0]["id"]

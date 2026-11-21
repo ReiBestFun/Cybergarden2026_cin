@@ -148,7 +148,7 @@ class GraphExecution:
             assert self.prepared is not None
             outcome = run_scan(
                 SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
-                run_id=str(self.progress.claim.id),
+                run_id=self.progress.claim.id,
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)

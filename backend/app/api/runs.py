@@ -40,12 +40,14 @@ class FindingFilters(Pagination):
     severity: Severity | None = None
 
 
-def _get_run(run_id: UUID, db: Database, owner_id: UUID) -> ScanRun:
+def _get_run(run_id: UUID, db: Database, owner_id: UUID, request: Request | None = None) -> ScanRun:
     run = db.scalar(select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
         ScanRun.id == run_id, Project.owner_id == owner_id,
     ))
     if run is None:
         raise ApiError(404, "RUN_NOT_FOUND", "Запуск не найден.")
+    if request is not None:
+        request.state.run_id = run.id
     return run
 
 
@@ -56,7 +58,7 @@ def _findings(run_id: UUID) -> Select[tuple[FindingRow]]:
 
 
 @router.post("/workflows/{workflow_id}/runs", status_code=202, response_model=RunQueued)
-def create_run(workflow_id: UUID, db: Database, user: CurrentUser, data: RunCreate | None = None) -> ScanRun:
+def create_run(workflow_id: UUID, db: Database, user: CurrentUser, request: Request, data: RunCreate | None = None) -> ScanRun:
     workflow = get_workflow(workflow_id, db, user.id, lock=True)
     graph = Graph.model_validate(workflow.graph_json)
     # "Run now" works for any trigger: a scheduled workflow can also be started by hand.
@@ -66,6 +68,7 @@ def create_run(workflow_id: UUID, db: Database, user: CurrentUser, data: RunCrea
     ref = data.ref if data and data.ref is not None else project.default_ref
     run = enqueue_manual_run(db, project, workflow, graph, ref)
     db.commit()
+    request.state.run_id = run.id
     return run
 
 
@@ -82,8 +85,12 @@ def list_runs(project_id: UUID, db: Database, filters: Annotated[RunFilters, Que
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
-def get_run(run_id: UUID, db: Database, user: CurrentUser) -> RunDetail:
-    run = _get_run(run_id, db, user.id)
+def get_run(run_id: UUID, db: Database, user: CurrentUser, request: Request) -> RunDetail:
+    return _run_detail(_get_run(run_id, db, user.id, request), db)
+
+
+def _run_detail(run: ScanRun, db: Database) -> RunDetail:
+    run_id = run.id
     graph = Graph.model_validate(run.graph_snapshot)
     nodes = {
         node.node_id: node
@@ -125,7 +132,7 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user:
         while True:
             # Take a new snapshot after LISTEN to include changes since the first read.
             with sessions() as db:
-                run = get_run(run.id, db, user)
+                run = _run_detail(_get_run(run.id, db, user.id), db)
             current = run.model_dump_json()
             if current != previous:
                 yield f"event: run\ndata: {current}\n\n"
@@ -140,7 +147,7 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user:
 def stream_run(run_id: UUID, request: Request, user: CurrentUser, wait_for_delivery: bool = False) -> StreamingResponse:
     sessions = request.app.state.session_factory
     with sessions() as db:
-        initial = get_run(run_id, db, user)
+        initial = _run_detail(_get_run(run_id, db, user.id, request), db)
     dsn = make_url(request.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     return StreamingResponse(
         _run_events(initial, sessions, dsn, user, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
@@ -149,8 +156,8 @@ def stream_run(run_id: UUID, request: Request, user: CurrentUser, wait_for_deliv
 
 
 @router.get("/runs/{run_id}/findings", response_model=Page[FindingRead])
-def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()], user: CurrentUser) -> dict:
-    _get_run(run_id, db, user.id)
+def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters, Query()], user: CurrentUser, request: Request) -> dict:
+    _get_run(run_id, db, user.id, request)
     statement = _findings(run_id)
     if filters.category is not None:
         statement = statement.where(FindingRow.category == filters.category)
@@ -160,8 +167,8 @@ def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters,
 
 
 @router.get("/runs/{run_id}/report", response_model=RunReportRead)
-def get_report(run_id: UUID, db: Database, user: CurrentUser) -> RunReportRead:
-    run = _get_run(run_id, db, user.id)
+def get_report(run_id: UUID, db: Database, user: CurrentUser, request: Request) -> RunReportRead:
+    run = _get_run(run_id, db, user.id, request)
     payload = run.report or {}
     if run.summary is None:
         statement = (
@@ -184,8 +191,10 @@ def get_report(run_id: UUID, db: Database, user: CurrentUser) -> RunReportRead:
     "/runs/{run_id}/export", response_class=Response,
     responses={200: {"content": {"application/json": {}, "text/markdown": {}}, "description": "Файл отчёта"}},
 )
-def export_run(run_id: UUID, db: Database, user: CurrentUser, format: Literal["json", "markdown"] = "json") -> Response:
-    run = _get_run(run_id, db, user.id)
+def export_run(
+    run_id: UUID, db: Database, user: CurrentUser, request: Request, format: Literal["json", "markdown"] = "json",
+) -> Response:
+    run = _get_run(run_id, db, user.id, request)
     if run.status in {"queued", "running"}:
         raise ApiError(409, "REPORT_NOT_READY", "Запуск ещё выполняется.")
     if run.status == "failed":

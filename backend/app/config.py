@@ -1,6 +1,7 @@
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,3 +19,15 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=1, gt=0, allow_inf_nan=False)
     scheduler_poll_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)
+
+    # Notifications. Secrets stay on the server and never enter workflow graphs.
+    app_base_url: str = "http://localhost:5173"
+    notify_timeout_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
+    telegram_bot_token: SecretStr | None = None
+    telegram_api_base: str = "https://api.telegram.org"
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, gt=0, lt=65536)
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None

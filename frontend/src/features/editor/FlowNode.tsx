@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { Bell, Bot, GitBranch, Merge, Play, Settings2, ShieldCheck } from 'lucide-react';
+import { Bell, Bot, GitBranch, Mail, Merge, Play, Send, Settings2, ShieldCheck } from 'lucide-react';
 import type { FlowNode } from './types';
 import { useNodeTypesStore } from './nodeTypesStore';
 
@@ -12,6 +12,8 @@ function NodeIcon({ kind }: { kind: string }) {
   if (kind === 'merge_findings') return <Merge size={18} />;
   if (kind === 'condition') return <Settings2 size={18} />;
   if (kind === 'ai_report') return <Bot size={18} />;
+  if (kind === 'notify_email') return <Mail size={18} />;
+  if (kind === 'notify_telegram') return <Send size={18} />;
   if (kind.startsWith('notify_')) return <Bell size={18} />;
   return <ShieldCheck size={18} />;
 }

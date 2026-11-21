@@ -1,13 +1,14 @@
 import { api } from './client';
 
 export type ParamField = {
-  type?: 'string' | 'integer' | 'number' | 'boolean';
+  type?: 'string' | 'integer' | 'number' | 'boolean' | 'array';
   title?: string;
   description?: string;
   default?: string | number | boolean;
   const?: string | number | boolean;
   enum?: Array<string | number>;
   anyOf?: Array<{ type?: string }>;
+  items?: { type?: string };
   format?: string;
   placeholder?: string;
   minimum?: number;
@@ -20,7 +21,7 @@ export type ParamSchema = {
   required?: string[];
 };
 
-export type Port = { id: string; type?: string; required?: boolean; multiple?: boolean };
+export type Port = { id: string; type?: string; required?: boolean; multiple?: boolean; accepts?: string[] };
 
 // `kind` is the backend node type (manual_trigger, scan_secrets, ...).
 export type NodeTypeDefinition = {
@@ -54,6 +55,7 @@ const CATEGORIES: Record<string, string> = {
   condition: 'Логика',
   ai_report: 'AI',
   notify_telegram: 'Уведомления',
+  notify_email: 'Уведомления',
 };
 
 const FIELD_TITLES: Record<string, string> = {
@@ -95,7 +97,15 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
     value: { anyOf: [{ type: 'integer' }, { type: 'string' }] },
   } } },
   { type: 'ai_report', label: 'AI-отчёт', description: 'Подготовить рекомендации по сохранённым находкам.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('report', 'report')], config_schema: {} },
-  { type: 'notify_telegram', label: 'Telegram', description: 'Отправить сводку в настроенный канал.', inputs: [port('report', 'report')], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', properties: { channel: { type: 'string', const: 'default', default: 'default' } } } },
+  { type: 'notify_telegram', label: 'Telegram', description: 'Разослать отчёт в чаты Telegram.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'chat_id или @username канала, по одному в строке.' },
+    attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
+  } } },
+  { type: 'notify_email', label: 'Почта', description: 'Разослать отчёт по электронной почте.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'Адреса почты, по одному в строке.' },
+    subject: { type: 'string', title: 'Тема письма', description: 'Если пусто, тема формируется автоматически.' },
+    attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
+  } } },
 ];
 export const mockNodeTypes: NodeTypeDefinition[] = MOCK_CHECK_TYPES.map(fromBackend);
 

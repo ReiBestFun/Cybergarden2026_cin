@@ -424,7 +424,8 @@ button:disabled {
 }
 
 .settings-panel input,
-.settings-panel select {
+.settings-panel select,
+.settings-panel textarea {
   display: block;
   width: 100%;
   margin-top: 9px;
@@ -958,3 +959,6 @@ tr.clickable:hover td { background: #faf6f1; }
 .schedule-preview.invalid { background: #fde8e3; color: #8a2f1c; }
 .error-text { display: flex; align-items: center; gap: 5px; color: #a3412c; }
 .schedule-server { display: grid; gap: 4px; font-size: 11px; }
+
+.settings-panel textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.5; }
+.settings-panel input[type="checkbox"] { display: inline-block; width: auto; margin: 0 8px 0 0; vertical-align: middle; }

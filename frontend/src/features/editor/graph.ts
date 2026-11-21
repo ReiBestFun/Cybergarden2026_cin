@@ -7,7 +7,11 @@ const allowsInteger = (field?: ParamField) =>
   field?.type === 'integer' || field?.type === 'number' || !!field?.anyOf?.some(x => x.type === 'integer' || x.type === 'number');
 
 // Form values are strings; the backend expects typed JSON.
+// Lists are edited as text, one item per line (commas and semicolons also separate items).
+export const splitList = (raw: string) => raw.split(/[\n,;]+/).map(item => item.trim()).filter(Boolean);
+
 function toConfigValue(field: ParamField | undefined, raw: string): JsonValue {
+  if (field?.type === 'array') return splitList(raw);
   if (field?.type === 'boolean') return raw === 'true';
   if (allowsInteger(field) && /^-?\d+$/.test(raw.trim())) return Number(raw.trim());
   if ((field?.type === 'number') && raw.trim() !== '' && !Number.isNaN(Number(raw))) return Number(raw);
@@ -21,6 +25,7 @@ export function toApiGraph(nodes: FlowNode[], edges: Edge[], types: NodeTypeDefi
       const config: Record<string, JsonValue> = {};
       for (const [key, value] of Object.entries(n.data.config ?? {})) {
         if (value === '' || !(key in properties)) continue;
+        if (properties[key].type === 'array' && splitList(value).length === 0) continue;
         config[key] = toConfigValue(properties[key], value);
       }
       return { id: n.id, type: n.data.kind, config, position: { x: Math.round(n.position.x), y: Math.round(n.position.y) } };
@@ -48,7 +53,7 @@ export function fromApiGraph(graph: ApiGraph, types: NodeTypeDefinition[], label
       data: {
         kind: n.type,
         label: labels[n.id] ?? types.find(t => t.kind === n.type)?.label ?? n.type,
-        config: Object.fromEntries(Object.entries(n.config ?? {}).map(([k, v]) => [k, String(v)])),
+        config: Object.fromEntries(Object.entries(n.config ?? {}).map(([k, v]) => [k, Array.isArray(v) ? v.join('\n') : String(v)])),
       },
     })),
     edges: graph.edges.map(e => ({

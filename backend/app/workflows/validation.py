@@ -3,7 +3,7 @@ from collections import Counter, defaultdict, deque
 
 from pydantic import ValidationError
 
-from ..nodes.catalog import CATALOG, ConditionConfig, ConditionDraft, TelegramConfig
+from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, ConditionConfig, ConditionDraft
 from ..schemas.contracts import Graph, Issue, Node
 
 _ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast"}
@@ -32,11 +32,20 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
         elif type(condition.value) is not int or condition.operator == "matches":
             return Issue(code="INVALID_CONFIG", message="Для счётчика требуется целое число и операция сравнения.", node_id=node.id, field="config")
         return None
-    if node.type == "notify_telegram":
+    if node.type in NOTIFIER_CONFIGS:
+        if draft and not config.get("recipients"):
+            # A draft may be saved before recipients are filled in; running it is still blocked.
+            config = {**config, "recipients": ["@placeholder"] if node.type == "notify_telegram" else ["draft@example.org"]}
         try:
-            TelegramConfig.model_validate(config)
-        except ValidationError:
-            return Issue(code="INVALID_CONFIG", message="Telegram использует настроенный канал default.", node_id=node.id, field="config")
+            NOTIFIER_CONFIGS[node.type].model_validate(config)
+        except ValidationError as error:
+            first = error.errors()[0]
+            field = str(first["loc"][0]) if first.get("loc") else "config"
+            message = {
+                "recipients": "Укажите получателей: корректные chat_id / @канал или адреса почты, от 1 до 50.",
+                "subject": "Тема письма должна быть не длиннее 200 символов.",
+            }.get(field, "Проверьте настройки уведомления.")
+            return Issue(code="INVALID_CONFIG", message=message, node_id=node.id, field=f"config.{field}")
         return None
     if config:
         return Issue(code="INVALID_CONFIG", message="У этого типа ноды нет настроек графа.", node_id=node.id, field="config")
@@ -76,7 +85,7 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
             issues.append(Issue(code="REQUIRED_NODE_COUNT", message=f"Требуется одна нода {kind}."))
     if not _ANALYZERS & counts.keys():
         issues.append(Issue(code="ANALYZER_REQUIRED", message="Подключите хотя бы один анализатор."))
-    for kind in ("ai_report", "notify_telegram"):
+    for kind in ("ai_report",):
         if counts[kind] > 1:
             issues.append(Issue(code="NODE_LIMIT", message=f"Допускается одна нода {kind}."))
 
@@ -101,7 +110,7 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
         if source_port is None or target_port is None:
             issues.append(Issue(code="UNKNOWN_PORT", message="Порт ребра отсутствует в каталоге.", edge_id=edge.id))
             continue
-        if source_port.type != target_port.type:
+        if not target_port.compatible(source_port.type):
             issues.append(Issue(code="INCOMPATIBLE_PORTS", message="Типы портов несовместимы.", edge_id=edge.id))
             continue
         connection = edge.source, edge.source_port, edge.target, edge.target_port

@@ -2,7 +2,7 @@ import type { Connection, Edge } from '@xyflow/react';
 import type { FlowNode } from './types';
 import type { NodeTypeDefinition } from '../../shared/api/nodeTypes';
 
-type Port = { id: string; type?: string; multiple?: boolean };
+type Port = { id: string; type?: string; multiple?: boolean; accepts?: string[] };
 
 export function validateConnection(
   connection: Connection,
@@ -26,7 +26,7 @@ export function validateConnection(
   if (!output || !input) return false;
   const sourceType = output.type ?? 'any';
   const targetType = input.type ?? 'any';
-  if (sourceType !== 'any' && targetType !== 'any' && sourceType !== targetType) return false;
+  if (sourceType !== 'any' && targetType !== 'any' && sourceType !== targetType && !input.accepts?.includes(sourceType)) return false;
   if (edges.some(e => e.source === source && e.target === target &&
       (e.sourceHandle ?? outputs[0]?.id) === output.id &&
       (e.targetHandle ?? inputs[0]?.id) === input.id)) return false;

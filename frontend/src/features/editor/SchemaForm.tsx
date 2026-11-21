@@ -17,7 +17,11 @@ export function SchemaForm({schema, values, onChange}: Props) {
       const label = field.title ?? key;
       return <label key={key} htmlFor={id}>
         {label}{required ? ' *' : ''}
-        {field.type === 'boolean' ? (
+        {field.type === 'array' ? (
+          <textarea id={id} rows={Math.min(8, Math.max(3, value.split('\n').length + 1))} value={value}
+            placeholder={field.description} required={required} spellCheck={false}
+            onChange={e=>onChange(key, e.target.value)} />
+        ) : field.type === 'boolean' ? (
           <input id={id} type="checkbox" checked={value === 'true'} onChange={e=>onChange(key, String(e.target.checked))}/>
         ) : field.enum?.length ? (
           <select id={id} value={value} onChange={e=>onChange(key,e.target.value)} required={required}>

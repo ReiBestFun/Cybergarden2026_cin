@@ -1,6 +1,6 @@
 from collections import defaultdict
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from graphlib import TopologicalSorter
 from operator import eq, ge, gt, le, lt, ne
 from typing import Literal
@@ -11,7 +11,8 @@ from pydantic import ValidationError
 from ..analyzers.models import Category, ScanError, Warning, finding_key
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, prepare_repository
-from ..nodes.catalog import ConditionConfig
+from ..nodes.catalog import NOTIFIER_CONFIGS, ConditionConfig
+from ..notifications import Channel, EmailChannel, NotifierError, TelegramChannel, build_message
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import Edge, Graph, Node
 from ..worker import run_scan
@@ -121,7 +122,48 @@ class GraphExecution:
             assert bundle is not None
             branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle)
             return Step(ports=(branch,), preview={"branch": branch}, bundle=bundle)
+        if node.type in NOTIFIER_CONFIGS:
+            return self._notify(node, edges)
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
+
+    def _channel(self, kind: str) -> Channel:
+        settings = self.settings
+        if kind == "notify_telegram":
+            token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
+            return TelegramChannel(token, api_base=settings.telegram_api_base, timeout=settings.notify_timeout_seconds)
+        return EmailChannel(
+            settings.smtp_host, port=settings.smtp_port, security=settings.smtp_security,
+            username=settings.smtp_username,
+            password=settings.smtp_password.get_secret_value() if settings.smtp_password else None,
+            sender=settings.smtp_from, timeout=settings.notify_timeout_seconds,
+        )
+
+    def _notify(self, node: Node, edges: list[Edge]) -> Step:
+        bundle = next((self.steps[edge.source].bundle for edge in edges if self._active(edge)), None)
+        if bundle is None:
+            raise ScanError(Warning("NO_REPORT", "На вход уведомления не пришёл отчёт."))
+        config = NOTIFIER_CONFIGS[node.type].model_validate(node.config)
+        message = build_message(
+            bundle, run_id=str(self.progress.claim.id), repository=str(self.source.get("repository_url", "")),
+            app_base_url=self.settings.app_base_url, attach_json=config.attach_json,
+        )
+        if getattr(config, "subject", None):
+            message = replace(message, subject=config.subject)
+        try:
+            deliveries = self._channel(node.type).send(list(config.recipients), message)
+        except NotifierError as error:
+            raise ScanError(Warning(error.code, error.message)) from None
+        failed = [item for item in deliveries if item.status == "failed"]
+        preview = {
+            "channel": node.type.removeprefix("notify_"),
+            "sent": len(deliveries) - len(failed), "failed": len(failed),
+            "attachments": [item.filename for item in message.attachments],
+            "recipients": [asdict(item) for item in deliveries],
+        }
+        if failed:
+            warning = Warning("DELIVERY_FAILED", f"Не доставлено {len(failed)} из {len(deliveries)}: {failed[0].error}")
+            return Step("failed", preview=preview, warning=warning)
+        return Step(ports=("delivery",), preview=preview)
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]
@@ -195,8 +237,11 @@ class GraphExecution:
             "checks": {node_id: _scan_preview(outcome) for node_id, outcome in self.scans.items()},
         }}
         for node in graph.nodes:
-            key = {"ai_report": "llm", "notify_telegram": "delivery"}.get(node.type)
-            if key:
-                step = self.steps[node.id]
-                payload[key] = {"status": step.status, "error": error_payload(step.warning)}
+            step = self.steps[node.id]
+            if node.type == "ai_report":
+                payload["llm"] = {"status": step.status, "error": error_payload(step.warning)}
+            elif node.type in NOTIFIER_CONFIGS:
+                payload.setdefault("delivery", {})[node.id] = {
+                    "status": step.status, "error": error_payload(step.warning), **(step.preview or {}),
+                }
         self.progress.finish_run(status, asdict(report.summary), payload, failure)

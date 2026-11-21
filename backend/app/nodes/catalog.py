@@ -1,6 +1,9 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+
+from ..notifications.email import ADDRESS
+from ..notifications.telegram import CHAT_ID
 
 from ..schemas.contracts import Input
 
@@ -21,8 +24,29 @@ class ConditionDraft(Input):
     value: OPERAND | None = None
 
 
+ChatId = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CHAT_ID.pattern)]
+EmailAddress = Annotated[str, StringConstraints(strip_whitespace=True, max_length=254, pattern=ADDRESS.pattern)]
+
+
 class TelegramConfig(Input):
-    channel: Literal["default"] = "default"
+    recipients: Annotated[list[ChatId], Field(
+        min_length=1, max_length=50, title="Получатели",
+        description="chat_id или @username канала, по одному в строке. Бот должен быть добавлен в чат.",
+    )]
+    attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
+
+
+class EmailConfig(Input):
+    recipients: Annotated[list[EmailAddress], Field(
+        min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
+    )]
+    subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = Field(
+        default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
+    )
+    attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
+
+
+NOTIFIER_CONFIGS: dict[str, type[Input]] = {"notify_telegram": TelegramConfig, "notify_email": EmailConfig}
 
 
 class Port(BaseModel):
@@ -30,6 +54,11 @@ class Port(BaseModel):
     type: str
     required: bool = True
     multiple: bool = False
+    # Additional source port types this input can be connected to.
+    accepts: list[str] = Field(default_factory=list)
+
+    def compatible(self, source_type: str) -> bool:
+        return source_type == self.type or source_type in self.accepts
 
 
 class NodeDefinition(BaseModel):
@@ -60,6 +89,9 @@ SNAPSHOT = Port(id="snapshot", type="snapshot")
 RESULT = Port(id="result", type="scan_result")
 BUNDLE = Port(id="bundle", type="findings_bundle")
 REPORT = Port(id="report", type="report")
+# Notifications take the merged findings directly or, later, the AI report built from them.
+NOTIFY_INPUT = Port(id="report", type="report", accepts=["findings_bundle"])
+DELIVERY = Port(id="delivery", type="delivery")
 
 CATALOG = {node.type: node for node in (
     definition("manual_trigger", "Ручной запуск", "Поставить запуск в очередь по кнопке.", (), (PARAMS,)),
@@ -73,8 +105,10 @@ CATALOG = {node.type: node for node in (
     definition("condition", "IF / ELSE", "Выбрать ветку по сводке или покрытию.", (BUNDLE,),
                (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionConfig),
     definition("ai_report", "AI-отчёт", "Подготовить рекомендации по сохранённым находкам.", (BUNDLE,), (REPORT,)),
-    definition("notify_telegram", "Telegram", "Отправить сводку в настроенный канал.",
-               (REPORT,), (Port(id="delivery", type="delivery"),), TelegramConfig),
+    definition("notify_telegram", "Telegram", "Разослать отчёт в чаты Telegram.",
+               (NOTIFY_INPUT,), (DELIVERY,), TelegramConfig),
+    definition("notify_email", "Почта", "Разослать отчёт по электронной почте.",
+               (NOTIFY_INPUT,), (DELIVERY,), EmailConfig),
 )}
 
 

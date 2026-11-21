@@ -69,6 +69,46 @@ def test_secrets_classifies_literals_and_excludes_controls():
     assert "fixture-" not in json.dumps(asdict(result))
 
 
+@pytest.mark.parametrize("path", ["Settings.kt", "app.properties"])
+def test_secrets_combines_entropy_with_format_and_context(path, caplog):
+    entries = [
+        ("material", "Q2vp8KhJ41Ybm6Li3NVdT7fx0s"),
+        ("identifier", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+        ("materialId", "d85a1f09bc37e264" * 4),
+        ("password", "example-Q2vp8KhJ41Ybm6Li3NVdT7fx0s"),
+        ("databasePassword", "zzzzzz"),
+        ("pageToken", "G3js8Qvp1Lj5cY4rHu07axBt"),
+        ("label", "aaaabbbbccccddddaaaabbbbccccdddd"),
+        ("contentType", "application/x-www-form-urlencoded"),
+        ("path", "/usr/local/share/zoneinfo/America/New_York"),
+        ("materialHeader", "Bearer x47Vie9QbnOb2NCT79Ug5rdF"),
+        ("artifact", "com-example-OrdersApplicationConfiguration"),
+    ]
+    lines = [f'val {key} = "{value}"' if path.endswith(".kt") else f"{key}={value}"
+             for key, value in entries]
+    result = scan_secrets(Snapshot(SHA, {path: "\n".join(lines)}))
+    assert [(item.line, item.metadata["class"]) for item in result.findings] == [
+        (1, "configuration-token"), (5, "password"), (10, "configuration-token"),
+    ]
+    report = merge_findings(SHA, (NodeResult("secrets", "succeeded", result),))
+    outputs = (json.dumps(asdict(result)), submission_json(report), readable_report(report), caplog.text)
+    assert all(value not in output for _, value in entries for output in outputs)
+
+
+def test_secrets_uses_explicit_kotlin_context_for_the_same_literal():
+    result = scan_secrets(Snapshot(SHA, {"Config.kt": """
+        val material = "Q2vp8KhJ41Ybm6Li3NVdT7fx0s"
+        val databasePassword = material
+        val settings = mapOf("opaque" to "G3js8Qvp1Lj5cY4rHu07axBt")
+        val service = Service(material = "kI79Fo68jcxQDCnbsUYN1BRW")
+        val pageToken = "Lm8ofNqz1C6jVb75xeiSAZB4"
+        val params = pageToken
+    """}))
+    assert [(item.line, item.metadata["class"]) for item in result.findings] == [
+        (2, "password"), (4, "configuration-token"), (5, "configuration-token"),
+    ]
+
+
 def test_invalid_yaml_keeps_other_safe_results():
     result = scan_secrets(Snapshot(SHA, {
         ".env": "APP_TOKEN=synthetic-9d7",

@@ -108,11 +108,14 @@ class WorkspaceCreate(Input):
     name: Name
 
 
+WorkspaceRole = Literal["owner", "member"]
+
+
 class WorkspaceRead(ReadModel):
     id: UUID
     name: str
     personal: bool
-    role: Literal["owner", "member"]
+    role: WorkspaceRole
 
 
 class WorkflowCreate(Input):

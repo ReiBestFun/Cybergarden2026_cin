@@ -17,7 +17,7 @@ from .auth import CurrentUser
 from .common import ApiError, PageQuery, page
 from .projects import get_project
 from .workflows import checked_draft, get_workflow
-from .workspaces import require_workspace_owner, workspace_role
+from .workspaces import require_team_owner, workspace_role
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 Description = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
@@ -79,9 +79,9 @@ def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, works
 def create_template(data: TemplatePublish, db: Database, user: CurrentUser) -> WorkflowTemplate:
     workflow = get_workflow(data.workflow_id, db, user.id)
     if data.workspace_id is not None:
-        require_workspace_owner(db, data.workspace_id, user.id)
+        require_team_owner(db, data.workspace_id, user.id)
         project = get_project(workflow.project_id, db, user.id)
-        if data.workspace_id != project.workspace_id or data.workspace_id == user.id:
+        if data.workspace_id != project.workspace_id:
             raise ApiError(409, "TEAM_WORKSPACE_REQUIRED", "Выберите командное пространство исходного сценария.")
     template = WorkflowTemplate(
         workspace_id=data.workspace_id, owner_id=user.id if data.workspace_id is None else None,

@@ -11,7 +11,7 @@ import { Credentials } from '../pages/Credentials';
 import { Repositories } from '../pages/Repositories';
 import { Templates } from '../pages/Templates';
 import { TeamSettings } from '../pages/TeamSettings';
-import { JoinTeam } from '../pages/JoinTeam';
+import { JoinTeam, pendingInvitation, rememberInvitation } from '../pages/JoinTeam';
 import { AccountProfile } from '../pages/Profile';
 import { ApiError, apiUrl, errorMessage, SESSION_EXPIRED, WORKSPACE_UNAVAILABLE } from '../shared/api/client';
 import { getProfile, logout, type Profile } from '../shared/api/account';
@@ -63,7 +63,7 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
     setWorkspaceError('');
     void listWorkspaces(controller.signal).then(items => {
       if (controller.signal.aborted) return;
-      const savedId = activeWorkspaceId.current || savedWorkspace(storageKey);
+      const savedId = activeWorkspaceId.current || new URLSearchParams(window.location.search).get('workspace') || savedWorkspace(storageKey);
       const selected = items.find(item => item.id === savedId) ?? items.find(item => item.personal);
       if (!selected) throw new Error('Нет доступного рабочего пространства.');
       useEditorStore.getState().setWorkspace(selected.id);
@@ -238,7 +238,8 @@ function SessionGate() {
   const query = new URLSearchParams(location.search);
   const loginError = LOGIN_ERRORS[query.get('auth_error') ?? ''];
   query.delete('auth_error');
-  const next = location.pathname + (query.size ? '?' + query : '');
+  const retryTeam = loginError && pendingInvitation()?.teamId;
+  const next = retryTeam ? '/join/' + retryTeam : location.pathname + (query.size ? '?' + query : '');
   const loginUrl = apiUrl('/api/auth/github/start?' + new URLSearchParams({ next }));
 
   return (
@@ -256,8 +257,14 @@ function SessionGate() {
             </button>
           </>
         ) : (
-          <a className="btn primary" href={loginUrl} onClick={() => {
-            if (teamId && location.hash) sessionStorage.setItem('invite:' + teamId, location.hash.slice(1));
+          <a className="btn primary" href={loginUrl} onClick={event => {
+            if (teamId && location.hash) {
+              try { rememberInvitation(teamId, location.hash); }
+              catch {
+                event.preventDefault();
+                setError('Разрешите хранилище вкладки для возврата к приглашению после входа через GitHub.');
+              }
+            }
           }}><Github size={19} /> Войти через GitHub</a>
         )}
       </section>

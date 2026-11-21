@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
-from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Response
@@ -10,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db.models import User, Workspace, WorkspaceInvitation, WorkspaceMembership
 from ..db.session import Database
-from ..schemas.contracts import Input, Page, ReadModel, WorkspaceCreate, WorkspaceRead
+from ..schemas.contracts import Input, Page, ReadModel, WorkspaceCreate, WorkspaceRead, WorkspaceRole
 from .auth import CurrentUser, token_hash
 from .common import ApiError, PageQuery
 
@@ -56,7 +55,13 @@ def create_workspace(data: WorkspaceCreate, db: Database, user: CurrentUser) -> 
 
 
 class MemberRole(Input):
-    role: Literal["owner", "member"]
+    role: WorkspaceRole
+
+
+class MemberRead(ReadModel):
+    id: UUID
+    github_login: str
+    role: WorkspaceRole
 
 
 class InviteCreate(MemberRole):
@@ -65,7 +70,7 @@ class InviteCreate(MemberRole):
 
 class InviteRead(ReadModel):
     id: UUID
-    role: str
+    role: WorkspaceRole
     expires_at: datetime
 
 
@@ -85,7 +90,7 @@ def _team(db: Session, workspace_id: UUID, *, lock: bool = False) -> Workspace:
     return team
 
 
-def _manage(db: Session, workspace_id: UUID, user_id: UUID, *, lock: bool = True) -> None:
+def require_team_owner(db: Session, workspace_id: UUID, user_id: UUID, *, lock: bool = True) -> None:
     # Serialize membership changes, including checking that a team keeps its last owner.
     _team(db, workspace_id, lock=lock)
     require_workspace_owner(db, workspace_id, user_id)
@@ -93,7 +98,7 @@ def _manage(db: Session, workspace_id: UUID, user_id: UUID, *, lock: bool = True
 
 @router.post("/workspaces/{workspace_id}/invitations", status_code=201)
 def invite(workspace_id: UUID, data: InviteCreate, user: CurrentUser, db: Database) -> InviteIssued:
-    _manage(db, workspace_id, user.id)
+    require_team_owner(db, workspace_id, user.id)
     token = token_urlsafe(32)
     row = WorkspaceInvitation(workspace_id=workspace_id, issuer_id=user.id, token_hash=token_hash(token), role=data.role,
                               expires_at=datetime.now(UTC) + timedelta(days=data.days))
@@ -104,7 +109,7 @@ def invite(workspace_id: UUID, data: InviteCreate, user: CurrentUser, db: Databa
 
 @router.get("/workspaces/{workspace_id}/invitations", response_model=list[InviteRead])
 def invitations(workspace_id: UUID, user: CurrentUser, db: Database):
-    _manage(db, workspace_id, user.id, lock=False)
+    require_team_owner(db, workspace_id, user.id, lock=False)
     return db.scalars(select(WorkspaceInvitation).where(
         WorkspaceInvitation.workspace_id == workspace_id, WorkspaceInvitation.expires_at > func.now(),
     ).order_by(WorkspaceInvitation.expires_at, WorkspaceInvitation.id)).all()
@@ -112,7 +117,7 @@ def invitations(workspace_id: UUID, user: CurrentUser, db: Database):
 
 @router.delete("/workspaces/{workspace_id}/invitations/{invitation_id}", status_code=204)
 def revoke(workspace_id: UUID, invitation_id: UUID, user: CurrentUser, db: Database) -> Response:
-    _manage(db, workspace_id, user.id)
+    require_team_owner(db, workspace_id, user.id)
     db.execute(delete(WorkspaceInvitation).where(
         WorkspaceInvitation.workspace_id == workspace_id, WorkspaceInvitation.id == invitation_id,
     ))
@@ -136,17 +141,17 @@ def join_team(workspace_id: UUID, data: Redeem, user: CurrentUser, db: Database)
     return WorkspaceRead(id=team.id, name=team.name, personal=False, role=role)
 
 
-@router.get("/workspaces/{workspace_id}/members")
-def members(workspace_id: UUID, user: CurrentUser, db: Database) -> list[dict]:
-    _manage(db, workspace_id, user.id, lock=False)
+@router.get("/workspaces/{workspace_id}/members", response_model=list[MemberRead])
+def members(workspace_id: UUID, user: CurrentUser, db: Database):
+    require_team_owner(db, workspace_id, user.id, lock=False)
     statement = select(User.id, User.github_login, WorkspaceMembership.role).join(
         WorkspaceMembership, WorkspaceMembership.user_id == User.id,
     ).where(WorkspaceMembership.workspace_id == workspace_id).order_by(User.id)
-    return [dict(row) for row in db.execute(statement).mappings()]
+    return db.execute(statement).mappings().all()
 
 
 def _change_member(db: Session, workspace_id: UUID, actor_id: UUID, member_id: UUID, role: str | None) -> None:
-    _manage(db, workspace_id, actor_id)
+    require_team_owner(db, workspace_id, actor_id)
     member = db.get(WorkspaceMembership, (workspace_id, member_id))
     if member is None:
         raise ApiError(404, "MEMBER_NOT_FOUND", "Участник не найден.")

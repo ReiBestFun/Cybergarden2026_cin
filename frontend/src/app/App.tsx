@@ -2,11 +2,13 @@ import { useEffect } from 'react';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { ReactFlowProvider } from '@xyflow/react';
-import { ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon } from 'lucide-react';
+import { ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon, KeyRound, Library } from 'lucide-react';
 import { Editor } from '../features/editor/Editor';
 import { Scenarios } from '../pages/Scenarios';
 import { Results } from '../pages/Results';
 import { History } from '../pages/History';
+import { Credentials } from '../pages/Credentials';
+import { Templates } from '../pages/Templates';
 function Shell() {
   const refreshCatalog = useNodeTypesStore(s => s.refresh);
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
@@ -26,11 +28,17 @@ function Shell() {
           <NavLink to="/editor">
             <Workflow size={18} /> Редактор
           </NavLink>
+          <NavLink to="/templates">
+            <Library size={18} /> Шаблоны
+          </NavLink>
           <NavLink to="/results">
             <FileSearch size={18} /> Результаты
           </NavLink>
           <NavLink to="/history">
             <HistoryIcon size={18} /> История
+          </NavLink>
+          <NavLink to="/credentials">
+            <KeyRound size={18} /> Учётные данные
           </NavLink>
         </div>
         <div className="nav-footer">
@@ -43,8 +51,10 @@ function Shell() {
         <Routes>
           <Route path="/" element={<Scenarios />} />
           <Route path="/editor" element={<ReactFlowProvider><Editor /></ReactFlowProvider>} />
+          <Route path="/templates" element={<Templates />} />
           <Route path="/results" element={<Results />} />
           <Route path="/history" element={<History />} />
+          <Route path="/credentials" element={<Credentials />} />
         </Routes>
       </div>
     </div>

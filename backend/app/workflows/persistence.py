@@ -62,6 +62,7 @@ class RunProgress:
         *,
         ports: list[str],
         preview: dict | None = None,
+        input_preview: dict | None = None,
         warning: Warning | None = None,
         findings: tuple[Finding, ...] = (),
         sha: str | None = None,
@@ -76,6 +77,8 @@ class RunProgress:
             node.status = status
             node.active_output_ports = ports
             node.output_preview = preview
+            if input_preview is not None:
+                node.input_preview = input_preview
             node.error = error_payload(warning)
             node.finished_at = now
             for finding in findings:

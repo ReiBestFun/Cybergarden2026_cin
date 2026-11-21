@@ -9,8 +9,9 @@ import {
 import { validateConnection } from './validateConnection';
 import { fromApiGraph, toApiGraph } from './graph';
 import { ApiError, errorMessage } from '../../shared/api/client';
+import { watchRun } from '../../shared/api/runEvents';
 import {
-  createWorkflow, ensureProject, getProject, getRun, getSchedule, getWorkflow, isFinished, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
+  createWorkflow, ensureProject, getProject, getSchedule, getWorkflow, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
   type RunDetail, type Schedule,
 } from '../../shared/api/workflows';
 
@@ -42,9 +43,8 @@ type EditorState = {
 };
 
 const saved = getSaved();
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
 export const useEditorStore = create<EditorState>((set, get) => {
+  let runUpdates: AbortController | undefined;
   const persist = () => {
     const s = get();
     saveDraft({ nodes: s.nodes, edges: s.edges, project: s.project, name: s.name, projectId: s.projectId, workflowId: s.workflowId, schedule: s.schedule });
@@ -88,12 +88,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setNotice: (notice) => set({ notice }),
 
     newWorkflow: (preset) => {
-      set({ nodes: initialNodes, edges: initialEdges, name: DEFAULT_NAME, workflowId: null, selected: null, run: null, notice: null,
+      runUpdates?.abort();
+      runUpdates = undefined;
+      set({ nodes: initialNodes, edges: initialEdges, name: DEFAULT_NAME, workflowId: null, selected: null, run: null, notice: null, busy: null,
         schedule: defaultSchedule(), serverSchedule: null, ...(preset === 'ci' ? { ...ciPreset, projectId: null } : {}) });
       persist();
     },
 
     loadWorkflow: async (id) => {
+      runUpdates?.abort();
+      runUpdates = undefined;
       set({ busy: 'load', notice: null });
       try {
         const workflow = await getWorkflow(id);
@@ -152,41 +156,47 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     runWorkflow: async (commitSha) => {
       if (get().busy) return;
+      const controller = new AbortController();
+      runUpdates = controller;
       set({ busy: 'run', notice: null, run: null });
       clearStatuses();
       try {
         const workflowId = await get().save();
-        if (!workflowId) return;
+        if (!workflowId || controller.signal.aborted) return;
         const check = await validateWorkflow(workflowId);
+        if (controller.signal.aborted) return;
         if (!check.valid) throw new ApiError(422, check.issues[0]);
         const { id } = commitSha ? await startCiTest(workflowId, commitSha) : await startRun(workflowId);
+        if (controller.signal.aborted) return;
         setLastRunId(id);
         set({ notice: { kind: 'info', text: 'Запуск в очереди. Ожидаем воркер…' } });
-        for (;;) {
-          const run = await getRun(id);
+        const run = await watchRun(id, controller.signal, run => {
           const statuses = Object.fromEntries(run.nodes.map(n => [n.node_id, n.status]));
           set(state => ({ run, nodes: state.nodes.map(n => ({ ...n, data: { ...n.data, status: statuses[n.id] } })) }));
           if (run.status === 'running') set({ notice: { kind: 'info', text: 'Выполняется…' } });
-          if (isFinished(run.status)) {
-            const total = run.summary?.total ?? 0;
-            const decision = run.nodes.find(node => node.type === 'ci_gate')?.output_preview?.decision;
-            if (commitSha && (decision === 'blocked' || decision === 'error')) {
-              set({ notice: { kind: 'error', text: decision === 'blocked'
-                ? `CI заблокирован по критичности. Находок: ${total}.`
-                : `CI завершился с неполным покрытием. Находок: ${total}.` } });
-              break;
-            }
-            set({ notice: run.status === 'failed'
-              ? { kind: 'error', text: `Запуск завершился ошибкой: ${run.error?.message ?? 'неизвестная ошибка'}` }
-              : { kind: 'success', text: `Запуск завершён (${run.status === 'partial' ? 'частичное покрытие' : 'успешно'}). Находок: ${total}.` } });
-            break;
-          }
-          await sleep(1000);
+          if (run.status === 'queued') set({ notice: { kind: 'info', text: 'Запуск в очереди. Ожидаем воркер…' } });
+        }, reconnecting => {
+          if (reconnecting) set({ notice: { kind: 'info', text: 'Восстанавливаем поток событий…' } });
+        });
+        if (controller.signal.aborted) return;
+        const total = run.summary?.total ?? 0;
+        const decision = run.nodes.find(node => node.type === 'ci_gate')?.output_preview?.decision;
+        if (commitSha && (decision === 'blocked' || decision === 'error')) {
+          set({ notice: { kind: 'error', text: decision === 'blocked'
+            ? `CI заблокирован по критичности. Находок: ${total}.`
+            : `CI завершился с неполным покрытием. Находок: ${total}.` } });
+        } else {
+          set({ notice: run.status === 'failed'
+            ? { kind: 'error', text: `Запуск завершился ошибкой: ${run.error?.message ?? 'неизвестная ошибка'}` }
+            : { kind: 'success', text: `Запуск завершён (${run.status === 'partial' ? 'частичное покрытие' : 'успешно'}). Находок: ${total}.` } });
         }
       } catch (error) {
-        fail(error);
+        if (!controller.signal.aborted) fail(error);
       } finally {
-        set({ busy: null });
+        if (runUpdates === controller) {
+          runUpdates = undefined;
+          set({ busy: null });
+        }
       }
     },
   };

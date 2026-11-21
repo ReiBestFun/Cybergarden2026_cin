@@ -37,6 +37,29 @@ class Workflow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class WorkflowTemplate(Base):
+    __tablename__ = "workflow_templates"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text)
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    schedule: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Credential(Base):
+    __tablename__ = "credentials"
+    __table_args__ = (Index("ix_credentials_project", "project_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"))
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(24))
+    ciphertext: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+
+
 class Schedule(Base):
     __tablename__ = "schedules"
     __table_args__ = (

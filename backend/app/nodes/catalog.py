@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -7,7 +8,7 @@ from ..notifications.telegram import CHAT_ID
 
 from ..schemas.contracts import CiThreshold, Input, Ref
 
-FIELD = Literal["summary.total", "summary.high_count", "summary.critical_count", "coverage.status"]
+FIELD = Literal["summary.total", "summary.high_count", "summary.critical_count", "coverage.status", "ci.decision"]
 OPERATOR = Literal["eq", "ne", "gt", "gte", "lt", "lte", "matches"]
 OPERAND = Annotated[int, Field(strict=True)] | Annotated[str, Field(max_length=256)]
 
@@ -36,25 +37,28 @@ ChatId = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CHAT_ID
 EmailAddress = Annotated[str, StringConstraints(strip_whitespace=True, max_length=254, pattern=ADDRESS.pattern)]
 
 
-class TelegramConfig(Input):
+class NotificationConfig(Input):
+    credential_id: UUID | None = Field(default=None, title="Учётные данные")
+    attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
+
+
+class TelegramConfig(NotificationConfig):
     recipients: Annotated[list[ChatId], Field(
         min_length=1, max_length=50, title="Получатели",
         description="chat_id или @username канала, по одному в строке. Бот должен быть добавлен в чат.",
     )]
-    attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
 
 
-class EmailConfig(Input):
+class EmailConfig(NotificationConfig):
     recipients: Annotated[list[EmailAddress], Field(
         min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
     )]
     subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = Field(
         default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
     )
-    attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
 
 
-NOTIFIER_CONFIGS: dict[str, type[Input]] = {"notify_telegram": TelegramConfig, "notify_email": EmailConfig}
+NOTIFIER_CONFIGS: dict[str, type[TelegramConfig | EmailConfig]] = {"notify_telegram": TelegramConfig, "notify_email": EmailConfig}
 
 
 class Port(BaseModel):
@@ -111,9 +115,9 @@ CATALOG = {node.type: node for node in (
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),
     definition("merge_findings", "Объединение находок", "Собрать результаты анализаторов.",
                (Port(id="results", type="scan_result", multiple=True),), (BUNDLE,)),
-    definition("ci_gate", "Порог CI", "Вернуть решение в CI по критичности находок и полноте анализа.",
-               (BUNDLE,), (), CiGateConfig),
-    definition("condition", "IF / ELSE", "Выбрать ветку по сводке или покрытию.", (BUNDLE,),
+    definition("ci_gate", "Порог CI", "Вернуть решение в CI и передать его вместе с находками в следующую ноду.",
+               (BUNDLE,), (BUNDLE,), CiGateConfig),
+    definition("condition", "IF / ELSE", "Выбрать ветку по сводке, покрытию или вердикту CI.", (BUNDLE,),
                (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionConfig),
     definition("ai_report", "AI-отчёт", "Подготовить рекомендации по сохранённым находкам.", (BUNDLE,), (REPORT,)),
     definition("notify_telegram", "Telegram", "Разослать отчёт в чаты Telegram.",

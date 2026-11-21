@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     worker_stale_seconds: float = Field(default=180, ge=15, allow_inf_nan=False)
     ci_workflow_tokens: dict[UUID, SecretStr] = Field(default_factory=dict)
+    credentials_encryption_key: SecretStr | None = None
 
     # Notifications. Secrets stay on the server and never enter workflow graphs.
     app_base_url: str = "http://localhost:5173"

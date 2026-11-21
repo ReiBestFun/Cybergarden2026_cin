@@ -7,6 +7,7 @@ import { NodePalette } from './NodePalette';
 import { Canvas } from './Canvas';
 import { SettingsPanel } from './SettingsPanel';
 import { CiSetup } from './CiSetup';
+import { PublishTemplate } from './PublishTemplate';
 import { toApiGraph } from './graph';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow } from '../../shared/api/workflows';
@@ -24,6 +25,7 @@ export function Editor() {
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
   const [downloadingCi, setDownloadingCi] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const hasCiTrigger = nodes.some(node => node.data.kind === 'ci_trigger');
 
   // /editor?workflow=<id> opens a saved workflow from the server.
@@ -86,6 +88,7 @@ export function Editor() {
           <button className="btn secondary" onClick={exportJson}>
             <Download size={16} /> JSON
           </button>
+          <button className="btn secondary" disabled={!!busy} aria-expanded={publishing} onClick={() => setPublishing(value => !value)}>В шаблоны</button>
           {hasCiTrigger && (
             <button className="btn secondary" disabled={!!busy || downloadingCi} onClick={() => void exportCi()}>
               <Download size={16} /> security.yml
@@ -106,6 +109,7 @@ export function Editor() {
       )}
 
       {hasCiTrigger && <CiSetup key={project} />}
+      {publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
 
       <div className="editor-layout">
         <NodePalette />

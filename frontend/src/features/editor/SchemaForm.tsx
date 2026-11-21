@@ -7,7 +7,7 @@ type Props = {
 };
 
 export function SchemaForm({schema, values, onChange}: Props) {
-  const properties = Object.entries(schema.properties ?? {});
+  const properties = Object.entries(schema.properties ?? {}).filter(([key]) => key !== 'credential_id');
   if (!properties.length) return <p className="muted">У этой ноды нет настраиваемых параметров.</p>;
   return <>
     {properties.map(([key, field]) => {
@@ -15,6 +15,8 @@ export function SchemaForm({schema, values, onChange}: Props) {
       const value = values[key] ?? (field.default == null ? '' : String(field.default));
       const required = schema.required?.includes(key) ?? false;
       const label = field.title ?? key;
+      const choices = values.field === 'ci.decision' && key === 'value' ? ['passed', 'blocked', 'error']
+        : values.field === 'ci.decision' && key === 'operator' ? ['eq', 'ne'] : field.enum;
       return <label key={key} htmlFor={id}>
         {label}{required ? ' *' : ''}
         {field.type === 'array' ? (
@@ -23,10 +25,10 @@ export function SchemaForm({schema, values, onChange}: Props) {
             onChange={e=>onChange(key, e.target.value)} />
         ) : field.type === 'boolean' ? (
           <input id={id} type="checkbox" checked={value === 'true'} onChange={e=>onChange(key, String(e.target.checked))}/>
-        ) : field.enum?.length ? (
+        ) : choices?.length ? (
           <select id={id} value={value} onChange={e=>onChange(key,e.target.value)} required={required}>
             <option value="">Выберите значение</option>
-            {field.enum.map(option => <option key={String(option)} value={String(option)}>{String(option)}</option>)}
+            {choices.map(option => <option key={String(option)} value={String(option)}>{String(option)}</option>)}
           </select>
         ) : (
           <input id={id} type={field.type === 'number' || field.type === 'integer' ? 'number' : 'text'}

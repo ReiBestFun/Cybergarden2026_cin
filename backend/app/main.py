@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
-from .api import ci, projects, runs, workflows
+from .api import ci, credentials, projects, runs, templates, workflows
 from .api.common import ApiError
 from .config import Settings
 from .db.session import Database, make_engine
@@ -63,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.include_router(workflows.router)
     api.include_router(runs.router)
     api.include_router(ci.router)
+    api.include_router(credentials.router)
+    api.include_router(templates.router)
     app.include_router(api)
     return app
 

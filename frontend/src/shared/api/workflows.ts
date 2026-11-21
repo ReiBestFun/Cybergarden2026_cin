@@ -48,7 +48,7 @@ export type Schedule = {
 
 export const isFinished = (status: RunStatus) => status !== 'queued' && status !== 'running';
 
-const canonicalRepo = (url: string) => url.trim().replace(/\.git$/, '').replace(/\/+$/, '').toLowerCase();
+export const canonicalRepo = (url: string) => url.trim().replace(/\/+$/, '').replace(/\.git$/i, '').toLowerCase();
 
 export const listProjects = () => api<Page<Project>>('/api/projects?limit=200');
 export const getProject = (id: string) => api<Project>(`/api/projects/${id}`);

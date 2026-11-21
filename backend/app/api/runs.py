@@ -1,9 +1,14 @@
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import StreamingResponse
+from psycopg import connect, sql
 from sqlalchemy import Select, func, select
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
 from ..db.models import FindingRow, NodeRun, ScanRun
@@ -83,6 +88,39 @@ def get_run(run_id: UUID, db: Database) -> RunDetail:
         **RunRead.model_validate(run).model_dump(),
         graph_snapshot=graph,
         nodes=[NodeRunRead.model_validate(nodes[node.id]) for node in graph.nodes if node.id in nodes],
+    )
+
+
+def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str) -> Iterator[str]:
+    previous = run.model_dump_json()
+    yield f"retry: 1500\nevent: run\ndata: {previous}\n\n"
+    if run.status not in {"queued", "running"}:
+        return
+    with connect(dsn, autocommit=True, connect_timeout=5) as listener:
+        listener.execute(sql.SQL("LISTEN {}").format(sql.Identifier(f"cyberflow_run_{run.id.hex}")))
+        while True:
+            # Take a new snapshot after LISTEN to include changes since the first read.
+            with sessions() as db:
+                run = get_run(run.id, db)
+            current = run.model_dump_json()
+            if current != previous:
+                yield f"event: run\ndata: {current}\n\n"
+                previous = current
+            if run.status not in {"queued", "running"}:
+                return
+            if not list(listener.notifies(timeout=10, stop_after=1)):
+                yield ": heartbeat\n\n"
+
+
+@router.get("/runs/{run_id}/events")
+def stream_run(run_id: UUID, request: Request) -> StreamingResponse:
+    sessions = request.app.state.session_factory
+    with sessions() as db:
+        initial = get_run(run_id, db)
+    dsn = make_url(request.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+    return StreamingResponse(
+        _run_events(initial, sessions, dsn), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

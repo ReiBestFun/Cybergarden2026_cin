@@ -15,6 +15,7 @@ RunStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
 NodeStatus = Literal["pending", "running", "succeeded", "failed", "skipped"]
 Trigger = Literal["manual", "schedule", "ci"]
 CiThreshold = Literal["CRITICAL", "HIGH"]
+CiDecision = Literal["passed", "blocked", "error"]
 CommitSha = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 
 
@@ -154,7 +155,7 @@ class CiRunCreate(Input):
 
 
 class CiVerdict(BaseModel):
-    decision: Literal["passed", "blocked", "error"]
+    decision: CiDecision
     reason: str
     threshold: CiThreshold | None = None
     findings_at_threshold: int | None = None

@@ -3,6 +3,8 @@ import { useEditorStore } from './store';
 import { useNodeTypesStore } from './nodeTypesStore';
 import { SchemaForm } from './SchemaForm';
 import { ScheduleSettings } from './ScheduleSettings';
+import { CredentialPicker } from './CredentialPicker';
+import { NodeInspector } from './NodeInspector';
 
 // Nodes whose settings are edited by a dedicated panel instead of the schema form.
 const CUSTOM_SETTINGS = new Set(['schedule_trigger']);
@@ -12,6 +14,8 @@ export function SettingsPanel() {
   const selectedNode = nodes.find(n => n.id === selected);
   const definition = useNodeTypesStore(s => s.types.find(t => t.kind === selectedNode?.data.kind));
   const nodeRun = run?.nodes.find(n => n.node_id === selected);
+  const credentialKind = selectedNode?.data.kind === 'notify_telegram' ? 'telegram'
+    : selectedNode?.data.kind === 'notify_email' ? 'smtp' : null;
 
   return (
     <aside className="settings-panel">
@@ -54,14 +58,9 @@ export function SettingsPanel() {
           )}
 
           {selectedNode.data.kind === 'schedule_trigger' && <ScheduleSettings />}
+          {credentialKind && <CredentialPicker kind={credentialKind} value={selectedNode.data.config?.credential_id ?? ''} />}
 
-          {nodeRun && (
-            <div className="node-run">
-              <h4>Последний запуск: {nodeRun.status}</h4>
-              {nodeRun.error && <p className="notice error">{nodeRun.error.message}</p>}
-              {nodeRun.output_preview && <pre>{JSON.stringify(nodeRun.output_preview, null, 2)}</pre>}
-            </div>
-          )}
+          {nodeRun && <NodeInspector key={`${run?.id}:${nodeRun.node_id}`} node={nodeRun} />}
         </>
       ) : (
         <>

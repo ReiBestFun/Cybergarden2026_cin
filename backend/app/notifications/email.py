@@ -62,5 +62,4 @@ class EmailChannel:
 def _reason(reply: tuple[int, bytes] | None) -> str:
     if not reply:
         return "Сервер отклонил адрес."
-    code, text = reply
-    return f"{code} {text.decode('utf-8', 'replace')}".strip()
+    return f"SMTP {reply[0]}: сервер отклонил адрес."

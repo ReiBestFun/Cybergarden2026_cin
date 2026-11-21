@@ -49,6 +49,7 @@ def _enqueue(
 @dataclass(frozen=True)
 class ClaimedRun:
     id: UUID
+    project_id: UUID
     token: UUID
     trigger: str
     graph: dict
@@ -68,7 +69,7 @@ def claim_next(db: Session) -> ClaimedRun | None:
     run.claim_token = token
     run.started_at = now
     run.heartbeat_at = now
-    return ClaimedRun(run.id, token, run.trigger, run.graph_snapshot, run.source_snapshot)
+    return ClaimedRun(run.id, run.project_id, token, run.trigger, run.graph_snapshot, run.source_snapshot)
 
 
 def fail_run(db: Session, run: ScanRun, code: str, message: str) -> None:

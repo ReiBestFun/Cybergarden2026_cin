@@ -1,27 +1,37 @@
+import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from threading import Event
+from typing import get_args
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
 from backend.app.analyzers.models import ScanError, Snapshot, Warning
+from backend.app.api import runs as runs_api
 from backend.app.config import Settings
-from backend.app.db.models import FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.credentials import resolve_credential
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, Workflow
 from backend.app.integrations.github_actions import security_workflow
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
 from backend.app.main import create_app
+from backend.app.notifications.base import Delivery
 from backend.app.queue_worker import run_next
 from backend.app.schemas.contracts import Graph
+from backend.app.schemas.credentials import CredentialKind
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
 from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
@@ -91,7 +101,10 @@ def test_github_actions_template_and_gate_config():
 ])
 def test_ci_webhook_exact_sha_and_verdict(api, monkeypatch, tmp_path, threshold, coverage, outcome):
     client, sessions = api
-    workflow_id = create_workflow(client, create_project(client), ci_graph(threshold))
+    graph = ci_graph(threshold)
+    graph["nodes"].append(node("if", "condition", {"field": "ci.decision", "operator": "eq", "value": "blocked"}))
+    graph["edges"].append(edge("gate-if", "gate", "bundle", "if", "bundle"))
+    workflow_id = create_workflow(client, create_project(client), graph)
     settings = client.app.state.settings
     settings.ci_workflow_tokens = Settings(ci_workflow_tokens={workflow_id: "ci-test-token"}).ci_workflow_tokens
     headers = {"Authorization": "Bearer ci-test-token"}
@@ -133,9 +146,16 @@ def test_ci_webhook_exact_sha_and_verdict(api, monkeypatch, tmp_path, threshold,
     assert run_next(sessions, settings, None)
     status = client.get(status_url, headers=headers).json()
     assert status["gate"]["decision"] == outcome
+    execution_nodes = {item["node_id"]: item for item in client.get(f"/api/runs/{response.json()['id']}").json()["nodes"]}
     if coverage != "failed":
         assert status["commit_sha"] == sha
         assert status["report_url"].endswith(response.json()["id"])
+        assert execution_nodes["gate"]["active_output_ports"] == ["bundle"]
+        assert execution_nodes["if"]["active_output_ports"] == ["true" if outcome == "blocked" else "false"]
+        incoming = execution_nodes["if"]["input_preview"]["inputs"][0]
+        assert incoming["edge_id"] == "gate-if" and incoming["data"]["decision"] == outcome
+    else:
+        assert execution_nodes["if"]["status"] == "skipped"
 
 
 def test_allow_any_repository_switch():
@@ -143,6 +163,66 @@ def test_allow_any_repository_switch():
     assert is_repository_allowed("https://github.com/tbagirov/TRAINING", strict)
     assert not is_repository_allowed("https://github.com/other/project", strict)
     assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
+
+
+def test_template_is_portable_and_schedule_stays_disabled(api):
+    client, _ = api
+    project_id, target_id = create_project(client), create_project(client)
+    graph = analysis_graph("schedule_trigger")
+    graph["nodes"].append(node("email", "notify_email", {
+        "credential_id": str(UUID(int=5)), "recipients": ["user@example.org"], "subject": "Private subject", "attach_json": False,
+    }))
+    graph["edges"].append(edge("deliver", "merge", "bundle", "email", "report"))
+    workflow_id = create_workflow(client, project_id, graph)
+    schedule_url = f"/api/workflows/{workflow_id}/schedule"
+    assert client.put(schedule_url, json={"enabled": True, "time": "08:30", "timezone": "UTC"}).status_code == 200
+    published = client.post("/api/templates", json={"workflow_id": workflow_id, "name": "Daily checks", "description": "Example"})
+    assert published.status_code == 201, published.text
+    template = published.json()
+    assert template["graph"]["nodes"][-1]["config"] == {"attach_json": False}
+    assert template["schedule"]["time"] == "08:30"
+    assert any(item["id"] == template["id"] for item in client.get("/api/templates").json()["items"])
+    assert client.get(f"/api/workflows/{workflow_id}").json()["graph"] == graph
+    copy = client.post(f"/api/templates/{template['id']}/copy", json={"project_id": target_id, "name": "My copy"})
+    assert copy.status_code == 201, copy.text
+    workflow = copy.json()
+    assert workflow["id"] != workflow_id and workflow["project_id"] == target_id
+    assert workflow["name"] == "My copy" and workflow["graph"] == template["graph"]
+    schedule = client.get(f"/api/workflows/{workflow['id']}/schedule").json()
+    assert schedule["enabled"] is False and schedule["time"] == "08:30" and schedule["next_run_at"] is None
+
+
+def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch):
+    client, sessions = api
+    workflow_id = create_workflow(client, create_project(client), analysis_graph())
+    run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
+    with sessions() as db:
+        initial = runs_api.get_run(run_id, db)
+    dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+    listening = Event()
+    get_run = runs_api.get_run
+
+    def observed_read(*args):
+        run = get_run(*args)
+        listening.set()
+        return run
+
+    monkeypatch.setattr(runs_api, "get_run", observed_read)
+    events = runs_api._run_events(initial, sessions, dsn)
+    assert '"status":"queued"' in next(events)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(next, events)
+        assert listening.wait(4)
+        with sessions.begin() as db:
+            db.get(ScanRun, run_id).status = "running"
+        runtime = json.loads(pending.result(timeout=4).split("data: ", 1)[1])
+        assert runtime["status"] == "running"
+    events.close()
+    with sessions.begin() as db:
+        db.get(ScanRun, run_id).status = "succeeded"
+    terminal = client.get(f"/api/runs/{run_id}/events")
+    assert terminal.headers["content-type"].startswith("text/event-stream")
+    assert '"status":"succeeded"' in terminal.text
 
 
 def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
@@ -172,6 +252,91 @@ def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
     token = client.post(f"{editor}/ci-token", json={}).json()["token"]
     assert client.get(status_endpoint, headers=old_headers).status_code == 401
     assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_project_credentials_are_encrypted_and_scoped(api):
+    client, sessions = api
+    project_id = UUID(create_project(client))
+    other_project_id = UUID(create_project(client))
+    route = f"/api/projects/{project_id}/credentials"
+    settings = client.app.state.settings
+    settings.credentials_encryption_key = None
+    body = {"kind": "telegram", "name": "Example", "value": {"secret": "synthetic-credential"}}
+    assert client.post(route, json=body).status_code == 503
+    settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
+
+    for kind in get_args(CredentialKind):
+        value = {"secret": "synthetic-credential"}
+        if kind == "ssh_key":
+            value = {"secret": "synthetic-credential\nkey-body\n", "passphrase": "synthetic-passphrase"}
+        response = client.post(route, json={**body, "kind": kind, "value": value})
+        assert response.status_code == 201, response.text
+        assert "synthetic-credential" not in response.text and "ciphertext" not in response.json()
+        credential_id = UUID(response.json()["id"])
+        with sessions() as db:
+            row = db.get(Credential, credential_id)
+            assert "synthetic-credential" not in row.ciphertext
+            resolved = resolve_credential(db, settings, project_id, credential_id, kind)
+            assert resolved.secret.get_secret_value() == value["secret"]
+            if kind == "ssh_key":
+                assert resolved.passphrase.get_secret_value() == value["passphrase"]
+            with pytest.raises(ScanError, match="недоступны"):
+                resolve_credential(db, settings, other_project_id, credential_id, kind)
+            with pytest.raises(ScanError, match="расшифровать"):
+                resolve_credential(db, Settings(credentials_encryption_key=Fernet.generate_key().decode()), project_id, credential_id, kind)
+    assert "synthetic-credential" not in client.get(route).text
+    assert client.patch(f"/api/projects/{other_project_id}/credentials/{credential_id}", json={"active": False}).status_code == 404
+    assert client.patch(f"{route}/{credential_id}", json={"active": False}).json()["active"] is False
+    with sessions() as db, pytest.raises(ScanError, match="недоступны"):
+        resolve_credential(db, settings, project_id, credential_id, kind)
+
+
+@pytest.mark.parametrize(("kind", "node_type", "recipient"), [
+    ("telegram", "notify_telegram", "@test_channel"), ("smtp", "notify_email", "user@example.org"),
+])
+def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, tmp_path, kind, node_type, recipient):
+    client, sessions = api
+    project_id = create_project(client)
+    settings = client.app.state.settings
+    settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
+    route = f"/api/projects/{project_id}/credentials"
+    value = {"secret": "synthetic-old"}
+    if kind == "smtp":
+        value["username"] = "demo-user"
+    credential = client.post(route, json={"name": "Test credential", "kind": kind, "value": value}).json()
+    credential_id = credential["id"]
+    graph = analysis_graph()
+    graph["nodes"].append(node("notify", node_type, {"recipients": [recipient], "credential_id": credential_id}))
+    graph["edges"].append(edge("merge-notify", "merge", "bundle", "notify", "report"))
+    workflow = create_workflow(client, project_id, graph)
+    run_id = client.post(f"/api/workflows/{workflow}/runs", json={}).json()["id"]
+    assert client.patch(f"{route}/{credential_id}", json={"value": {**value, "secret": "synthetic-new"}}).status_code == 200
+    (tmp_path / "Service.kt").write_text('val serviceName = "demo"\n', encoding="utf-8")
+
+    @contextmanager
+    def prepare(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot.from_directory(tmp_path, "a" * 40), None)
+
+    class ChannelStub:
+        def send(self, recipients, message):
+            assert recipients == [recipient]
+            return [Delivery(recipient, "sent")]
+
+    def telegram(token, **kwargs):
+        assert token == "synthetic-new"
+        return ChannelStub()
+
+    def smtp(host, *, username, password, **kwargs):
+        assert (username, password) == ("demo-user", "synthetic-new")
+        return ChannelStub()
+
+    monkeypatch.setattr(execution, "prepare_repository", prepare)
+    monkeypatch.setattr(execution, "TelegramChannel", telegram)
+    monkeypatch.setattr(execution, "EmailChannel", smtp)
+    assert run_next(sessions, settings, None)
+    result = client.get(f"/api/runs/{run_id}")
+    assert result.json()["status"] == "succeeded"
+    assert "synthetic-" not in result.text and "demo-user" not in result.text
 
 
 def test_daily_schedule_skips_nonexistent_local_time():

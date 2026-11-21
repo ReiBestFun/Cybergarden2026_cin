@@ -96,20 +96,22 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
   { type: 'scan_sca', label: 'SCA', description: 'Сопоставить зависимости с учебным справочником.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'scan_sast', label: 'SAST', description: 'Проверить Kotlin и конфигурацию безопасности.', inputs: [port('snapshot', 'snapshot')], outputs: [port('result', 'scan_result')], config_schema: {} },
   { type: 'merge_findings', label: 'Объединение находок', description: 'Собрать результаты анализаторов.', inputs: [port('results', 'scan_result', true)], outputs: [port('bundle', 'findings_bundle')], config_schema: {} },
-  { type: 'ci_gate', label: 'Порог CI', description: 'Вернуть решение в CI по критичности находок и полноте анализа.', inputs: [port('bundle', 'findings_bundle')], outputs: [], config_schema: { properties: {
+  { type: 'ci_gate', label: 'Порог CI', description: 'Вернуть решение в CI и передать его вместе с находками в следующую ноду.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('bundle', 'findings_bundle')], config_schema: { properties: {
     threshold: { type: 'string', title: 'Блокировать начиная с', enum: ['CRITICAL', 'HIGH'], default: 'CRITICAL' },
   } } },
-  { type: 'condition', label: 'IF / ELSE', description: 'Выбрать ветку по сводке или покрытию.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('true', 'findings_bundle'), port('false', 'findings_bundle')], config_schema: { type: 'object', required: ['field', 'operator', 'value'], properties: {
-    field: { type: 'string', enum: ['summary.total', 'summary.high_count', 'summary.critical_count', 'coverage.status'] },
+  { type: 'condition', label: 'IF / ELSE', description: 'Выбрать ветку по сводке, покрытию или вердикту CI.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('true', 'findings_bundle'), port('false', 'findings_bundle')], config_schema: { type: 'object', required: ['field', 'operator', 'value'], properties: {
+    field: { type: 'string', enum: ['summary.total', 'summary.high_count', 'summary.critical_count', 'coverage.status', 'ci.decision'] },
     operator: { type: 'string', enum: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'matches'] },
     value: { anyOf: [{ type: 'integer' }, { type: 'string' }] },
   } } },
   { type: 'ai_report', label: 'AI-отчёт', description: 'Подготовить рекомендации по сохранённым находкам.', inputs: [port('bundle', 'findings_bundle')], outputs: [port('report', 'report')], config_schema: {} },
   { type: 'notify_telegram', label: 'Telegram', description: 'Разослать отчёт в чаты Telegram.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    credential_id: { type: 'string', title: 'Учётные данные' },
     recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'chat_id или @username канала, по одному в строке.' },
     attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
   } } },
   { type: 'notify_email', label: 'Почта', description: 'Разослать отчёт по электронной почте.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
+    credential_id: { type: 'string', title: 'Учётные данные' },
     recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'Адреса почты, по одному в строке.' },
     subject: { type: 'string', title: 'Тема письма', description: 'Если пусто, тема формируется автоматически.' },
     attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },

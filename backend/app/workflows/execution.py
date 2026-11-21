@@ -4,12 +4,14 @@ from dataclasses import asdict, dataclass, replace
 from graphlib import TopologicalSorter
 from operator import eq, ge, gt, le, lt, ne
 from typing import Literal
+from uuid import UUID
 
 import regex
 from pydantic import ValidationError
 
-from ..analyzers.models import Category, ScanError, Warning, finding_key
+from ..analyzers.models import Category, Finding, ScanError, Warning, finding_key
 from ..config import Settings
+from ..credentials import resolve_credential
 from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
 from ..notifications import Channel, EmailChannel, NotifierError, TelegramChannel, build_message
@@ -35,6 +37,8 @@ class Step:
     warning: Warning | None = None
     scan: NodeResult | None = None
     bundle: RunReport | None = None
+    ci_verdict: CiVerdict | None = None
+    input_preview: dict | None = None
 
 
 def _coverage_status(report: RunReport) -> str:
@@ -53,8 +57,12 @@ def evaluate_ci_gate(config: CiGateConfig, bundle: RunReport) -> CiVerdict:
     return CiVerdict(decision=decision, reason=reason, threshold=config.threshold, findings_at_threshold=count)
 
 
-def _condition_branch(config: ConditionConfig, bundle: RunReport) -> str:
-    if config.field == "coverage.status":
+def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVerdict | None) -> str:
+    if config.field == "ci.decision":
+        if verdict is None:
+            raise ScanError(Warning("CI_VERDICT_MISSING", "Для проверки вердикта CI проведите данные через ноду «Порог CI»."))
+        actual = verdict.decision
+    elif config.field == "coverage.status":
         actual = _coverage_status(bundle)
     else:
         actual = getattr(bundle.summary, config.field.removeprefix("summary."))
@@ -80,10 +88,25 @@ def _scan_preview(outcome: NodeResult) -> dict:
             coverage=asdict(outcome.result.coverage),
             warnings=[asdict(warning) for warning in outcome.result.warnings],
             finding_count=len(outcome.result.findings),
+            findings=_finding_preview(outcome.result.findings),
         )
     if outcome.warning is not None:
         payload["warnings"].append(asdict(outcome.warning))
     return payload
+
+
+def _finding_preview(findings: tuple[Finding, ...]) -> list[dict]:
+    return [
+        {"category": item.category, "severity": item.severity, "title": item.title, "path": item.path, "line": item.line}
+        for item in findings[:15]
+    ]
+
+
+def _bundle_preview(bundle: RunReport, verdict: CiVerdict | None = None) -> dict:
+    data = {"summary": asdict(bundle.summary), "coverage_status": _coverage_status(bundle), "findings": _finding_preview(bundle.findings)}
+    if verdict is not None:
+        data["ci"] = verdict.model_dump()
+    return data
 
 
 class GraphExecution:
@@ -128,33 +151,45 @@ class GraphExecution:
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
         if node.type == "merge_findings":
             bundle = merge_findings(self.sha, tuple(self.scans[edge.source] for edge in edges))
-            preview = {"summary": asdict(bundle.summary), "coverage_status": _coverage_status(bundle)}
+            preview = _bundle_preview(bundle)
             if bundle.status == "failed":
                 return Step("failed", preview=preview, warning=_NO_RESULTS)
             return Step(ports=("bundle",), preview=preview, bundle=bundle)
         if node.type == "condition":
-            bundle = self.steps[edges[0].source].bundle
+            upstream = self.steps[edges[0].source]
+            bundle = upstream.bundle
             assert bundle is not None
-            branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle)
-            return Step(ports=(branch,), preview={"branch": branch}, bundle=bundle)
+            branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle, upstream.ci_verdict)
+            preview = {"branch": branch, **_bundle_preview(bundle, upstream.ci_verdict)}
+            return Step(ports=(branch,), preview=preview, bundle=bundle, ci_verdict=upstream.ci_verdict)
         if node.type == "ci_gate":
             bundle = self.steps[edges[0].source].bundle
             assert bundle is not None
             gate = evaluate_ci_gate(CiGateConfig.model_validate(node.config), bundle)
-            return Step(preview=gate.model_dump())
+            return Step(ports=("bundle",), preview={**gate.model_dump(), **_bundle_preview(bundle)}, bundle=bundle, ci_verdict=gate)
         if node.type in NOTIFIER_CONFIGS:
             return self._notify(node, edges)
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
 
-    def _channel(self, kind: str) -> Channel:
+    def _channel(self, kind: str, credential_id: UUID | None) -> Channel:
         settings = self.settings
+        credential = None
+        if credential_id is not None:
+            with self.progress.sessions() as db:
+                credential = resolve_credential(
+                    db, settings, self.progress.claim.project_id, credential_id,
+                    "telegram" if kind == "notify_telegram" else "smtp",
+                )
         if kind == "notify_telegram":
-            token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
-            return TelegramChannel(token, api_base=settings.telegram_api_base, timeout=settings.notify_timeout_seconds)
+            token = credential.secret if credential is not None else settings.telegram_bot_token
+            return TelegramChannel(token.get_secret_value() if token else None, api_base=settings.telegram_api_base, timeout=settings.notify_timeout_seconds)
+        password = credential.secret if credential is not None else settings.smtp_password
+        username = credential.username.get_secret_value() if credential and credential.username else settings.smtp_username
+        if credential is not None and not username:
+            raise ScanError(Warning("SMTP_USERNAME_REQUIRED", "Укажите логин для выбранных учётных данных SMTP."))
         return EmailChannel(
             settings.smtp_host, port=settings.smtp_port, security=settings.smtp_security,
-            username=settings.smtp_username,
-            password=settings.smtp_password.get_secret_value() if settings.smtp_password else None,
+            username=username, password=password.get_secret_value() if password else None,
             sender=settings.smtp_from, timeout=settings.notify_timeout_seconds,
         )
 
@@ -170,7 +205,7 @@ class GraphExecution:
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
         try:
-            deliveries = self._channel(node.type).send(list(config.recipients), message)
+            deliveries = self._channel(node.type, config.credential_id).send(list(config.recipients), message)
         except NotifierError as error:
             raise ScanError(Warning(error.code, error.message)) from None
         failed = [item for item in deliveries if item.status == "failed"]
@@ -187,16 +222,23 @@ class GraphExecution:
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]
+        preview = {"inputs": []}
+        for edge in inputs:
+            source = self.steps[edge.source]
+            passed = edge.source_port in source.ports
+            preview["inputs"].append({
+                "edge_id": edge.id, "node_id": edge.source, "port": edge.source_port, "target_port": edge.target_port,
+                "status": "available" if passed else "failed" if source.status == "failed" else "skipped",
+                "data": source.preview if passed else None,
+            })
         if node.type != "merge_findings" and len(active) < len(inputs):
             upstream_failed = any(
                 self.steps[edge.source].status == "failed"
                 or self.steps[edge.source].warning == _UPSTREAM_FAILED
                 for edge in inputs
             )
-            return Step("skipped", warning=_UPSTREAM_FAILED if upstream_failed else _INACTIVE)
-        self.progress.start_node(node.id, {"inputs": [
-            {"node_id": edge.source, "port": edge.source_port} for edge in active
-        ]})
+            return Step("skipped", warning=_UPSTREAM_FAILED if upstream_failed else _INACTIVE, input_preview=preview)
+        self.progress.start_node(node.id, preview)
         try:
             return self._execute_node(node, inputs, resources)
         except ScanError as error:
@@ -215,7 +257,7 @@ class GraphExecution:
                         findings.append(finding)
                         self.finding_keys.add(key)
         self.progress.finish_node(
-            node.id, step.status, ports=list(step.ports), preview=step.preview, warning=step.warning,
+            node.id, step.status, ports=list(step.ports), preview=step.preview, input_preview=step.input_preview, warning=step.warning,
             findings=tuple(findings), sha=self.sha if node.type == "repository" and self.sha else None,
         )
 
@@ -260,8 +302,8 @@ class GraphExecution:
             step = self.steps[node.id]
             if node.type == "ai_report":
                 payload["llm"] = {"status": step.status, "error": error_payload(step.warning)}
-            elif node.type == "ci_gate" and step.preview is not None:
-                payload["ci_gate"] = step.preview
+            elif node.type == "ci_gate" and step.ci_verdict is not None:
+                payload["ci_gate"] = step.ci_verdict.model_dump()
             elif node.type in NOTIFIER_CONFIGS:
                 payload.setdefault("delivery", {})[node.id] = {
                     "status": step.status, "error": error_payload(step.warning), **(step.preview or {}),

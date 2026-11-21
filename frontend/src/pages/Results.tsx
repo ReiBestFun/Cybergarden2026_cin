@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Download } from 'lucide-react';
 import { getLastRunId } from '../features/editor/defaults';
+import { NodeInspector } from '../features/editor/NodeInspector';
+import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
-import { exportUrl, getRun, listFindings, type Finding, type RunDetail } from '../shared/api/workflows';
+import { watchRun } from '../shared/api/runEvents';
+import { exportUrl, isFinished, listFindings, type Finding, type RunDetail } from '../shared/api/workflows';
 
 // The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
 const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
@@ -34,29 +37,31 @@ export function Results() {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [category, setCategory] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [selected, setSelected] = useState('');
+  const types = useNodeTypesStore(state => state.types);
 
   useEffect(() => {
     if (!runId) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      try {
-        const detail = await getRun(runId);
-        if (cancelled) return;
-        setRun(detail);
-        if (detail.status === 'queued' || detail.status === 'running') { timer = setTimeout(load, 1500); return; }
-        const page = await listFindings(runId);
-        if (!cancelled) setFindings(page.items);
-      } catch (e) {
-        if (!cancelled) setError(errorMessage(e));
-      }
-    };
-    void load();
-    return () => { cancelled = true; clearTimeout(timer); };
+    const controller = new AbortController();
+    setRun(null);
+    setSelected('');
+    setError(null);
+    setFindings([]);
+    setReconnecting(false);
+    void watchRun(runId, controller.signal, setRun, setReconnecting).then(async run => {
+      if (run.status === 'failed' || controller.signal.aborted) return;
+      const page = await listFindings(runId);
+      if (!controller.signal.aborted) setFindings(page.items);
+    }).catch(error => {
+      if (!controller.signal.aborted) setError(errorMessage(error));
+    });
+    return () => controller.abort();
   }, [runId]);
 
   const shown = category ? findings.filter(f => f.category === category) : findings;
-  const finished = run && run.status !== 'queued' && run.status !== 'running';
+  const finished = run && isFinished(run.status);
+  const inspected = run?.nodes.find(node => node.node_id === selected);
   const gate = run?.nodes.find(node => node.type === 'ci_gate')?.output_preview;
   const decision = typeof gate?.decision === 'string' ? gate.decision : null;
 
@@ -80,6 +85,7 @@ export function Results() {
 
       {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
       {error && <div className="notice error">{error}</div>}
+      {reconnecting && <div className="notice info" role="status">Восстанавливаем поток событий…</div>}
       {run?.error && <div className="notice error">{run.error.message}</div>}
       {finished && decision && CI_LABEL[decision] && (
         <div className={`notice ${decision === 'passed' ? 'success' : 'error'}`}>
@@ -96,6 +102,17 @@ export function Results() {
       )}
 
       {run && !finished && <div className="panel">Запуск ещё выполняется…</div>}
+      {run && run.nodes.length > 0 && <section className="panel run-inspector">
+        <label>Данные ноды{' '}
+          <select value={selected} onChange={event => setSelected(event.target.value)}>
+            <option value="">Выбрать ноду</option>
+            {run.nodes.map(node => <option key={node.node_id} value={node.node_id}>
+              {types.find(type => type.kind === node.type)?.label ?? node.type} · {node.node_id}
+            </option>)}
+          </select>
+        </label>
+        {inspected && <NodeInspector key={`${run.id}:${inspected.node_id}`} node={inspected} />}
+      </section>}
 
       {finished && run.status !== 'failed' && (
         <div className="panel">

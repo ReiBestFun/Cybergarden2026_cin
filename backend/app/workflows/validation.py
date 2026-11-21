@@ -1,10 +1,11 @@
 import re
 from collections import Counter, defaultdict, deque
+from typing import get_args
 
 from pydantic import ValidationError
 
 from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
-from ..schemas.contracts import Graph, Issue, Node
+from ..schemas.contracts import CiDecision, Graph, Issue, Node
 
 _ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast"}
 _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
@@ -33,7 +34,10 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
             condition = ConditionConfig.model_validate(config)
         except ValidationError:
             return Issue(code="INVALID_CONFIG", message="Укажите поле, операцию и значение условия.", node_id=node.id, field="config")
-        if condition.field == "coverage.status":
+        if condition.field == "ci.decision":
+            if condition.operator not in {"eq", "ne"} or condition.value not in get_args(CiDecision):
+                return Issue(code="INVALID_CONFIG", message="Для вердикта CI выберите passed, blocked или error и операцию eq или ne.", node_id=node.id, field="config.value")
+        elif condition.field == "coverage.status":
             if not isinstance(condition.value, str) or condition.operator not in {"eq", "ne", "matches"}:
                 return Issue(code="INVALID_CONFIG", message="Для покрытия нужна строка и операция eq, ne или matches.", node_id=node.id, field="config")
             if condition.operator == "matches" and condition.value:

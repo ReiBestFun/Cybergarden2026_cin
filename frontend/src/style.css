@@ -962,3 +962,30 @@ tr.clickable:hover td { background: #faf6f1; }
 
 .settings-panel textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.5; }
 .settings-panel input[type="checkbox"] { display: inline-block; width: auto; margin: 0 8px 0 0; vertical-align: middle; }
+
+
+/* Увеличенные порты входа и выхода нод */
+.flow-node .react-flow__handle {
+  width: 16px;
+  height: 16px;
+  border: 3px solid #fff;
+  background: #a96f47;
+  border-radius: 50%;
+  cursor: crosshair;
+  z-index: 5;
+  box-shadow: 0 0 0 1px #cbbeb5;
+}
+
+/* Увеличенная невидимая область захвата */
+.flow-node .react-flow__handle::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+}
+
+/* Подсветка при наведении */
+.flow-node .react-flow__handle:hover {
+  background: #875535;
+  box-shadow: 0 0 0 4px rgba(169, 111, 71, 0.18);
+}

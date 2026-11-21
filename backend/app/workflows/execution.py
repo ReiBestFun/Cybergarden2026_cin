@@ -147,6 +147,7 @@ class GraphExecution:
             prepared = resources.enter_context(prepare_repository(
                 url, ref, allowed=self.allowed, timeout=self.settings.repository_timeout_seconds,
                 catalog_path=self.settings.sca_catalog_path,
+                pin_training_catalog=self.progress.claim.trigger == "ci",
             ))
             if self.progress.claim.trigger == "ci" and prepared.snapshot.sha != ref:
                 raise ScanError(Warning("CI_SHA_MISMATCH", "Полученный коммит не совпадает с SHA из CI."))

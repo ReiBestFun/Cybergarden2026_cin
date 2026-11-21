@@ -12,7 +12,7 @@ from ..config import Settings
 from ..db.models import Project, ScanRun, Workflow
 from ..db.session import Database
 from ..integrations.github_actions import RunnerMode, security_workflow
-from ..integrations.repository import allowed_repository_urls, is_repository_allowed
+from ..integrations.repository import ci_repository_allowlist, is_repository_allowed
 from ..nodes.catalog import CiTriggerConfig
 from ..schemas.contracts import CiRunCreate, CiRunStatus, CiVerdict, CommitSha, Graph, Input
 from ..workflows.queue import enqueue_ci_run
@@ -63,8 +63,8 @@ CiAuth = Annotated[CiAuthorization, Depends(_authorize)]
 
 
 def _check_repository(project: Project, settings: Settings) -> None:
-    if not is_repository_allowed(project.repository_url, allowed_repository_urls(settings.allowed_repositories)):
-        raise ApiError(403, "CI_REPOSITORY_NOT_ALLOWED", "Для CI репозиторий должен быть в списке учебных источников.")
+    if not is_repository_allowed(project.repository_url, ci_repository_allowlist(settings.allowed_repositories)):
+        raise ApiError(403, "CI_REPOSITORY_NOT_ALLOWED", "Для CI разрешите TBagirov/training в списке учебных источников.")
 
 
 def _ci_graph(graph_json: dict) -> Graph:
@@ -158,6 +158,8 @@ def get_ci_run(workflow_id: UUID, run_id: UUID, db: Database, auth: CiAuth, requ
         result.gate = CiVerdict(decision="error", reason=reason)
     elif run.commit_sha != run.source_snapshot["ref"]:
         result.gate = CiVerdict(decision="error", reason="CI_SHA_MISMATCH")
+    elif gate.get("decision") == "passed" and run.status != "succeeded":
+        result.gate = CiVerdict(decision="error", reason="CI_SCAN_INCOMPLETE")
     else:
         result.gate = CiVerdict.model_validate(gate)
     return result

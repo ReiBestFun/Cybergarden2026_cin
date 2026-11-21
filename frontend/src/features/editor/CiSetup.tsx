@@ -72,8 +72,8 @@ export function CiSetup() {
         <p className="muted">Новый токен заменяет предыдущий. Сохраните его сразу после выпуска.</p>
         <button className="btn secondary" disabled={!!busy || pending} onClick={() => void prepare('token')}>Выпустить новый токен</button>
         {token && <div className="ci-test-controls"><label>Токен CI<input readOnly type="password" value={token} onFocus={event => event.target.select()} /></label><button className="btn secondary" onClick={() => void copy(token, 'Токен')}>Скопировать токен</button></div>}
-        <p>Создайте файл <code>.github/workflows/security.yml</code>{githubUrl && <> <a href={`${githubUrl}/new/${encodeURIComponent(branch)}`} target="_blank" rel="noreferrer">на сайте GitHub</a></>} и вставьте готовое содержимое.</p>
-        <label>Runner{' '}
+        <p>Создайте файл <code>.github/workflows/security.yml</code> в основной ветке{githubUrl && <> <a href={`${githubUrl}/actions/new`} target="_blank" rel="noreferrer">на сайте GitHub</a></>} и вставьте готовое содержимое.</p>
+        <label>Runner для пушей{' '}
           <select value={runner} disabled={pending} onChange={event => { setRunner(event.target.value === 'hosted' ? 'hosted' : 'local'); setYaml(undefined); }}>
             <option value="local">Windows · localhost</option>
             <option value="hosted">GitHub-hosted · HTTPS</option>
@@ -81,9 +81,8 @@ export function CiSetup() {
         </label>{' '}
         <button className="btn secondary" disabled={!!busy || pending} onClick={() => void prepare('yaml')}>Подготовить содержимое</button>
         {yaml && <><textarea aria-label="Содержимое security.yml" readOnly rows={4} value={yaml} /><button className="btn secondary" onClick={() => void copy(yaml, 'Файл')}>Скопировать security.yml</button></>}
-        <p className="muted">{runner === 'local'
-          ? <>Для реального пуша нужен Windows runner с меткой <code>cyberflow</code> на компьютере с CyberFlow.</>
-          : <>После деплоя укажите HTTPS-адрес API в переменной <code>CYBERFLOW_API_URL</code> в настройках GitHub Actions.</>}</p>
+        {runner === 'local' && <p className="muted">Для пушей нужен Windows runner с меткой <code>cyberflow</code> на компьютере с CyberFlow.</p>}
+        <p>Для pull request задайте в переменной Actions <code>CYBERFLOW_API_URL</code> HTTPS-адрес, по которому GitHub-hosted runner может обратиться к API. После первой проверки PR добавьте <code>CyberFlow PR gate</code> в обязательные проверки ветки <code>{branch}</code>.</p>
         {feedback && <p role="status">{feedback}</p>}
       </details>
     </section>

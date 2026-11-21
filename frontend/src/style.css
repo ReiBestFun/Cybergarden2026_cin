@@ -351,13 +351,17 @@ button:disabled {
 /* ---------- Ноды flow ---------- */
 
 .flow-node {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+
+  width: max-content;
+  min-width: 0;
+  max-width: 280px;
+
   background: #fff;
   border: 1px solid #ded1c4;
-  min-width: 210px;
-  padding: 17px 16px;
+  padding: 12px 16px;
   border-radius: 13px;
   box-shadow: 0 5px 16px #85634315;
 }
@@ -372,7 +376,10 @@ button:disabled {
 }
 
 .flow-node strong {
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .flow-node small {

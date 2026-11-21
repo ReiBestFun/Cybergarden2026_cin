@@ -192,7 +192,7 @@ export function Results() {
       </section>}
 
       {finished && run.status !== 'failed' && (
-        <div className="panel">
+        <div className="panel table-scroll">
           <div className="panel-heading">
             <h3>Находки</h3>
             <select value={category} onChange={e => setCategory(e.target.value)} aria-label="Категория">

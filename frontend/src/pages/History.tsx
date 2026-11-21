@@ -32,7 +32,7 @@ export function History() {
       <h1>История запусков</h1>
       <p className="muted">Запуски в пространстве «{workspace.name}»</p>
       {error && <div className="notice error">{error}</div>}
-      <div className="panel">
+      <div className="panel table-scroll">
         {!runs ? <p className="muted">Загрузка…</p> : runs.length === 0 ? !error && <p className="muted">Запусков пока нет.</p> : (
           <table>
             <thead>

@@ -18,7 +18,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -28,7 +30,12 @@ button {
 
 button:disabled {
   opacity: .55;
-  cursor: wait;
+  cursor: not-allowed;
+}
+
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 3px solid #88542e;
+  outline-offset: 2px;
 }
 
 /* ============================================================
@@ -52,6 +59,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 35px;
+  overflow-y: auto;
 }
 
 .brand {
@@ -113,13 +121,16 @@ button:disabled {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .page {
-  padding: 36px;
+  width: 100%;
+  min-width: 0;
   max-width: 1500px;
-  margin: auto;
+  margin: 0 auto;
+  padding: clamp(16px, 3vw, 36px);
+  overflow-wrap: anywhere;
 }
 
 .page h1,
@@ -139,7 +150,9 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 30px;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  margin-bottom: 24px;
 }
 
 /* ============================================================
@@ -151,7 +164,10 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 15px;
+  min-height: 42px;
+  justify-content: center;
+  line-height: 1.35;
+  padding: 10px 15px;
   border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
@@ -162,9 +178,8 @@ button:disabled {
   color: white;
 }
 
-.btn.primary:hover {
-  background: #925a35;
-}
+.btn svg { flex: none; }
+.btn.secondary:hover:not(:disabled) { background: #f8f1e9; border-color: #cdb7a5; }
 
 .btn.secondary {
   background: white;
@@ -235,11 +250,14 @@ button:disabled {
   flex: 1;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .editor-toolbar {
-  height: 88px;
+  flex: none;
+  min-height: 76px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   background: #fdfbf7;
   border-bottom: 1px solid #e7ddd3;
   padding: 19px 25px;
@@ -256,14 +274,16 @@ button:disabled {
 
 .toolbar-actions {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .editor-layout {
   display: grid;
   grid-template-columns: 222px minmax(0, 1fr) 265px;
   flex: 1;
-  min-height: 0;
+  min-height: 260px;
   overflow: hidden;
 }
 
@@ -338,15 +358,19 @@ button:disabled {
 /* ---------- Канвас ---------- */
 
 .canvas {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   position: relative;
   background: #f9f7f1;
   min-width: 0;
 }
 
+.canvas > .react-flow { flex: 1; min-height: 0; }
+
 .canvas-hint {
-  position: absolute;
-  left: 20px;
-  bottom: 20px;
+  flex: none;
+  margin: 0;
   background: #ffffffeb;
   padding: 9px 13px;
   border-radius: 9px;
@@ -532,56 +556,7 @@ code {
 }
 
 @media (max-width: 760px) {
-  .app-nav {
-    width: 60px;
-    padding: 14px 6px;
-  }
-
-  .brand {
-    font-size: 0;
-  }
-
-  .nav-links a {
-    font-size: 0;
-    justify-content: center;
-  }
-
-  .nav-footer {
-    display: none;
-  }
-
-  .editor-layout {
-    grid-template-columns: 150px minmax(0, 1fr);
-  }
-
-  .settings-panel {
-    display: none;
-  }
-
-  .editor-toolbar {
-    padding: 12px;
-    height: auto;
-  }
-
-  .editor-toolbar h1 {
-    font-size: 15px;
-  }
-
-  .toolbar-actions {
-    flex-wrap: wrap;
-  }
-
-  .toolbar-actions .btn {
-    font-size: 11px;
-  }
-
-  .page {
-    padding: 18px;
-  }
-
-  .summary-grid {
-    grid-template-columns: 1fr;
-  }
+  .summary-grid { grid-template-columns: 1fr; }
 }
 
 /* ============================================================
@@ -633,7 +608,7 @@ code {
   color: white;
 }
 
-.btn.primary:hover {
+.btn.primary:hover:not(:disabled) {
   background: #915b36;
 }
 
@@ -690,25 +665,13 @@ code {
   }
 }
 
-@media (max-width: 760px) {
-  .editor-layout {
-    grid-template-columns: 150px minmax(0, 1fr);
-  }
-
-  .right-sidebar {
-    position: absolute;
-    right: 0;
-    top: 88px;
-    bottom: 0;
-    width: min(320px, 70vw);
-    z-index: 9;
-    box-shadow: -5px 0 20px #71543d15;
-  }
-
-  .settings-panel {
-    display: block;
-  }
-
+@media (max-width: 1000px) {
+  .editor-page { height: auto; flex: none; overflow: visible; }
+  .editor-toolbar { padding: 16px; }
+  .editor-layout { grid-template-columns: minmax(0, 1fr); overflow: visible; }
+  .node-library { max-height: 220px; border: 0; border-bottom: 1px solid #e7ddd3; }
+  .editor-layout > .canvas { height: clamp(350px, 55vh, 600px); }
+  .settings-panel { border-top: 1px solid #e7ddd3; }
 }
 
 /* ---------- Связка с API: статусы, уведомления, результаты ---------- */
@@ -759,6 +722,7 @@ code {
 .template-description { white-space: pre-wrap; overflow-wrap: anywhere; }
 .template-connections { margin: 12px 0; padding-left: 20px; }
 .template-panel { max-width: 680px; }
+.template-panel label { min-width: 0; overflow-wrap: anywhere; }
 .editor-page > .template-panel { flex-shrink: 0; max-height: 40vh; overflow: auto; margin-bottom: 8px; }
 .template-panel label { display: grid; gap: 4px; margin: 8px 0; }
 .template-panel input, .template-panel textarea, .template-panel select { width: 100%; }
@@ -774,22 +738,91 @@ code {
   background: #fdfbf7;
   border-bottom: 1px solid #e7ddd3;
 }
-.workspace-switcher { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-.workspace-switcher > label { font-weight: 650; }
-.workspace-switcher-controls { display: flex; gap: 6px; min-width: 0; }
-.workspace-switcher-controls select { min-width: 0; max-width: min(270px, 58vw); }
-.workspace-switcher form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.workspace-switcher {
+  width: min(100%, 38rem);
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.workspace-switcher > label, .team-settings header > span {
+  color: #71645a;
+  font-size: 13px;
+}
+.workspace-switcher > label { font-weight: 600; }
+.workspace-switcher-controls, .workspace-switcher .workspace-create {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.workspace-select, .workspace-create > label {
+  flex: 1 1 13rem;
+  min-width: 0;
+}
+.workspace-select { position: relative; }
+.workspace-select select, .team-row select {
+  min-height: 42px;
+  border: 1px solid #d7c8ba;
+  border-radius: 10px;
+  background: white;
+  color: #493e36;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+.workspace-select select {
+  width: 100%;
+  appearance: none;
+  padding-right: 38px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.workspace-select select:disabled { cursor: not-allowed; }
+.workspace-select svg {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.workspace-create {
+  border-top: 1px solid #e7ddd3;
+  margin-top: 4px;
+  padding-top: 12px;
+}
+.workspace-create > .notice { flex-basis: 100%; margin: 0; }
+.team-settings { display: grid; gap: 18px; }
+.team-settings .panel { display: grid; gap: 16px; margin: 0; }
+.team-settings h2 { font-size: 20px; margin: 0; }
+.team-invite-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  align-items: end;
+}
+.team-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  border-top: 1px solid #e7ddd3;
+  padding-top: 16px;
+}
+.team-row > span { flex: 1 1 14rem; min-width: 0; }
+.team-row .toolbar-actions { max-width: 100%; }
+.table-scroll { overflow-x: auto; }
+.table-scroll table { overflow-wrap: normal; }
+.template-panel label.checkbox { display: flex; align-items: baseline; gap: 8px; }
+.template-panel .checkbox input { flex: none; width: auto; margin: 0; }
 .editor-layout.editor-readonly { grid-template-columns: minmax(0, 1fr); }
 
 .workflow-generator {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 100;
-  max-width: calc(100vw - 48px);
+  align-self: flex-end;
+  flex: none;
+  margin: 8px 16px;
+  max-width: calc(100% - 32px);
 }
 .workflow-generator.open {
   width: 350px;
+  max-height: 40vh;
+  overflow: auto;
   background: #fffdfb;
   border: 1px solid #e7ddd3;
   border-radius: 14px;
@@ -964,9 +997,42 @@ tr.clickable:hover td { background: #faf6f1; }
 .telegram-picker a { display: block; margin-top: 9px; }
 
 @media (max-width: 760px) {
-  .app-shell { flex-direction: column; }
-  .app-nav { width: 100%; padding: 12px 15px; gap: 10px; border-right: 0; border-bottom: 1px solid #e7ddd3; }
-  .nav-links, .account-nav-footer { display: flex; flex-wrap: wrap; align-items: center; }
-  .nav-links a { padding: 7px; }
-  .page { padding: 18px; }
+  .app-shell { flex-direction: column; height: auto; min-height: 100dvh; overflow: visible; }
+  .main-content { overflow: visible; }
+  .app-nav {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px 12px;
+    align-items: center;
+    padding: 12px 16px 8px;
+    border-right: 0;
+    border-bottom: 1px solid #e7ddd3;
+    overflow: visible;
+  }
+  .brand { padding: 0; font-size: 16px; }
+  .account-nav-footer {
+    grid-column: 2;
+    grid-row: 1;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: end;
+    align-items: center;
+    padding: 0;
+  }
+  .nav-links {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 4px;
+  }
+  .nav-links a { flex: none; gap: 6px; padding: 9px; }
+  .workspace-bar { padding: 12px 16px; }
+  .panel { padding: 16px; }
+}
+@media (max-width: 480px) {
+  .account-nav-footer span { display: none; }
+  .workspace-select, .workspace-create > label { flex-basis: 100%; }
+  .workspace-switcher button { width: 100%; }
 }

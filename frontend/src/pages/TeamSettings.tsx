@@ -37,10 +37,10 @@ export function TeamSettings({ userId }: { userId: string }) {
     finally { setBusy(false); }
   }
 
-  return <main className="page"><h1>Настройки команды · {workspace.name}</h1>
+  return <main className="page team-settings"><header><h1>Настройки команды</h1><span>{workspace.name}</span></header>
     {error && <p role="alert" className="notice error">{error}</p>}
     <section className="panel"><h2>Приглашения</h2>
-      <form className="account-form" onSubmit={event => {
+      <form className="account-form team-invite-form" onSubmit={event => {
         event.preventDefault();
         void change(async () => {
           const link = await api<Invitation & { token: string }>(path + '/invitations', { method: 'POST', json: { role, days } });
@@ -51,8 +51,8 @@ export function TeamSettings({ userId }: { userId: string }) {
         <label>Срок в днях<input type="number" min={1} max={30} required value={days || ''} onChange={e => setDays(Number(e.target.value))} /></label>
         <button className="btn primary" disabled={busy}>Создать приглашение</button>
       </form>
-      {issued && <label>Скопируйте одноразовую ссылку для коллеги<input readOnly value={issued.url} onFocus={e => e.target.select()} /></label>}
-      {invitations.map(link => <div className="toolbar-actions" key={link.id}>
+      {issued && <div className="account-form"><label>Скопируйте одноразовую ссылку для коллеги<input readOnly value={issued.url} onFocus={e => e.target.select()} /></label></div>}
+      {invitations.map(link => <div className="team-row" key={link.id}>
         <span>{roleNames[link.role]} · до {new Date(link.expires_at).toLocaleString('ru-RU')}</span>
         <button className="btn secondary" disabled={busy} onClick={() => void change(async () => {
           await api(path + '/invitations/' + link.id, { method: 'DELETE' });
@@ -61,21 +61,23 @@ export function TeamSettings({ userId }: { userId: string }) {
       </div>)}
     </section>
     <section className="panel"><h2>Участники</h2>
-      {members.map(member => <div className="toolbar-actions" key={member.id}>
+      {members.map(member => <div className="team-row" key={member.id}>
         <span>@{member.github_login}</span>
-        <select aria-label={'Роль @' + member.github_login} value={member.role} disabled={busy} onChange={event => {
-          const role = event.target.value;
-          void change(async () => {
-            await api(path + '/members/' + member.id, { method: 'PATCH', json: { role } });
-            if (member.id === userId) location.replace('/');
-          });
-        }}>{options}</select>
-        <button className="btn secondary" disabled={busy} onClick={() => {
-          if (window.confirm('Удалить @' + member.github_login + ' из команды?')) void change(async () => {
-            await api(path + '/members/' + member.id, { method: 'DELETE' });
-            if (member.id === userId) location.replace('/');
-          });
-        }}>Удалить</button>
+        <div className="toolbar-actions">
+          <select aria-label={'Роль @' + member.github_login} value={member.role} disabled={busy} onChange={event => {
+            const role = event.target.value;
+            void change(async () => {
+              await api(path + '/members/' + member.id, { method: 'PATCH', json: { role } });
+              if (member.id === userId) location.replace('/');
+            });
+          }}>{options}</select>
+          <button className="btn secondary" disabled={busy} onClick={() => {
+            if (window.confirm('Удалить @' + member.github_login + ' из команды?')) void change(async () => {
+              await api(path + '/members/' + member.id, { method: 'DELETE' });
+              if (member.id === userId) location.replace('/');
+            });
+          }}>Удалить</button>
+        </div>
       </div>)}
     </section></main>;
 }

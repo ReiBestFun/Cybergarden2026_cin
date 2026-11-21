@@ -41,7 +41,7 @@ export function PublishTemplate({ onClose }: { onClose: () => void }) {
       </div> : <form onSubmit={submit}>
         <label>Название<input name="name" defaultValue={name} maxLength={120} required /></label>
         {!workspace.personal && workspace.role === 'owner' &&
-          <label><input type="checkbox" name="team" /> Доступен всей команде «{workspace.name}»</label>}
+          <label className="checkbox"><input type="checkbox" name="team" /> Доступен всей команде «{workspace.name}»</label>}
         <label>Описание<textarea name="description" maxLength={1000} rows={2} /></label>
         <p className="muted">Учётные данные и адресаты уведомлений исключаются из шаблона.</p>
         {error && <p className="notice error" role="alert">{error}</p>}

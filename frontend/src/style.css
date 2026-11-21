@@ -748,6 +748,23 @@ code {
 .template-panel input, .template-panel textarea, .template-panel select { width: 100%; }
 .editor-page > .notice { margin: 0 20px 10px; }
 
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding: 10px 20px;
+  background: #fdfbf7;
+  border-bottom: 1px solid #e7ddd3;
+}
+.workspace-switcher { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.workspace-switcher > label { font-weight: 650; }
+.workspace-switcher-controls { display: flex; gap: 6px; min-width: 0; }
+.workspace-switcher-controls select { min-width: 0; max-width: min(270px, 58vw); }
+.workspace-switcher form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.editor-layout.editor-readonly { grid-template-columns: minmax(0, 1fr); }
+
 .workflow-generator {
   position: fixed;
   right: 24px;

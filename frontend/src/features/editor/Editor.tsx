@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Save, Download, Play, X, FilePlus } from 'lucide-react';
 import { useEditorStore } from './store';
@@ -12,6 +12,7 @@ import { WorkflowGenerator } from './WorkflowGenerator';
 import { toApiGraph } from './graph';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow } from '../../shared/api/workflows';
+import { useWorkspace } from '../../app/workspaceContext';
 
 function download(blob: Blob, filename: string) {
   const link = document.createElement('a');
@@ -22,22 +23,24 @@ function download(blob: Blob, filename: string) {
 }
 
 export function Editor() {
+  const { workspace } = useWorkspace();
+  const editable = workspace.role === 'owner';
   const { nodes, edges, project, name, workflowId, busy, notice, run, canvasRevision, save, runWorkflow, loadWorkflow, newWorkflow, setNotice } = useEditorStore();
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
+  const requestedWorkflowId = params.get('workflow');
+  const exportRequest = useRef<AbortController>();
   const [downloadingCi, setDownloadingCi] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const hasCiTrigger = nodes.some(node => node.data.kind === 'ci_trigger');
 
-  // /editor?workflow=<id> opens a saved workflow from the server.
   useEffect(() => {
-    const id = params.get('workflow');
-    if (id) {
-      // Always re-read: the server copy (graph, schedule state) may have changed since the draft was saved.
-      void loadWorkflow(id);
-      setParams({}, { replace: true });
+    if (requestedWorkflowId && useEditorStore.getState().workflowId !== requestedWorkflowId) {
+      void loadWorkflow(requestedWorkflowId);
     }
-  }, [params, loadWorkflow, setParams]);
+  }, [requestedWorkflowId, loadWorkflow]);
+
+  useEffect(() => () => exportRequest.current?.abort(), []);
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });
@@ -45,14 +48,19 @@ export function Editor() {
   };
 
   const exportCi = async () => {
+    const controller = new AbortController();
+    exportRequest.current = controller;
     setDownloadingCi(true);
     try {
       const id = await save();
-      if (id) download(await getSecurityWorkflow(id), 'security.yml');
+      if (!id || controller.signal.aborted) return;
+      const file = await getSecurityWorkflow(id, 'local', controller.signal);
+      if (!controller.signal.aborted) download(file, 'security.yml');
     } catch (error) {
-      setNotice({ kind: 'error', text: errorMessage(error) });
+      if (!controller.signal.aborted) setNotice({ kind: 'error', text: errorMessage(error) });
     } finally {
-      setDownloadingCi(false);
+      if (!controller.signal.aborted) setDownloadingCi(false);
+      if (exportRequest.current === controller) exportRequest.current = undefined;
     }
   };
 
@@ -63,8 +71,11 @@ export function Editor() {
           <h1>Редактор сценария</h1>
           <span className="muted">{name} · {workflowId ? 'сохранён на сервере' : 'не сохранён'}</span>
         </div>
-        <div className="toolbar-actions">
-          <button className="btn secondary" onClick={() => newWorkflow()} disabled={!!busy} title="Новый сценарий">
+        {editable && <div className="toolbar-actions">
+          <button className="btn secondary" onClick={() => {
+            newWorkflow();
+            setParams({}, { replace: true });
+          }} disabled={!!busy} title="Новый сценарий">
             <FilePlus size={16} /> Новый
           </button>
           <button className="btn secondary" onClick={() => void save()} disabled={!!busy}>
@@ -82,7 +93,7 @@ export function Editor() {
           {!hasCiTrigger && <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
             <Play size={16} /> {busy === 'run' ? 'Выполнение…' : 'Запустить'}
           </button>}
-        </div>
+        </div>}
       </header>
 
       {notice && (
@@ -93,16 +104,16 @@ export function Editor() {
         </div>
       )}
 
-      {hasCiTrigger && <CiSetup key={project} />}
-      {publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
+      {editable && hasCiTrigger && <CiSetup key={project} />}
+      {editable && publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
 
-      <div className="editor-layout">
-        <NodePalette />
-        <Canvas />
-        <SettingsPanel />
+      <div className={`editor-layout${editable ? '' : ' editor-readonly'}`}>
+        {editable && <NodePalette />}
+        <Canvas editable={editable} />
+        {editable && <SettingsPanel />}
       </div>
 
-      <WorkflowGenerator key={canvasRevision} />
+      {editable && <WorkflowGenerator key={canvasRevision} />}
     </div>
   );
 }

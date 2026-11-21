@@ -85,4 +85,4 @@ export function scheduleFromServer(s: Schedule, fallback: ScheduleDraft): Schedu
 
 let lastRunId: string | null = null;
 export const getLastRunId = () => lastRunId;
-export const setLastRunId = (id: string) => { lastRunId = id; };
+export const setLastRunId = (id: string | null) => { lastRunId = id; };

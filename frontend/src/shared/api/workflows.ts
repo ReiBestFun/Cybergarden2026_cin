@@ -1,4 +1,4 @@
-import { api, apiFile, apiUrl } from './client';
+import { ApiError, api, apiFile, apiUrl, listAll } from './client';
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
@@ -9,7 +9,7 @@ export type ApiGraph = {
 
 export type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
-export type Project = { id: string; name: string; repository_url: string; default_ref: string; created_at: string };
+export type Project = { id: string; workspace_id: string; name: string; repository_url: string; default_ref: string; created_at: string };
 export type Workflow = { id: string; project_id: string; name: string; graph: ApiGraph; created_at: string; updated_at: string };
 
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
@@ -78,51 +78,64 @@ export const isFinished = (status: RunStatus) => status !== 'queued' && status !
 
 export const canonicalRepo = (url: string) => url.trim().replace(/\/+$/, '').replace(/\.git$/i, '').toLowerCase();
 
-export const listProjects = () => api<Page<Project>>('/api/projects?limit=200');
-export const getProject = (id: string) => api<Project>(`/api/projects/${id}`);
-export const createProject = (data: { name: string; repository_url: string; default_ref?: string }) =>
-  api<Project>('/api/projects', { method: 'POST', json: data });
+export const listProjects = (workspaceId: string, signal?: AbortSignal) =>
+  listAll<Project>('/api/projects', { workspace_id: workspaceId }, signal);
+export const getProject = (id: string, signal?: AbortSignal) => api<Project>(`/api/projects/${id}`, { signal });
+export const createProject = (data: { workspace_id: string; name: string; repository_url: string; default_ref?: string }, signal?: AbortSignal) =>
+  api<Project>('/api/projects', { method: 'POST', json: data, signal });
+export const moveProject = (id: string, workspaceId: string) =>
+  api<Project>(`/api/projects/${id}/move`, { method: 'POST', json: { workspace_id: workspaceId } });
 export const updateProject = (id: string, data: Pick<Project, 'name' | 'default_ref'>) =>
   api<Project>(`/api/projects/${id}`, { method: 'PATCH', json: data });
 
-export async function ensureProject(repositoryUrl: string, knownId?: string | null): Promise<Project> {
+export async function ensureProject(workspaceId: string, repositoryUrl: string, knownId?: string | null, signal?: AbortSignal): Promise<Project> {
   const wanted = canonicalRepo(repositoryUrl);
   if (knownId) {
     try {
-      const project = await getProject(knownId);
-      if (canonicalRepo(project.repository_url) === wanted) return project;
-    } catch { /* stale id, look it up again */ }
+      const project = await getProject(knownId, signal);
+      if (canonicalRepo(project.repository_url) === wanted) {
+        if (project.workspace_id !== workspaceId) {
+          throw new ApiError(409, { code: 'PROJECT_MOVED', message: 'Проект перенесён. Откройте сценарий в его новом пространстве.' });
+        }
+        return project;
+      }
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 404)) throw error;
+    }
   }
-  const existing = (await listProjects()).items.find(p => canonicalRepo(p.repository_url) === wanted);
+  const existing = (await listProjects(workspaceId, signal)).find(p => canonicalRepo(p.repository_url) === wanted);
   if (existing) return existing;
   const name = repositoryUrl.trim().replace(/\/+$/, '').split('/').slice(-2).join('/') || 'project';
-  return createProject({ name, repository_url: repositoryUrl.trim() });
+  return createProject({ workspace_id: workspaceId, name, repository_url: repositoryUrl.trim() }, signal);
 }
 
-export const listWorkflows = (projectId: string) => api<Page<Workflow>>(`/api/projects/${projectId}/workflows?limit=200`);
+export const listWorkflows = (projectId: string, signal?: AbortSignal) =>
+  listAll<Workflow>(`/api/projects/${projectId}/workflows`, {}, signal);
 export const generateWorkflow = (description: string, timezone: string, signal: AbortSignal) =>
   api<GeneratedWorkflow>('/api/workflows/generate', { method: 'POST', json: { description, timezone }, signal });
-export const getWorkflow = (id: string) => api<Workflow>(`/api/workflows/${id}`);
-export const createWorkflow = (projectId: string, name: string, graph: ApiGraph) =>
-  api<Workflow>(`/api/projects/${projectId}/workflows`, { method: 'POST', json: { name, graph } });
-export const updateWorkflow = (id: string, name: string, graph: ApiGraph) =>
-  api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph } });
-export const validateWorkflow = (id: string) =>
-  api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {} });
-export const getSecurityWorkflow = (id: string, mode: 'local' | 'hosted' = 'local') =>
-  apiFile(`/api/workflows/${id}/security.yml?mode=${mode}`);
+export const getWorkflow = (id: string, signal?: AbortSignal) => api<Workflow>(`/api/workflows/${id}`, { signal });
+export const createWorkflow = (projectId: string, name: string, graph: ApiGraph, signal?: AbortSignal) =>
+  api<Workflow>(`/api/projects/${projectId}/workflows`, { method: 'POST', json: { name, graph }, signal });
+export const updateWorkflow = (id: string, name: string, graph: ApiGraph, signal?: AbortSignal) =>
+  api<Workflow>(`/api/workflows/${id}`, { method: 'PATCH', json: { name, graph }, signal });
+export const validateWorkflow = (id: string, signal?: AbortSignal) =>
+  api<{ valid: boolean; issues: RunError[] }>(`/api/workflows/${id}/validate`, { method: 'POST', json: {}, signal });
+export const getSecurityWorkflow = (id: string, mode: 'local' | 'hosted' = 'local', signal?: AbortSignal) =>
+  apiFile(`/api/workflows/${id}/security.yml?mode=${mode}`, signal);
 export const issueCiToken = (id: string) => api<{ token: string }>(`/api/workflows/${id}/ci-token`, { method: 'POST', json: {} });
-export const startCiTest = (id: string, commitSha: string) =>
-  api<{ id: string }>(`/api/workflows/${id}/ci-test`, { method: 'POST', json: { commit_sha: commitSha } });
-export const getSchedule = (id: string) => api<Schedule>(`/api/workflows/${id}/schedule`);
-export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: boolean } & ScheduleSettings)) =>
-  api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body });
+export const startCiTest = (id: string, commitSha: string, signal?: AbortSignal) =>
+  api<{ id: string }>(`/api/workflows/${id}/ci-test`, { method: 'POST', json: { commit_sha: commitSha }, signal });
+export const getSchedule = (id: string, signal?: AbortSignal) => api<Schedule>(`/api/workflows/${id}/schedule`, { signal });
+export const setSchedule = (id: string, body: { enabled: false } | ({ enabled: boolean } & ScheduleSettings), signal?: AbortSignal) =>
+  api<Schedule>(`/api/workflows/${id}/schedule`, { method: 'PUT', json: body, signal });
 export const previewSchedule = (settings: ScheduleSettings, signal?: AbortSignal) =>
   api<{ next_runs: string[] }>('/api/schedules/preview', { method: 'POST', json: settings, signal });
 
-export const startRun = (workflowId: string) => api<{ id: string; status: 'queued' }>(`/api/workflows/${workflowId}/runs`, { method: 'POST', json: {} });
-export const getRun = (id: string) => api<RunDetail>(`/api/runs/${id}`);
-export const listRuns = (projectId: string) => api<Page<Run>>(`/api/projects/${projectId}/runs?limit=200`);
-export const listFindings = (runId: string) => api<Page<Finding>>(`/api/runs/${runId}/findings?limit=200`);
-export const getReport = (runId: string) => api<RunReport>(`/api/runs/${runId}/report`);
+export const startRun = (workflowId: string, signal?: AbortSignal) =>
+  api<{ id: string; status: 'queued' }>(`/api/workflows/${workflowId}/runs`, { method: 'POST', json: {}, signal });
+export const getRun = (id: string, signal?: AbortSignal) => api<RunDetail>(`/api/runs/${id}`, { signal });
+export const listRuns = (projectId: string, signal?: AbortSignal) =>
+  listAll<Run>(`/api/projects/${projectId}/runs`, {}, signal);
+export const listFindings = (runId: string, signal?: AbortSignal) => api<Page<Finding>>(`/api/runs/${runId}/findings?limit=200`, { signal });
+export const getReport = (runId: string, signal?: AbortSignal) => api<RunReport>(`/api/runs/${runId}/report`, { signal });
 export const exportUrl = (runId: string, format: 'json' | 'markdown') => apiUrl(`/api/runs/${runId}/export?format=${format}`);

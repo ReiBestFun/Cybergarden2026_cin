@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { ReactFlowProvider } from '@xyflow/react';
 import { BookMarked, FolderGit2, Github, ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon, KeyRound, LogOut, UserRound } from 'lucide-react';
@@ -11,9 +11,13 @@ import { Credentials } from '../pages/Credentials';
 import { Repositories } from '../pages/Repositories';
 import { Templates } from '../pages/Templates';
 import { AccountProfile } from '../pages/Profile';
-import { ApiError, apiUrl, errorMessage, SESSION_EXPIRED } from '../shared/api/client';
+import { ApiError, apiUrl, errorMessage, SESSION_EXPIRED, WORKSPACE_UNAVAILABLE } from '../shared/api/client';
 import { getProfile, logout, type Profile } from '../shared/api/account';
 import { useEditorStore } from '../features/editor/store';
+import { listWorkspaces, type Workspace } from '../shared/api/workspaces';
+import { WorkspaceContext } from './workspaceContext';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
+import { WorkspaceResource } from './WorkspaceResource';
 
 const LOGIN_ERRORS: Record<string, string> = {
   cancelled: 'Вход через GitHub отменён.',
@@ -21,11 +25,76 @@ const LOGIN_ERRORS: Record<string, string> = {
   github: 'GitHub не подтвердил вход. Попробуйте ещё раз.',
 };
 
+function savedWorkspace(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function rememberWorkspace(key: string, id: string) {
+  try { localStorage.setItem(key, id); } catch { /* keep the selection in memory */ }
+}
+
 function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (profile: Profile) => void }) {
   const refreshCatalog = useNodeTypesStore(s => s.refresh);
+  const navigate = useNavigate();
+  const location = useLocation();
   const [leaving, setLeaving] = useState(false);
   const [logoutError, setLogoutError] = useState('');
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [activeId, setActiveId] = useState('');
+  const activeWorkspaceId = useRef('');
+  const pendingWorkspaceOperations = useRef(0);
+  const [switchLocked, setSwitchLocked] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState('');
+  const [workspaceRefresh, setWorkspaceRefresh] = useState(0);
+  const storageKey = `cyberflow:workspace:${user.id}`;
+  const workspace = workspaces.find(item => item.id === activeId);
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
+
+  useEffect(() => {
+    const refresh = () => setWorkspaceRefresh(value => value + 1);
+    window.addEventListener(WORKSPACE_UNAVAILABLE, refresh);
+    return () => window.removeEventListener(WORKSPACE_UNAVAILABLE, refresh);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setWorkspaceError('');
+    void listWorkspaces(controller.signal).then(items => {
+      if (controller.signal.aborted) return;
+      const savedId = activeWorkspaceId.current || savedWorkspace(storageKey);
+      const selected = items.find(item => item.id === savedId) ?? items.find(item => item.personal);
+      if (!selected) throw new Error('Нет доступного рабочего пространства.');
+      useEditorStore.getState().setWorkspace(selected.id);
+      activeWorkspaceId.current = selected.id;
+      rememberWorkspace(storageKey, selected.id);
+      setWorkspaces(items);
+      setActiveId(selected.id);
+    }).catch(error => {
+      if (!controller.signal.aborted) setWorkspaceError(errorMessage(error));
+    });
+    return () => controller.abort();
+  }, [storageKey, workspaceRefresh]);
+
+  function selectWorkspace(id: string, keepLink = false) {
+    if (id === activeId || pendingWorkspaceOperations.current) return;
+    const editor = useEditorStore.getState();
+    if (editor.hasUnsavedChanges() && !window.confirm('Отбросить несохранённые изменения и сменить рабочее пространство?')) return;
+    editor.setWorkspace(id);
+    activeWorkspaceId.current = id;
+    rememberWorkspace(storageKey, id);
+    setActiveId(id);
+    if (!keepLink) navigate(location.pathname === '/editor' ? '/' : location.pathname, { replace: true });
+  }
+
+  async function withWorkspaceLock<T>(operation: () => Promise<T>) {
+    pendingWorkspaceOperations.current++;
+    setSwitchLocked(true);
+    try {
+      return await operation();
+    } finally {
+      if (--pendingWorkspaceOperations.current === 0) setSwitchLocked(false);
+    }
+  }
 
   async function signOut() {
     setLeaving(true);
@@ -65,9 +134,9 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
           <NavLink to="/editor">
             <Workflow size={18} /> Редактор
           </NavLink>
-          <NavLink to="/credentials">
+          {workspace?.role === 'owner' && <NavLink to="/credentials">
             <KeyRound size={18} /> Учётные данные
-          </NavLink>
+          </NavLink>}
           <NavLink to="/results">
             <FileSearch size={18} /> Результаты
           </NavLink>
@@ -87,17 +156,34 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
         </div>
       </nav>
       <div className="main-content">
-        <Routes>
+        {workspace && <div className="workspace-bar">
+          <WorkspaceSwitcher activeId={activeId} workspaces={workspaces} onChange={selectWorkspace} locked={switchLocked}
+            onCreated={item => {
+              setWorkspaces(items => [...items, item]);
+              selectWorkspace(item.id);
+            }} />
+          {workspace.role === 'member' && <span className="muted">Только просмотр</span>}
+        </div>}
+        {workspaceError && <div className="page"><p className="notice error" role="alert">{workspaceError}</p>
+          <button className="btn secondary" onClick={() => setWorkspaceRefresh(value => value + 1)}>Повторить</button></div>}
+        {!workspace && !workspaceError && <p className="page" role="status">Загружаем рабочие пространства…</p>}
+        {workspace && <WorkspaceContext.Provider key={workspace.id} value={{ workspace, workspaces, switchLocked, withWorkspaceLock }}><Routes>
           <Route path="/" element={<Repositories />} />
           <Route path="/scenarios" element={<Scenarios />} />
           <Route path="/templates" element={<Templates />} />
           <Route path="/profile" element={<AccountProfile profile={user} onChange={onProfileChanged} />} />
-          <Route path="/editor" element={<ReactFlowProvider><Editor /></ReactFlowProvider>} />
-          <Route path="/results" element={<Results />} />
+          <Route path="/editor" element={<WorkspaceResource param="workflow" onSwitch={id => selectWorkspace(id, true)}>
+            <ReactFlowProvider><Editor /></ReactFlowProvider>
+          </WorkspaceResource>} />
+          <Route path="/results" element={<WorkspaceResource param="run" onSwitch={id => selectWorkspace(id, true)}>
+            <Results />
+          </WorkspaceResource>} />
           <Route path="/history" element={<History />} />
-          <Route path="/credentials" element={<Credentials />} />
+          <Route path="/credentials" element={<WorkspaceResource param="project" onSwitch={id => selectWorkspace(id, true)}>
+            {workspace.role === 'owner' ? <Credentials /> : <Navigate to="/" replace />}
+          </WorkspaceResource>} />
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        </Routes></WorkspaceContext.Provider>}
       </div>
     </div>
   );

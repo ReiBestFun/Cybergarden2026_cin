@@ -67,7 +67,7 @@ export function Results() {
       setRun(detail);
       if (!isFinished(detail.status) || loadingReport) return;
       loadingReport = true;
-      void Promise.all([detail.status === 'failed' ? null : listFindings(runId), getReport(runId)]).then(([page, report]) => {
+      void Promise.all([detail.status === 'failed' ? null : listFindings(runId, controller.signal), getReport(runId, controller.signal)]).then(([page, report]) => {
         if (controller.signal.aborted) return;
         if (page) setFindings(page.items);
         setReport(report);

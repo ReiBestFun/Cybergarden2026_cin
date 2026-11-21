@@ -17,8 +17,9 @@ export function watchRun(
     };
     const abort = () => { close(); reject(signal.reason); };
     signal.addEventListener('abort', abort, { once: true });
-    source.onopen = () => onReconnect(false);
+    source.onopen = () => { if (!signal.aborted) onReconnect(false); };
     source.addEventListener('run', event => {
+      if (signal.aborted) return;
       try {
         const run: RunDetail = JSON.parse(event.data);
         onRun(run);
@@ -29,10 +30,11 @@ export function watchRun(
       }
     });
     source.onerror = () => {
+      if (signal.aborted) return;
       if (source.readyState !== EventSource.CLOSED) { onReconnect(true); return; }
       close();
       // Recover a terminal state or surface the API error if SSE could not be opened.
-      void getRun(id).then(run => {
+      void getRun(id, signal).then(run => {
         if (signal.aborted) throw signal.reason;
         if (!finished(run)) throw new Error('Не удалось открыть поток событий запуска.');
         onRun(run);

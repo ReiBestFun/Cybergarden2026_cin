@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../shared/api/client';
 import { createCredential, credentialKinds, listCredentials, updateCredential, type Credential, type CredentialKind } from '../shared/api/credentials';
 import { listProjects, type Project } from '../shared/api/workflows';
+import { useWorkspace } from '../app/workspaceContext';
 
 function CredentialForm({ projectId, editing, onSaved, onCancel }: {
   projectId: string; editing: Credential | null; onSaved: () => void; onCancel: () => void;
@@ -107,22 +108,25 @@ function ProjectCredentials({ projectId }: { projectId: string }) {
 }
 
 export function Credentials() {
+  const { workspace } = useWorkspace();
   const [params, setParams] = useSearchParams();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    let active = true;
-    void listProjects().then(page => { if (active) setProjects(page.items); })
-      .catch(failure => { if (active) setError(errorMessage(failure)); });
-    return () => { active = false; };
-  }, []);
+    const controller = new AbortController();
+    void listProjects(workspace.id, controller.signal).then(items => { if (!controller.signal.aborted) setProjects(items); })
+      .catch(failure => { if (!controller.signal.aborted) setError(errorMessage(failure)); });
+    return () => controller.abort();
+  }, [workspace.id]);
 
-  const selected = projects?.find(item => item.id === params.get('project')) ?? projects?.[0];
+  const requested = params.get('project');
+  const selected = requested ? projects?.find(item => item.id === requested) : projects?.[0];
   return (
     <div className="page">
       <h1>Учётные данные</h1>
       {error && <div className="notice error" role="alert">{error}</div>}
+      {requested && projects && !selected && !error && <p className="notice error" role="alert">Проект недоступен в этом пространстве.</p>}
       {projects?.length === 0 && <p>Сначала <Link to="/editor">сохрани сценарий</Link>, чтобы создать проект.</p>}
       {selected && <>
         <label className="credential-project">Проект<select value={selected.id} onChange={event => setParams({ project: event.target.value })}>

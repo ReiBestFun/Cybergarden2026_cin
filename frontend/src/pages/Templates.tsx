@@ -1,13 +1,16 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
 import { copyTemplate, editTemplate, listTemplates, removeTemplate, type WorkflowTemplate } from '../shared/api/templates';
 import { ensureProject, listProjects, type Page, type Project } from '../shared/api/workflows';
+import { useWorkspace } from '../app/workspaceContext';
 
 const PAGE_SIZE = 12;
 
 export function Templates() {
+  const { workspace } = useWorkspace();
+  const copyRequest = useRef<AbortController>();
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<Page<WorkflowTemplate> | null>(null);
   const [selectedId, setSelectedId] = useState('');
@@ -34,29 +37,32 @@ export function Templates() {
   }, [offset, refresh]);
 
   useEffect(() => {
-    let active = true;
-    void listProjects().then(result => {
-      if (!active) return;
-      setProjects(result.items);
-      setProjectId(result.items[0]?.id ?? '');
-    }).catch(error => { if (active) setCopyError(errorMessage(error)); });
-    return () => { active = false; };
-  }, []);
+    const controller = new AbortController();
+    if (workspace.role === 'owner') void listProjects(workspace.id, controller.signal).then(items => {
+      if (controller.signal.aborted) return;
+      setProjects(items);
+      setProjectId(items[0]?.id ?? '');
+    }).catch(error => { if (!controller.signal.aborted) setCopyError(errorMessage(error)); });
+    return () => { controller.abort(); copyRequest.current?.abort(); };
+  }, [workspace.id, workspace.role]);
 
   const submit = async (event: FormEvent<HTMLFormElement>, template: WorkflowTemplate) => {
     event.preventDefault();
     if (busy) return;
     const fields = new FormData(event.currentTarget);
+    const controller = new AbortController();
+    copyRequest.current = controller;
     setCopyError('');
     setBusy(true);
     try {
-      const target = projectId || (await ensureProject(String(fields.get('repository')))).id;
-      const workflow = await copyTemplate(template.id, target, String(fields.get('name')));
-      nav(`/editor?workflow=${workflow.id}`);
+      const target = projectId || (await ensureProject(workspace.id, String(fields.get('repository')), null, controller.signal)).id;
+      const workflow = await copyTemplate(template.id, target, String(fields.get('name')), controller.signal);
+      if (!controller.signal.aborted) nav(`/editor?workflow=${workflow.id}`);
     } catch (error) {
-      setCopyError(errorMessage(error));
+      if (!controller.signal.aborted) setCopyError(errorMessage(error));
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
+      if (copyRequest.current === controller) copyRequest.current = undefined;
     }
   };
 
@@ -134,7 +140,7 @@ export function Templates() {
               <button className="btn secondary" disabled={busy} onClick={() => { setEditing(template); setCopyError(''); }}>Изменить</button>
               <button className="btn secondary" disabled={busy} onClick={() => void remove(template)}>Удалить</button>
             </div>}
-            <form className="template-panel" onSubmit={event => void submit(event, template)}>
+            {workspace.role === 'owner' && <form className="template-panel" onSubmit={event => void submit(event, template)}>
               <label>Название копии<input name="name" defaultValue={template.name} maxLength={120} required /></label>
               <label>Проект<select value={projectId} onChange={event => setProjectId(event.target.value)}>
                 <option value="">Другой учебный репозиторий</option>
@@ -143,7 +149,7 @@ export function Templates() {
               {!projectId && <label>URL репозитория<input name="repository" type="url" required placeholder="https://github.com/owner/repository" /></label>}
               {copyError && <p className="notice error" role="alert">{copyError}</p>}
               <button className="btn primary" disabled={busy}>{busy ? 'Копирование…' : 'Скопировать и открыть'}</button>
-            </form>
+            </form>}
           </>}
         </article>;
       })}

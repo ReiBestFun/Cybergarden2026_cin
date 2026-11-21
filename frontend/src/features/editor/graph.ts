@@ -1,5 +1,6 @@
 import type { Edge } from '@xyflow/react';
-import type { ConditionRow, FlowData, FlowNode } from './types';
+import type { FlowData, FlowNode } from './types';
+import { encodeCondition } from './conditionFields';
 import type { NodeTypeDefinition, ParamField } from '../../shared/api/nodeTypes';
 import type { ApiGraph, JsonValue } from '../../shared/api/workflows';
 
@@ -16,18 +17,6 @@ function toConfigValue(field: ParamField | undefined, raw: string): JsonValue {
   if (allowsInteger(field) && /^-?\d+$/.test(raw.trim())) return Number(raw.trim());
   if ((field?.type === 'number') && raw.trim() !== '' && !Number.isNaN(Number(raw))) return Number(raw);
   return raw;
-}
-
-function encodeCondition(row: ConditionRow): Record<string, JsonValue> {
-  const result: Record<string, JsonValue> = {};
-  if (row.field) result.field = row.field;
-  if (row.operator) result.operator = row.operator;
-  if (row.value !== undefined) {
-    const numeric = row.field?.startsWith('summary.');
-    if (numeric && /^-?[0-9]+$/.test(row.value.trim())) result.value = Number(row.value);
-    else if (row.value !== '' || !numeric) result.value = row.value;
-  }
-  return result;
 }
 
 function encodeConfig(data: FlowData, properties: Record<string, ParamField>): Record<string, JsonValue> {

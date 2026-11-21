@@ -16,10 +16,7 @@ export function SchemaForm({schema, values, onChange, idPrefix = 'node-param'}: 
       const value = values[key] ?? (field.default == null ? '' : String(field.default));
       const required = schema.required?.includes(key) ?? false;
       const label = field.title ?? key;
-      const choices = values.field === 'ci.decision' && key === 'value' ? ['passed', 'blocked', 'error']
-        : values.field === 'ci.decision' && key === 'operator' ? ['eq', 'ne']
-        : values.field === 'coverage.status' && key === 'operator' ? ['eq', 'ne', 'matches']
-        : values.field?.startsWith('summary.') && key === 'operator' ? field.enum?.filter(op => op !== 'matches') : field.enum;
+      const choices = field.enum;
       return <label key={key} htmlFor={id}>
         {label}{required ? ' *' : ''}
         {field.type === 'array' ? (

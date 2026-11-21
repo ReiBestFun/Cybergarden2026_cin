@@ -38,6 +38,20 @@ export function SettingsPanel() {
           {definition && (Object.keys(definition.params_schema.properties ?? {}).length > 0 || !CUSTOM_SETTINGS.has(selectedNode.data.kind)) && (
             <SchemaForm schema={definition.params_schema} values={selectedNode.data.config ?? {}} onChange={updateConfig} />
           )}
+          {selectedNode.data.kind === 'repository' && (
+            <label>
+              URL проверяемого репозитория
+              <input
+                type="url"
+                value={project}
+                onChange={(e) => setProject(e.target.value)}
+                placeholder="https://github.com/owner/repository"
+              />
+              <small className="muted">
+                Репозиторий привязывается к проекту при сохранении сценария.
+              </small>
+            </label>
+          )}
 
           {selectedNode.data.kind === 'schedule_trigger' && <ScheduleSettings />}
 

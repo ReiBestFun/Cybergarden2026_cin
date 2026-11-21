@@ -27,7 +27,7 @@ export function CustomNode({ data, selected }: NodeProps<FlowNode>) {
     {inputs.map((port, i) => <Handle key={`in-${port.id}`} id={port.id} type="target" position={Position.Left}
       style={{ top: position(i, inputs.length) }} title={`Вход: ${port.id}${port.type ? ` (${port.type})` : ''}`} />)}
     <div className="node-icon"><NodeIcon kind={data.kind} /></div>
-    <div><strong>{data.label}</strong><small>{definition?.description ?? data.kind}</small></div>
+    <div><strong>{data.label}</strong></div>
     {data.status && <span className={`node-status ${data.status}`} title={STATUS_TITLE[data.status]}>{STATUS_ICON[data.status]}</span>}
     {outputs.map((port, i) => <Handle key={`out-${port.id}`} id={port.id} type="source" position={Position.Right}
       style={{ top: position(i, outputs.length) }} title={`Выход: ${port.id}${port.type ? ` (${port.type})` : ''}`} />)}

@@ -29,6 +29,7 @@ export function Editor() {
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
   const requestedWorkflowId = params.get('workflow');
+  const [openedLink, setOpenedLink] = useState<string | null>(null);
   const exportRequest = useRef<AbortController>();
   const [downloadingCi, setDownloadingCi] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -41,6 +42,19 @@ export function Editor() {
   }, [requestedWorkflowId, loadWorkflow]);
 
   useEffect(() => () => exportRequest.current?.abort(), []);
+
+  useEffect(() => {
+    if (!requestedWorkflowId || requestedWorkflowId === workflowId) setOpenedLink(requestedWorkflowId);
+  }, [requestedWorkflowId, workflowId]);
+
+  if (requestedWorkflowId && openedLink !== requestedWorkflowId && workflowId !== requestedWorkflowId) {
+    return <main className="page">
+      {notice?.kind === 'error' && !busy ? <>
+        <p role="alert" className="notice error">{notice.text}</p>
+        <button className="btn secondary" onClick={() => void loadWorkflow(requestedWorkflowId)}>Повторить загрузку</button>
+      </> : <p role="status">Загружаем сценарий и расписание…</p>}
+    </main>;
+  }
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });

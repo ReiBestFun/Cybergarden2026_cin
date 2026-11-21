@@ -115,6 +115,7 @@ class WorkflowTemplate(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    draft_source_workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(EncryptedText("workflow_templates.name"))
     description: Mapped[str] = mapped_column(EncryptedText("workflow_templates.description"))
     graph_json: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("workflow_templates.graph_json"))

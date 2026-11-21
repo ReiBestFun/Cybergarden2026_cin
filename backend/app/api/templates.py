@@ -64,6 +64,14 @@ def _saved_schedule(db: Database, workflow: Workflow) -> dict | None:
     return ScheduleSettings.model_validate(data).model_dump(mode="json")
 
 
+def _set_template_source(template: WorkflowTemplate, workflow_id: UUID, user_id: UUID, db: Database) -> None:
+    workflow = get_workflow(workflow_id, db, user_id)
+    project = get_project(workflow.project_id, db, user_id)
+    template.draft_source_workspace_id = project.workspace_id
+    template.graph_json = _reusable_graph(workflow.graph_json)
+    template.schedule = _saved_schedule(db, workflow)
+
+
 @router.get("", response_model=Page[TemplateRead])
 def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, workspace_id: UUID | None = None) -> dict:
     query = select(WorkflowTemplate).where(_visible_template(user.id)).order_by(
@@ -74,24 +82,27 @@ def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, works
         if workspace_id == user.id:
             query = query.where(WorkflowTemplate.owner_id == user.id)
         else:
-            query = query.where(or_(WorkflowTemplate.workspace_id == workspace_id, WorkflowTemplate.workspace_id.is_(None)))
+            query = query.where(or_(
+                WorkflowTemplate.workspace_id == workspace_id,
+                and_(WorkflowTemplate.owner_id == user.id, or_(
+                    WorkflowTemplate.draft_source_workspace_id.in_((workspace_id, user.id)),
+                    WorkflowTemplate.draft_source_workspace_id.is_(None),
+                )),
+            ))
     return page(db, query, pagination.limit, pagination.offset)
 
 
 @router.post("", status_code=201, response_model=TemplateRead)
 def create_template(data: TemplatePublish, db: Database, user: CurrentUser) -> WorkflowTemplate:
-    workflow = get_workflow(data.workflow_id, db, user.id)
-    project = get_project(workflow.project_id, db, user.id)
+    template = WorkflowTemplate(name=data.name, description=data.description, owner_id=user.id)
+    _set_template_source(template, data.workflow_id, user.id, db)
     if data.workspace_id is not None:
         require_team_owner(db, data.workspace_id, user.id)
-        if data.workspace_id != project.workspace_id:
+        if data.workspace_id != template.draft_source_workspace_id:
             raise ApiError(409, "TEAM_WORKSPACE_REQUIRED", "Выберите командное пространство исходного сценария.")
-    template = WorkflowTemplate(
-        workspace_id=None if project.workspace_id == user.id else project.workspace_id,
-        owner_id=user.id if data.workspace_id is None else None,
-        name=data.name, description=data.description, graph_json=_reusable_graph(workflow.graph_json),
-        schedule=_saved_schedule(db, workflow),
-    )
+        template.owner_id = None
+        template.workspace_id = data.workspace_id
+        template.draft_source_workspace_id = None
     db.add(template)
     db.commit()
     return template
@@ -106,11 +117,7 @@ def template_detail(template_id: UUID, db: Database, user: CurrentUser) -> Workf
 def update_template(template_id: UUID, data: TemplatePatch, db: Database, user: CurrentUser) -> WorkflowTemplate:
     template = _template(template_id, user.id, db, lock=True)
     if data.workflow_id is not None:
-        workflow = get_workflow(data.workflow_id, db, user.id)
-        project = get_project(workflow.project_id, db, user.id)
-        template.workspace_id = None if project.workspace_id == user.id else project.workspace_id
-        template.graph_json = _reusable_graph(workflow.graph_json)
-        template.schedule = _saved_schedule(db, workflow)
+        _set_template_source(template, data.workflow_id, user.id, db)
     if data.name is not None:
         template.name = data.name
     if data.description is not None:
@@ -130,10 +137,13 @@ def delete_template(template_id: UUID, db: Database, user: CurrentUser) -> Respo
 def publish_draft(template_id: UUID, data: DraftPublication, db: Database, user: CurrentUser) -> WorkflowTemplate:
     require_team_owner(db, data.workspace_id, user.id)
     draft = _template(template_id, user.id, db, lock=True)
-    if draft.workspace_id is not None and draft.workspace_id != data.workspace_id:
+    if draft.draft_source_workspace_id is None:
+        raise ApiError(409, "TEMPLATE_SOURCE_REQUIRED", "Для публикации заново сохраните шаблон из исходного сценария.")
+    if draft.draft_source_workspace_id not in (user.id, data.workspace_id):
         raise ApiError(409, "TEAM_WORKSPACE_REQUIRED", "Черновик можно опубликовать в его исходной команде.")
     draft.graph_json = _reusable_graph(draft.graph_json)
     draft.workspace_id = data.workspace_id
+    draft.draft_source_workspace_id = None
     draft.owner_id = None
     db.commit()
     return draft
@@ -144,7 +154,8 @@ def publish_draft(template_id: UUID, data: DraftPublication, db: Database, user:
 def instantiate_template(template_id: UUID, data: TemplateCopy, db: Database, user: CurrentUser) -> Workflow:
     template = _template(template_id, user.id, db)
     project = get_project(data.project_id, db, user.id, owner_required=True)
-    if template.workspace_id is not None and project.workspace_id not in (template.workspace_id, user.id):
+    source = template.workspace_id or template.draft_source_workspace_id
+    if project.workspace_id != user.id and source not in (user.id, project.workspace_id):
         raise ApiError(409, "TEMPLATE_WORKSPACE_MISMATCH", "Выберите проект этой команды или своего личного пространства.")
     workflow = Workflow(project_id=project.id, name=data.name or template.name, graph_json=template.graph_json)
     db.add(workflow)

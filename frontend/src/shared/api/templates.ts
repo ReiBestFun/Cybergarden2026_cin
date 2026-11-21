@@ -4,6 +4,7 @@ import type { ApiGraph, Page, ScheduleSettings, Workflow } from './workflows';
 export type WorkflowTemplate = {
   id: string;
   workspace_id: string | null;
+  draft_source_workspace_id: string | null;
   name: string;
   description: string;
   graph: ApiGraph;

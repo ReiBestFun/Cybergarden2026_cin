@@ -12,12 +12,15 @@ export function Templates() {
   const { workspace, workspaces, withWorkspaceLock } = useWorkspace();
   const personal = workspaces.find(item => item.personal);
   const [copyToPersonal, setCopyToPersonal] = useState(false);
-  const destination = workspace.role === 'member' || copyToPersonal ? personal : workspace;
-  const destinationId = destination?.id;
   const copyRequest = useRef<AbortController>();
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<Page<WorkflowTemplate> | null>(null);
   const [selectedId, setSelectedId] = useState('');
+  const selectedTemplate = page?.items.find(item => item.id === selectedId);
+  const legacyDraft = selectedTemplate?.can_edit && !selectedTemplate.draft_source_workspace_id;
+  const canCopyToTeam = !workspace.personal && workspace.role === 'owner' && !legacyDraft;
+  const destination = canCopyToTeam && !copyToPersonal ? workspace : personal;
+  const destinationId = destination?.id;
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
   const [catalogError, setCatalogError] = useState('');
@@ -42,6 +45,8 @@ export function Templates() {
 
   useEffect(() => {
     const controller = new AbortController();
+    setProjects([]);
+    setProjectId('');
     if (destinationId) void listProjects(destinationId, controller.signal).then(items => {
       if (controller.signal.aborted) return;
       setProjects(items);
@@ -155,16 +160,15 @@ export function Templates() {
             </ul>
             {template.schedule && <p className="muted">Параметры расписания будут скопированы. Включить расписание можно в редакторе.</p>}
             {template.can_edit && <div className="toolbar-actions">
-              {!workspace.personal && workspace.role === 'owner' &&
+              {!workspace.personal && workspace.role === 'owner' && template.draft_source_workspace_id &&
                 <button className="btn primary" disabled={busy} onClick={() => void publish(template)}>Опубликовать в «{workspace.name}»</button>}
+              {!template.draft_source_workspace_id && <p className="muted">Для публикации сохраните шаблон заново из исходного сценария.</p>}
               <button className="btn secondary" disabled={busy} onClick={() => { setEditing(template); setCopyError(''); }}>Изменить</button>
               <button className="btn secondary" disabled={busy} onClick={() => void remove(template)}>Удалить</button>
             </div>}
             {destination && <form className="template-panel" onSubmit={event => void submit(event, template)}>
-              {workspace.role === 'owner' && !workspace.personal && personal ?
+              {canCopyToTeam && personal ?
                 <label>Пространство для копии<select disabled={busy} value={destination.id} onChange={event => {
-                  setProjects([]);
-                  setProjectId('');
                   setCopyError('');
                   setCopyToPersonal(event.target.value === personal.id);
                 }}>

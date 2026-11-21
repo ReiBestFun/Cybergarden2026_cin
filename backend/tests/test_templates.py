@@ -1,6 +1,9 @@
 from secrets import randbits
+from uuid import UUID
 
 from fastapi.testclient import TestClient
+
+from backend.app.db.models import WorkflowTemplate
 
 from backend.tests.test_api import ORIGIN, analysis_graph, api, create_project, create_workflow, edge, login, node
 
@@ -80,3 +83,19 @@ def test_published_schedule_copies_into_personal_project_but_not_another_team(ap
     schedule = client.get(f"/api/workflows/{copy['id']}/schedule").json()
     assert schedule["enabled"] is False and schedule["next_run_at"] is None and schedule["time"] == "08:30"
     assert client.get(f"/api/workflows/{source}/schedule").json()["enabled"] is True
+
+
+def test_legacy_draft_requires_source_confirmation_before_publication(api):
+    client, sessions = api
+    user_id = UUID(client.get("/api/me").json()["id"])
+    team = client.post("/api/workspaces", json={"name": "Назначение"}).json()["id"]
+    with sessions.begin() as db:
+        legacy = WorkflowTemplate(owner_id=user_id, name="Старый черновик", description="", graph_json=analysis_graph())
+        db.add(legacy)
+        db.flush()
+        path = f"/api/templates/{legacy.id}"
+    assert client.get(path).status_code == 200
+    assert client.post(path + "/publish", json={"workspace_id": team}).status_code == 409
+    source = create_workflow(client, create_project(client), analysis_graph())
+    client.patch(path, json={"workflow_id": source}).raise_for_status()
+    assert client.post(path + "/publish", json={"workspace_id": team}).status_code == 200

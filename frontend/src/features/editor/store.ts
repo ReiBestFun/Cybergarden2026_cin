@@ -171,15 +171,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const types = useNodeTypesStore.getState().types;
         const labels = get().workflowId === id ? Object.fromEntries(get().nodes.map(n => [n.id, n.data.label])) : {};
         const { nodes, edges } = fromApiGraph(workflow.graph, types, labels);
-        const serverSchedule = await getSchedule(workflow.id, controller.signal).catch(() => null);
+        const serverSchedule = await getSchedule(workflow.id, controller.signal);
         if (!isCurrent()) return;
-        const configured = serverSchedule && (serverSchedule.time || serverSchedule.cron);
+        const configured = serverSchedule.time || serverSchedule.cron;
         const fallback = get().workflowId === id ? get().schedule : defaultSchedule(get().profileTimezone);
         set({
           nodes, edges, name: workflow.name, workflowId: workflow.id, project: project.repository_url, projectId: workflow.project_id, selected: null, run: null,
           canvasRevision: revision + 1, busy: null,
           serverSchedule, schedule: configured ? scheduleFromServer(serverSchedule, defaultSchedule(get().profileTimezone))
-            : { ...fallback, enabled: serverSchedule?.enabled ?? fallback.enabled },
+            : { ...fallback, enabled: serverSchedule.enabled },
         });
         set({ savedDraft: draftSnapshot(get()) });
       } catch (error) {

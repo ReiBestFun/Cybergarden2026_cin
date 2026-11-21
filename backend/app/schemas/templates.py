@@ -21,6 +21,7 @@ class DraftPublication(Input):
 class TemplateRead(ReadModel):
     id: UUID
     workspace_id: UUID | None
+    draft_source_workspace_id: UUID | None
     name: str
     description: str
     graph: Graph = Field(validation_alias="graph_json")

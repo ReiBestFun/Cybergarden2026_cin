@@ -114,6 +114,7 @@ CATALOG = {node.type: node for node in (
     definition("scan_sca", "SCA", "Сопоставить зависимости с учебным справочником.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),
     definition("scan_password_hashing", "Хеширование паролей", "Найти быстрые хеши паролей в Kotlin.", (SNAPSHOT,), (RESULT,)),
+    definition("scan_sensitive_logging", "Утечки в логи", "Найти передачу паролей, токенов и Authorization в логгер Kotlin.", (SNAPSHOT,), (RESULT,)),
     definition("merge_findings", "Объединение находок", "Собрать результаты анализаторов.",
                (Port(id="results", type="scan_result", multiple=True),), (BUNDLE,)),
     definition("ci_gate", "Порог CI", "Вернуть решение в CI и передать его вместе с находками в следующую ноду.",

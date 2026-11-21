@@ -600,6 +600,54 @@ fun storeInParts(password: String, file: File) {
     assert all("Argon2id" in f["remediation"] for f in exported)
 
 
+def test_sensitive_logging_node_reports_only_exposed_values(api, monkeypatch):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_sensitive_logging")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    source = '''fun audit(request: Request, tokenId: String) {
+    val password = "synthetic-private-canary"
+    logger.warn("password={}", password)
+    logger.debug { "session=${request.accessToken}" }
+    val header = request.getHeader("Authorization")
+    log.error("header=" + header)
+    logger.info("password={}", mask(password))
+    logger.info("token id=$tokenId")
+    logger.info("header name={}", HttpHeaders.AUTHORIZATION)
+    logger.info { "redacted=${redact(request.accessToken)}" }
+    auditService.info(password)
+    val accessToken = issueJwt()
+    logger.info("received $accessToken")
+    val masked = mask(accessToken)
+    logger.info("received $masked")
+    log.warn("header {}", request.headers[HttpHeaders.AUTHORIZATION])
+    val sink = LoggerFactory.getLogger("audit")
+    sink.error("credential {}", request.password)
+}'''
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("c" * 40, {"src/Auth.kt": source}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    base = f"/api/runs/{run_id}"
+    assert client.get(base).json()["status"] == "succeeded"
+    findings = client.get(f"{base}/findings").json()["items"]
+    assert [(f["path"], f["line"]) for f in findings] == [
+        ("src/Auth.kt", 3), ("src/Auth.kt", 4), ("src/Auth.kt", 6),
+        ("src/Auth.kt", 13), ("src/Auth.kt", 16), ("src/Auth.kt", 18),
+    ]
+    assert all(f["rule_id"] == "sast.sensitive-logging" and f["severity"] == "high" for f in findings)
+    report = client.get(f"{base}/export").json()["findings"]
+    assert [f["line"] for f in report] == [3, 4, 6, 13, 16, 18]
+    assert all(f["remediation"] for f in report)
+    for url in (base, f"{base}/findings", f"{base}/export", f"{base}/export?format=markdown"):
+        assert "synthetic-private-canary" not in client.get(url).text
+
+
 def test_queue_worker_reports_repository_failure(api, monkeypatch):
     client, sessions = api
 

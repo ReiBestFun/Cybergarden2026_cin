@@ -34,6 +34,10 @@ def allowed_repository_urls(urls: list[str]) -> frozenset[str]:
     return frozenset(canonical_repository_url(url).casefold() for url in urls)
 
 
+def ci_repository_allowlist(urls: list[str]) -> frozenset[str]:
+    return allowed_repository_urls(urls).intersection({TRAINING_REPOSITORY.casefold()})
+
+
 # None means "any public GitHub repository" (ALLOW_ANY_REPOSITORY=true).
 Allowlist = frozenset[str] | None
 

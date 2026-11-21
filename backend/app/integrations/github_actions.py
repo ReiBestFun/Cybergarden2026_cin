@@ -9,15 +9,20 @@ _WORKFLOW = Template('''name: CyberFlow Security
 on:
   push:
     branches: [$branch]
+  pull_request:
+    branches: [$branch]
 permissions: {}
 jobs:
   cyberflow:
+    name: $${{ github.event_name == 'pull_request' && 'CyberFlow PR gate' || 'cyberflow' }}
     if: $${{ !github.event.deleted }}
     runs-on: $runner
+    defaults:
+      run:
+        shell: $shell
     timeout-minutes: 12
     steps:
       - name: Check commit with CyberFlow
-        shell: $shell
         env:
           CYBERFLOW_API_URL: $${{ vars.CYBERFLOW_API_URL }}
           CYBERFLOW_TOKEN: $${{ secrets.CYBERFLOW_TOKEN }}
@@ -29,13 +34,14 @@ jobs:
         run: |
           $$ErrorActionPreference = 'Stop'
           $$baseUrl = $$env:CYBERFLOW_API_URL
-          if (-not $$baseUrl) { $$baseUrl = '$default_api_url' }
+          $$localPush = $allow_loopback -and $$env:GITHUB_EVENT_NAME -eq 'push'
+          if (-not $$baseUrl -and $$localPush) { $$baseUrl = 'http://127.0.0.1:8000' }
           if (-not $$baseUrl -or -not $$env:CYBERFLOW_TOKEN) {
             throw 'Configure CYBERFLOW_API_URL and the CYBERFLOW_TOKEN secret.'
           }
           $$uri = [Uri]$$baseUrl
           if (-not $$uri.IsAbsoluteUri -or $$uri.UserInfo -or $$uri.Query -or $$uri.Fragment -or
-              ($$uri.Scheme -ne 'https' -and -not ($$uri.Scheme -eq 'http' -and $$uri.IsLoopback -and $allow_loopback))) {
+              ($$uri.Scheme -ne 'https' -and -not ($$uri.Scheme -eq 'http' -and $$uri.IsLoopback -and $$localPush))) {
             throw 'Use an HTTPS CyberFlow API URL, or a loopback HTTP URL in local mode.'
           }
           $$endpoint = "$$($$baseUrl.TrimEnd('/'))/api/hooks/$$env:CYBERFLOW_WORKFLOW_ID"
@@ -54,17 +60,25 @@ jobs:
           } while ([DateTime]::UtcNow -lt $$deadline)
           if (-not $$result.gate) { throw "CyberFlow timed out. Run $$($$run.id)." }
           if ($$result.report_url) { Write-Output "Report: $$($$result.report_url)" }
+          if ($$result.gate.decision -ne 'error' -and $$result.commit_sha -ne $$env:SOURCE_SHA) {
+            throw "CyberFlow error: SHA mismatch. Expected $$env:SOURCE_SHA, received $$($$result.commit_sha)."
+          }
+          if ($$result.gate.decision -eq 'passed' -and $$result.status -ne 'succeeded') {
+            throw "CyberFlow error: incomplete scan for $$env:SOURCE_SHA."
+          }
           Write-Output "Commit $$env:SOURCE_SHA. CyberFlow: $$($$result.gate.decision), $$($$result.gate.reason)."
-          if ($$result.gate.decision -ne 'passed' -or $$result.commit_sha -ne $$env:SOURCE_SHA) { exit 1 }
+          if ($$result.gate.decision -ne 'passed') { exit 1 }
 ''')
 
 
 def security_workflow(workflow_id: UUID, branch: str, mode: RunnerMode) -> str:
     local = mode == "local"
+    local_runner = "${{ github.event_name == 'push' && fromJSON('%s') || 'ubuntu-latest' }}" % json.dumps(
+        ["self-hosted", "Windows", "cyberflow"],
+    )
     return _WORKFLOW.substitute(
         branch=json.dumps(branch), workflow_id=str(workflow_id),
-        runner="[self-hosted, Windows, cyberflow]" if local else "ubuntu-latest",
-        shell="powershell" if local else "pwsh",
-        default_api_url="http://127.0.0.1:8000" if local else "",
+        runner=(local_runner if local else "ubuntu-latest"),
+        shell=("${{ github.event_name == 'push' && 'powershell' || 'pwsh' }}" if local else "pwsh"),
         allow_loopback="$true" if local else "$false",
     )

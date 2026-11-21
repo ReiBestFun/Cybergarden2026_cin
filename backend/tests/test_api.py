@@ -87,9 +87,15 @@ def test_github_actions_template_and_gate_config():
     for mode, runner in [("local", ["self-hosted", "Windows", "cyberflow"]), ("hosted", "ubuntu-latest")]:
         workflow = yaml.load(security_workflow(workflow_id, "release/demo", mode), Loader=yaml.BaseLoader)
         assert workflow["on"]["push"]["branches"] == ["release/demo"]
+        assert workflow["on"]["pull_request"]["branches"] == ["release/demo"]
         assert workflow["permissions"] == {}
         job = workflow["jobs"]["cyberflow"]
-        assert job["runs-on"] == runner
+        assert "CyberFlow PR gate" in job["name"]
+        assert job["steps"][0]["env"]["SOURCE_SHA"] == "${{ github.sha }}"
+        if mode == "hosted":
+            assert job["runs-on"] == runner
+        else:
+            assert "ubuntu-latest" in job["runs-on"] and "self-hosted" in job["runs-on"]
         assert job["steps"][0]["env"]["CYBERFLOW_TOKEN"] == "${{ secrets.CYBERFLOW_TOKEN }}"
     assert validate_graph(Graph.model_validate(ci_graph()), expected_trigger="ci_trigger") == []
     assert validate_graph(Graph.model_validate(ci_graph("LOW")))[0].code == "INVALID_CONFIG"
@@ -164,6 +170,19 @@ def test_allow_any_repository_switch():
     assert is_repository_allowed("https://github.com/tbagirov/TRAINING", strict)
     assert not is_repository_allowed("https://github.com/other/project", strict)
     assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
+
+
+def test_ci_stays_on_training_repository_when_project_allowlist_is_expanded(api):
+    client, _ = api
+    other = "https://github.com/other/project"
+    client.app.state.settings.allowed_repositories.append(other)
+    client.app.state.allowed_repositories = allowed_repository_urls(client.app.state.settings.allowed_repositories)
+    project = client.post("/api/projects", json={"name": "Other", "repository_url": other})
+    assert project.status_code == 201, project.text
+    workflow_id = create_workflow(client, project.json()["id"], ci_graph())
+    response = client.post(f"/api/workflows/{workflow_id}/ci-test", json={"commit_sha": "a" * 40})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CI_REPOSITORY_NOT_ALLOWED"
 
 
 def test_template_is_portable_and_schedule_stays_disabled(api):

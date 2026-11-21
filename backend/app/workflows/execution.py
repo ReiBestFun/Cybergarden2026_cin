@@ -13,7 +13,7 @@ from ..ai_reports import ReportError, explain_report
 from ..analyzers.models import Finding, ScanError, Warning, finding_key
 from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
-from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
+from ..integrations.repository import Allowlist, RepositorySnapshot, ci_repository_allowlist, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup
 from ..notifications import build_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
@@ -123,7 +123,7 @@ class GraphExecution:
     def __init__(self, progress: RunProgress, settings: Settings, allowed: Allowlist):
         self.progress = progress
         self.settings = settings
-        self.allowed = allowed_repository_urls(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
+        self.allowed = ci_repository_allowlist(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
         self.source = progress.claim.source
         self.prepared: RepositorySnapshot | None = None
         self.steps: dict[str, Step] = {}

@@ -14,7 +14,7 @@ from ..analyzers.models import Finding, ScanError, Warning, finding_key
 from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, ci_repository_allowlist, prepare_repository
-from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup
+from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup, TelegramConfig
 from ..notifications import build_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
 from ..reports import NodeResult, RunReport, merge_findings
@@ -198,15 +198,16 @@ class GraphExecution:
         if bundle is None:
             raise ScanError(Warning("NO_REPORT", "На вход уведомления не пришёл отчёт."))
         config = NOTIFIER_CONFIGS[node.type].model_validate(node.config)
+        summary_only = isinstance(config, TelegramConfig) and config.summary_only
         message = build_message(
             bundle, run_id=str(self.progress.claim.id), repository=str(self.source.get("repository_url", "")),
             app_base_url=self.settings.app_base_url, attach_json=config.attach_json,
-            max_attachment_bytes=self.settings.notify_max_attachment_bytes,
+            max_attachment_bytes=self.settings.notify_max_attachment_bytes, summary_only=summary_only,
         )
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
         upstream = self.steps[edges[0].source]
-        if edges[0].source_port == "report":
+        if edges[0].source_port == "report" and not summary_only:
             explanation = (upstream.preview or {}).get("text") or "AI-рекомендации недоступны."
             message = replace(message, text=message.text + "\n\n" + explanation)
         channel = node.type.removeprefix("notify_")

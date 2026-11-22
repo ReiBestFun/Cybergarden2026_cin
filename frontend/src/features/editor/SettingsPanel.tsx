@@ -28,6 +28,7 @@ export function SettingsPanel() {
   if (credentialKind && schema) {
     const properties = { ...schema.properties };
     if (isTelegram || usesWorkspace) delete properties.recipients;
+    if (isTelegram && selectedNode?.data.config?.summary_only === 'true') delete properties.attach_json;
     if (workspace.personal && !usesWorkspace) delete properties.use_workspace_settings;
     schema = { ...schema, properties };
   }

@@ -355,7 +355,8 @@ def test_workspace_delivery_uses_latest_credentials_and_rechecks_queued_recipien
         assert sent == [("new", "new-password", "team@example.org")] and delivery["status"] == "accepted"
 
 
-def test_team_telegram_requires_confirmation_and_uses_workspace_token(api, telegram_api, monkeypatch):
+@pytest.mark.parametrize("reject_delivery", [False, True])
+def test_team_telegram_summary_and_provider_status(api, telegram_api, monkeypatch, reject_delivery):
     client, sessions = api
     settings = client.app.state.settings
     settings.telegram_bot_token = SecretStr(TOKEN)
@@ -363,7 +364,7 @@ def test_team_telegram_requires_confirmation_and_uses_workspace_token(api, teleg
     settings.notify_telegram_recipients = []
     team = client.post("/api/workspaces", json={"name": "Командный Telegram"}).json()["id"]
     path = f"/api/workspaces/{team}/delivery/telegram"
-    chat_id = "-1001"
+    chat_id = "-1001002" if reject_delivery else "-1001001"
     config = {"version": 0, "recipients": [chat_id], "credentials": {"secret": TOKEN}}
     rejected = client.patch(path, json=config)
     assert rejected.status_code == 422 and rejected.json()["error"]["code"] == "TELEGRAM_DESTINATION_UNVERIFIED"
@@ -378,19 +379,32 @@ def test_team_telegram_requires_confirmation_and_uses_workspace_token(api, teleg
     project = client.post("/api/projects", json={
         "name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team,
     }).json()["id"]
-    graph = _graph(("notify_telegram", {"use_workspace_settings": True, "attach_json": False}))
+    graph = _graph(("notify_telegram", {"use_workspace_settings": True, "summary_only": True}))
     workflow = create_workflow(client, project, graph.model_dump())
     run_id = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
     with sessions.begin() as db:
         db.get(ScanRun, UUID(run_id)).created_at = datetime(1980, 1, 1, tzinfo=UTC)
+    if reject_delivery:
+        client.patch(path, json={"version": 1, "recipients": [chat_id], "credentials": {
+            "secret": "987:fixture-invalid-token",
+        }}).raise_for_status()
     _FakeTelegram.calls.clear()
     settings.telegram_bot_token = None
     _prepare_sources(monkeypatch)
     assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
     assert process_next(sessions, settings)
     [delivery] = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"]
-    assert delivery["status"] == "accepted"
-    assert [json.loads(body)["chat_id"] for _, _, body in _FakeTelegram.calls] == [chat_id]
+    if reject_delivery:
+        assert (delivery["status"], delivery["error_code"]) == ("failed", "TELEGRAM_UNAUTHORIZED")
+    else:
+        assert delivery["status"] == "accepted"
+    [(_, method, body)] = _FakeTelegram.calls
+    assert method == "sendMessage"
+    sent = json.loads(body)
+    assert sent["chat_id"] == chat_id
+    assert f"{settings.app_base_url}/results?run={run_id}" in sent["text"]
+    assert "Находок: 1" in sent["text"]
+    assert all(value not in sent["text"] for value in (TOKEN, "987:fixture-invalid-token", "fixture-auth-83", "App.kt"))
 
 
 @pytest.mark.parametrize("failure", [None, "repository", "delivery"])

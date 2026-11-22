@@ -118,6 +118,7 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
     use_workspace_settings: { type: 'boolean', title: 'Получатели и реквизиты команды', default: false },
     credential_id: { type: 'string', title: 'Учётные данные' },
     recipients: { type: 'array', items: { type: 'string' }, title: 'Получатели', description: 'chat_id или @username канала, по одному в строке.' },
+    summary_only: { type: 'boolean', default: false, title: 'Только краткая сводка и ссылка на отчёт' },
     attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
   } } },
   { type: 'notify_email', label: 'Почта', description: 'Разослать отчёт по электронной почте.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {

@@ -64,6 +64,7 @@ class NotificationConfig(Input):
 
 
 class TelegramConfig(NotificationConfig):
+    summary_only: bool = Field(default=False, title="Только краткая сводка и ссылка на отчёт")
     recipients: list[ChatId] = Field(
         default_factory=list, validate_default=True, max_length=50, title="Получатели",
         description="chat_id или @username канала, по одному в строке. Бот должен быть добавлен в чат.",

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { FilePicker } from '../shared/components/FilePicker';
 import { errorMessage } from '../shared/api/client';
 import { createCredential, credentialKinds, listCredentials, updateCredential, type Credential, type CredentialKind } from '../shared/api/credentials';
 import { listProjects, type Project } from '../shared/api/workflows';
@@ -49,7 +50,7 @@ function CredentialForm({ projectId, editing, onSaved, onCancel }: {
       {!credentialKinds[kind].ready && <p className="muted">Секрет можно сохранить. Подключение к нодам появится вместе с интеграцией.</p>}
       {kind === 'smtp' && <label>Логин SMTP<input name="username" maxLength={320} autoComplete="off" placeholder="По умолчанию используется логин сервера" /></label>}
       {kind === 'ssh_key' ? <>
-        <label>Файл приватного ключа<input name="privateKey" type="file" required /></label>
+        <label>Файл приватного ключа<FilePicker name="privateKey" buttonText="Выбрать ключ" disabled={busy} required /></label>
         <label>Пароль ключа<input name="passphrase" type="password" maxLength={1024} autoComplete="new-password" /></label>
       </> : <label key={kind}>Значение<input name="secret" type="password" required maxLength={16384} autoComplete="new-password" /></label>}
       <div className="toolbar-actions">

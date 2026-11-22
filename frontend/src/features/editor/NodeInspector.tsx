@@ -2,9 +2,9 @@ import { useState } from 'react';
 import type { NodeRun } from '../../shared/api/workflows';
 
 const tabs = [
-  { key: 'input_preview', label: 'Input' },
-  { key: 'output_preview', label: 'Output' },
-  { key: 'error', label: 'Error' },
+  { key: 'input_preview', label: 'Вход' },
+  { key: 'output_preview', label: 'Выход' },
+  { key: 'error', label: 'Ошибка' },
 ] as const;
 
 const messages = {
@@ -19,8 +19,8 @@ export function NodeInspector({ node }: { node: NodeRun }) {
   const noInputs = active === 'input_preview' && Array.isArray(node.input_preview?.inputs) && node.input_preview.inputs.length === 0;
   return (
     <section className="node-run" aria-label="Данные выполнения ноды">
-      <div className="inspector-tabs" aria-label="Раздел данных">
-        {tabs.map(({ key, label }) => <button type="button" key={key} aria-pressed={active === key}
+      <div className="segments inspector-tabs" role="group" aria-label="Раздел данных">
+        {tabs.map(({ key, label }) => <button className="segment" type="button" key={key} aria-pressed={active === key}
           onClick={() => setActive(key)}>{label}{key === 'error' && node.error ? ' •' : ''}</button>)}
       </div>
       {active === 'error' && node.error ? (

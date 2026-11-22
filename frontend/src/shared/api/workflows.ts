@@ -138,6 +138,10 @@ export const startRun = (workflowId: string, signal?: AbortSignal) =>
 export const getRun = (id: string, signal?: AbortSignal) => api<RunDetail>(`/api/runs/${id}`, { signal });
 export const listRuns = (projectId: string, signal?: AbortSignal) =>
   listAll<Run>(`/api/projects/${projectId}/runs`, {}, signal);
-export const listFindings = (runId: string, signal?: AbortSignal) => api<Page<Finding>>(`/api/runs/${runId}/findings?limit=200`, { signal });
+export function listFindings(runId: string, category: string, offset: number, signal?: AbortSignal) {
+  const query = new URLSearchParams({ offset: String(offset), limit: '50' });
+  if (category) query.set('category', category);
+  return api<Page<Finding>>(`/api/runs/${runId}/findings?${query}`, { signal });
+}
 export const getReport = (runId: string, signal?: AbortSignal) => api<RunReport>(`/api/runs/${runId}/report`, { signal });
 export const exportUrl = (runId: string, format: 'json' | 'markdown') => apiUrl(`/api/runs/${runId}/export?format=${format}`);

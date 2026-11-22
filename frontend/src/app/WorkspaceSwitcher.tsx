@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { ChevronDown, Layers3, Plus, X } from 'lucide-react';
+import { Layers3, Plus, X } from 'lucide-react';
 import { errorMessage } from '../shared/api/client';
 import { createWorkspace, type Workspace } from '../shared/api/workspaces';
 
@@ -34,7 +34,6 @@ export function WorkspaceSwitcher({ activeId, workspaces, onChange, onCreated, l
         <select id="active-workspace" value={activeId} onChange={event => onChange(event.target.value)} disabled={busy || locked}>
           {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
         </select>
-        <ChevronDown size={16} aria-hidden="true" />
       </div>
       <button type="button" className="btn secondary"
         aria-expanded={creating} onClick={() => { setCreating(value => !value); setError(''); }} disabled={busy || locked}>

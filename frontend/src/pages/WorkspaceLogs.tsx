@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Activity, ArrowRight, Download, ListChecks, Settings2 } from 'lucide-react';
 import { useWorkspace } from '../app/workspaceContext';
 import { api, apiFile, errorMessage } from '../shared/api/client';
 
@@ -26,6 +27,10 @@ const results: Record<string, string> = {
   partial: 'Частично', skipped: 'Пропущено', accepted: 'Принято', unknown: 'Неизвестно',
   unchanged: 'Без изменений', cancelled: 'Отменено', sending: 'Отправляется',
 };
+const journals = [
+  { value: 'audit', label: 'Аудит действий', icon: ListChecks },
+  { value: 'diagnostic', label: 'Диагностика запусков', icon: Activity },
+] as const;
 const memberRights = { member_view: 'Просматривать', member_export: 'Экспортировать', member_manage: 'Менять политику' } as const;
 
 export function WorkspaceLogs() {
@@ -33,10 +38,11 @@ export function WorkspaceLogs() {
   const base = '/api/workspaces/' + workspace.id + '/logs';
   const [settings, setSettings] = useState<Settings>();
   const [draft, setDraft] = useState<Policy>();
-  const [kind, setKind] = useState('audit');
+  const [kind, setKind] = useState<(typeof journals)[number]['value']>('audit');
   const [offset, setOffset] = useState(0);
   const [version, setVersion] = useState(0);
   const [entries, setEntries] = useState<Entries>();
+  const [entriesError, setEntriesError] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -61,11 +67,12 @@ export function WorkspaceLogs() {
 
   useEffect(() => {
     setEntries(undefined);
+    setEntriesError('');
     if (!settings?.permissions.view) return;
     const controller = new AbortController();
     api<Entries>(base + '?' + new URLSearchParams({ kind, limit: String(pageSize), offset: String(offset) }), { signal: controller.signal })
       .then(value => { if (!controller.signal.aborted) setEntries(value); })
-      .catch(e => { if (!controller.signal.aborted) setError(errorMessage(e)); });
+      .catch(e => { if (!controller.signal.aborted) setEntriesError(errorMessage(e)); });
     return () => controller.abort();
   }, [base, settings, kind, offset, version]);
 
@@ -83,7 +90,45 @@ export function WorkspaceLogs() {
   return <main className="page team-settings workspace-logs"><header><h1>Журналы</h1><span>{workspace.name}</span></header>
     {error && <p className="notice error" role="alert">{error}</p>}
     {settings && draft ? <>
-      {settings.permissions.manage && <section className="panel"><h2>Хранение и доступ</h2>
+      {settings.permissions.view || settings.permissions.export ? <section className="panel"><h2>Записи журнала</h2>
+        <div className="log-toolbar">
+          <div className="segments log-kinds" role="radiogroup" aria-label="Вид журнала">
+            {journals.map(({ value, label, icon: Icon }) => <label className="segment" key={value}>
+              <input type="radio" name="journal" value={value} checked={kind === value} onChange={() => {
+                setEntries(undefined); setEntriesError(''); setKind(value); setOffset(0);
+              }} />
+              <Icon size={16} aria-hidden="true" />{label}
+            </label>)}
+          </div>
+          {settings.permissions.export && <button className="btn secondary" disabled={busy} onClick={() => void change(async () => {
+            const blob = await apiFile(base + '/export?kind=' + kind);
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url; link.download = kind + '-' + workspace.id + '.json'; link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          })}><Download size={16} aria-hidden="true" />Скачать JSON</button>}
+        </div>
+        {entriesError && <p role="alert" className="notice error">{entriesError}</p>}
+        {settings.permissions.view && (entries ? <>
+          {entries.items.length === 0 ? <p className="log-empty">Записей пока нет.</p> : <ul className="log-records">{entries.items.map(row =>
+            <li key={row.id}>
+              <div className="log-entry"><strong>{actions[row.action] ?? row.action}</strong>
+                <div className="log-meta"><time dateTime={row.at}>{new Date(row.at).toLocaleString('ru-RU')}</time>
+                  {row.actor_id && <span title={row.actor_id}>Участник {actors[row.actor_id] ? '@' + actors[row.actor_id] : row.actor_id}</span>}
+                  {row.run_id && <Link to={'/results?run=' + row.run_id}>Открыть запуск <ArrowRight size={13} aria-hidden="true" /></Link>}
+                </div>
+              </div>
+              <span className="log-result" data-result={row.result}>{results[row.result] ?? row.result}</span>
+            </li>)}</ul>}
+          {entries.total > pageSize && <div className="toolbar-actions">
+            <button className="btn secondary" disabled={offset === 0} onClick={() => setOffset(n => n - pageSize)}>Назад</button>
+            <span>{offset + 1}–{Math.min(offset + pageSize, entries.total)} из {entries.total}</span>
+            <button className="btn secondary" disabled={offset + pageSize >= entries.total} onClick={() => setOffset(n => n + pageSize)}>Далее</button>
+          </div>}
+        </> : !entriesError && <p role="status">Загружаем записи…</p>)}
+      </section> : <p>Чтобы просматривать журнал, запросите доступ у владельца пространства.</p>}
+      {settings.permissions.manage && <details className="panel log-policy" open={(!settings.permissions.view && !settings.permissions.export) || undefined}>
+        <summary><Settings2 size={17} aria-hidden="true" />Хранение и доступ</summary>
         <form className="account-form" onSubmit={event => {
           event.preventDefault();
           void change(async () => {
@@ -91,13 +136,15 @@ export function WorkspaceLogs() {
             setSettings(reply); setDraft(reply.policy); setSaved(true);
           });
         }}>
-          <label>Хранилище<select value={draft.destination} onChange={e => update({ destination: e.target.value })}>
-            {settings.destinations.map(id => <option key={id} value={id}>{id === 'postgresql' ? 'PostgreSQL' : id}</option>)}
-          </select></label>
-          <label>Срок аудита, дней<input type="number" required min={1} max={3650} value={draft.audit_days || ''}
-            onChange={e => update({ audit_days: Number(e.target.value) })} /></label>
-          <label>Срок диагностики, дней<input type="number" required min={1} max={3650} value={draft.diagnostic_days || ''}
-            onChange={e => update({ diagnostic_days: Number(e.target.value) })} /></label>
+          <div className="account-fields">
+            <label>Хранилище<select value={draft.destination} onChange={e => update({ destination: e.target.value })}>
+              {settings.destinations.map(id => <option key={id} value={id}>{id === 'postgresql' ? 'PostgreSQL' : id}</option>)}
+            </select></label>
+            <label>Срок аудита, дней<input type="number" required min={1} max={3650} value={draft.audit_days || ''}
+              onChange={e => update({ audit_days: Number(e.target.value) })} /></label>
+            <label>Срок диагностики, дней<input type="number" required min={1} max={3650} value={draft.diagnostic_days || ''}
+              onChange={e => update({ diagnostic_days: Number(e.target.value) })} /></label>
+          </div>
           {!workspace.personal && settings.permissions.grant && <fieldset className="log-rights"><legend>Права участников</legend>
             {(Object.keys(memberRights) as (keyof typeof memberRights)[]).map(key =>
               <label key={key}><input type="checkbox" checked={draft[key]} onChange={e => update({ [key]: e.target.checked })} />{memberRights[key]}</label>)}
@@ -105,33 +152,7 @@ export function WorkspaceLogs() {
           <div className="toolbar-actions"><button className="btn primary" disabled={busy}>Сохранить политику</button>
             {saved && <span role="status">Сохранено</span>}</div>
         </form>
-      </section>}
-      {settings.permissions.view || settings.permissions.export ? <section className="panel"><h2>Записи</h2>
-        <div className="toolbar-actions"><label>Журнал <select value={kind} onChange={e => { setKind(e.target.value); setOffset(0); }}>
-          <option value="audit">Аудит действий</option><option value="diagnostic">Диагностика запусков</option>
-        </select></label>
-          {settings.permissions.export && <button className="btn secondary" disabled={busy} onClick={() => void change(async () => {
-            const blob = await apiFile(base + '/export?kind=' + kind);
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url; link.download = kind + '-' + workspace.id + '.json'; link.click();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-          })}>Скачать JSON</button>}
-        </div>
-        {settings.permissions.view && (entries ? <>
-          {entries.items.length === 0 ? <p>Записей пока нет.</p> : <ul className="log-records">{entries.items.map(row =>
-            <li key={row.id}><div><strong>{actions[row.action] ?? row.action}</strong> · {results[row.result] ?? row.result}</div>
-              <time dateTime={row.at}>{new Date(row.at).toLocaleString('ru-RU')}</time>
-              {row.actor_id && <small title={row.actor_id}>Участник {actors[row.actor_id] ? '@' + actors[row.actor_id] : row.actor_id}</small>}
-              {row.run_id && <Link to={'/results?run=' + row.run_id}>Открыть запуск</Link>}
-            </li>)}</ul>}
-          {entries.total > pageSize && <div className="toolbar-actions">
-            <button className="btn secondary" disabled={offset === 0} onClick={() => setOffset(n => n - pageSize)}>Назад</button>
-            <span>{offset + 1}–{Math.min(offset + pageSize, entries.total)} из {entries.total}</span>
-            <button className="btn secondary" disabled={offset + pageSize >= entries.total} onClick={() => setOffset(n => n + pageSize)}>Далее</button>
-          </div>}
-        </> : !error && <p role="status">Загружаем записи…</p>)}
-      </section> : <p>Чтобы просматривать журнал, запросите доступ у владельца пространства.</p>}
+      </details>}
     </> : !error && <p role="status">Загружаем настройки…</p>}
   </main>;
 }

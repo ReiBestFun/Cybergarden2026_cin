@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { ReactFlowProvider } from '@xyflow/react';
 import { BookMarked, FolderGit2, Github, ShieldCheck, LayoutDashboard, Workflow, FileSearch, History as HistoryIcon, KeyRound, LogOut, Menu, X, UserRound, UsersRound, ScanLine, ArrowRight } from 'lucide-react';
-import { Editor } from '../features/editor/Editor';
 import { Scenarios } from '../pages/Scenarios';
 import { Results } from '../pages/Results';
 import { History } from '../pages/History';
@@ -21,6 +20,8 @@ import { listWorkspaces, type Workspace } from '../shared/api/workspaces';
 import { WorkspaceContext } from './workspaceContext';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { WorkspaceResource } from './WorkspaceResource';
+
+const Editor = lazy(() => import('../features/editor/Editor').then(module => ({ default: module.Editor })));
 
 const LOGIN_ERRORS: Record<string, string> = {
   cancelled: 'Вход через GitHub отменён.',
@@ -186,7 +187,9 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
           <Route path="/team" element={!workspace.personal && workspace.role === 'owner'
             ? <TeamSettings userId={user.id} /> : <Navigate to="/" replace />} />
           <Route path="/editor" element={<WorkspaceResource param="workflow" onSwitch={id => selectWorkspace(id, true)}>
-            <ReactFlowProvider><Editor /></ReactFlowProvider>
+            <Suspense fallback={<p className="page" role="status">Загружаем редактор…</p>}>
+              <ReactFlowProvider><Editor /></ReactFlowProvider>
+            </Suspense>
           </WorkspaceResource>} />
           <Route path="/results" element={<WorkspaceResource param="run" onSwitch={id => selectWorkspace(id, true)}>
             <Results />

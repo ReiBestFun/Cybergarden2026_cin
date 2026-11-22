@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Save, Download, Play, X, FilePlus } from 'lucide-react';
 import { useEditorStore } from './store';
@@ -11,8 +11,6 @@ import { PublishTemplate } from './PublishTemplate';
 import { WorkflowGenerator } from './WorkflowGenerator';
 import { ImportMcpDraft } from './ImportMcpDraft';
 import { toApiGraph } from './graph';
-import { errorMessage } from '../../shared/api/client';
-import { getSecurityWorkflow } from '../../shared/api/workflows';
 import { useWorkspace } from '../../app/workspaceContext';
 
 function download(blob: Blob, filename: string) {
@@ -31,8 +29,6 @@ export function Editor() {
   const [params, setParams] = useSearchParams();
   const requestedWorkflowId = params.get('workflow');
   const [openedLink, setOpenedLink] = useState<string | null>(null);
-  const exportRequest = useRef<AbortController>();
-  const [downloadingCi, setDownloadingCi] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const hasCiTrigger = nodes.some(node => node.data.kind === 'ci_trigger');
 
@@ -41,8 +37,6 @@ export function Editor() {
       void loadWorkflow(requestedWorkflowId);
     }
   }, [requestedWorkflowId, loadWorkflow]);
-
-  useEffect(() => () => exportRequest.current?.abort(), []);
 
   useEffect(() => {
     if (!requestedWorkflowId || requestedWorkflowId === workflowId) setOpenedLink(requestedWorkflowId);
@@ -60,23 +54,6 @@ export function Editor() {
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });
     download(blob, 'cyberflow-workflow.json');
-  };
-
-  const exportCi = async () => {
-    const controller = new AbortController();
-    exportRequest.current = controller;
-    setDownloadingCi(true);
-    try {
-      const id = await save();
-      if (!id || controller.signal.aborted) return;
-      const file = await getSecurityWorkflow(id, 'local', controller.signal);
-      if (!controller.signal.aborted) download(file, 'security.yml');
-    } catch (error) {
-      if (!controller.signal.aborted) setNotice({ kind: 'error', text: errorMessage(error) });
-    } finally {
-      if (!controller.signal.aborted) setDownloadingCi(false);
-      if (exportRequest.current === controller) exportRequest.current = undefined;
-    }
   };
 
   return (
@@ -101,11 +78,6 @@ export function Editor() {
           </button>
           <ImportMcpDraft onImported={() => setParams({}, { replace: true })} />
           <button className="btn secondary" disabled={!!busy} aria-expanded={publishing} onClick={() => setPublishing(value => !value)}>В шаблоны</button>
-          {hasCiTrigger && (
-            <button className="btn secondary" disabled={!!busy || downloadingCi} onClick={() => void exportCi()}>
-              <Download size={16} /> security.yml
-            </button>
-          )}
           {!hasCiTrigger && <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
             <Play size={16} /> {busy === 'run' ? 'Выполнение…' : 'Запустить'}
           </button>}
@@ -120,7 +92,7 @@ export function Editor() {
         </div>
       )}
 
-      {editable && hasCiTrigger && <CiSetup key={project} />}
+      {editable && hasCiTrigger && <CiSetup key={project} onDownload={download} />}
       {editable && publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
 
       <div className={`editor-layout${editable ? '' : ' editor-readonly'}`}>

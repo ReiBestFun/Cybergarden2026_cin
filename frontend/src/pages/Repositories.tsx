@@ -141,7 +141,7 @@ export function Repositories() {
         <section className="panel account-row" key={project.id}>
           <div className="repo-identity"><span className="resource-icon"><FolderGit2 size={23} /></span>
             <div><h2>{project.name}</h2><div className="repo-meta">
-              <span>{project.repository_url.replace(/^https:\/\/github\.com\//, '')}</span>
+              <a href={project.repository_url} target="_blank" rel="noreferrer">{project.repository_url.replace(/^https:\/\/github\.com\//, '')}<ArrowUpRight size={13} aria-hidden="true" /></a>
               <span className="branch-chip"><GitBranch size={13} />{project.default_ref}</span>
             </div></div>
           </div>

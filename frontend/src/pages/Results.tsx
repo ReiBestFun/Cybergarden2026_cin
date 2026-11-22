@@ -6,19 +6,9 @@ import { NodeInspector } from '../features/editor/NodeInspector';
 import { useNodeTypesStore } from '../features/editor/nodeTypesStore';
 import { errorMessage } from '../shared/api/client';
 import { watchRun } from '../shared/api/runEvents';
-import { exportUrl, getReport, isFinished, listFindings, type Finding, type FindingVerification, type RunDetail, type RunReport } from '../shared/api/workflows';
+import { exportUrl, getReport, isFinished, type RunDetail, type RunReport } from '../shared/api/workflows';
+import { CATEGORY_LABEL, RunFindings } from './RunFindings';
 
-// The API returns lowercase values; the report format uses SECRET/SCA/SAST and uppercase severity.
-const SEVERITY_STYLE: Record<string, { background: string; color: string }> = {
-  critical: { background: '#fde2e2', color: '#7f1d1d' },
-  high: { background: '#fee2e2', color: '#991b1b' },
-  medium: { background: '#fef3c7', color: '#92400e' },
-  low: { background: '#e0f2fe', color: '#075985' },
-};
-const CATEGORY_LABEL: Record<string, string> = { secrets: 'SECRET', sca: 'SCA', sast: 'SAST' };
-const VERIFICATION_LABEL: Record<FindingVerification['status'], string> = {
-  confirmed: 'Подтверждено', needs_review: 'Нужна проверка', false_positive: 'Ложное срабатывание',
-};
 const STATUS_LABEL: Record<string, string> = { queued: 'в очереди', running: 'выполняется', succeeded: 'успешно', partial: 'частичное покрытие', failed: 'ошибка' };
 const CI_LABEL: Record<string, string> = {
   passed: 'Проверка CI пройдена', blocked: 'CI заблокирован по критичности', error: 'Проверка CI завершилась ошибкой',
@@ -30,22 +20,15 @@ const DELIVERY_LABEL: Record<string, string> = {
 };
 const DELIVERY_CHANNEL_LABEL: Record<string, string> = { email: 'Почта', telegram: 'Telegram', slack: 'Slack' };
 
-function findingName(f: Finding) {
-  if (f.category === 'sca') {
-    const m = f.metadata;
-    const dep = [m.group, m.artifact].filter(Boolean).join(':');
-    return [f.title, dep && `${dep}${m.version ? ` ${m.version}` : ''}`, m.advisory_id].filter(Boolean).join(' · ');
-  }
-  return f.title;
-}
-
 export function Results() {
   const [params] = useSearchParams();
   const runId = params.get('run') ?? getLastRunId();
+  return <RunResults key={runId} runId={runId} />;
+}
+
+function RunResults({ runId }: { runId: string | null }) {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [report, setReport] = useState<RunReport | null>(null);
-  const [findings, setFindings] = useState<Finding[]>([]);
-  const [category, setCategory] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [selected, setSelected] = useState('');
@@ -55,12 +38,6 @@ export function Results() {
     if (!runId) return;
     const controller = new AbortController();
     let loadingReport = false;
-    setRun(null);
-    setReport(null);
-    setSelected('');
-    setError(null);
-    setFindings([]);
-    setReconnecting(false);
     const handleError = (error: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(error));
     };
@@ -68,16 +45,14 @@ export function Results() {
       setRun(detail);
       if (!isFinished(detail.status) || loadingReport) return;
       loadingReport = true;
-      void Promise.all([detail.status === 'failed' ? null : listFindings(runId, controller.signal), getReport(runId, controller.signal)]).then(([page, report]) => {
+      void getReport(runId, controller.signal).then(report => {
         if (controller.signal.aborted) return;
-        if (page) setFindings(page.items);
         setReport(report);
       }).catch(handleError);
     }, setReconnecting, true).catch(handleError);
     return () => controller.abort();
   }, [runId]);
 
-  const shown = category ? findings.filter(f => f.category === category) : findings;
   const finished = run && isFinished(run.status);
   const inspected = run?.nodes.find(node => node.node_id === selected);
   const gate = run?.nodes.find(node => node.type === 'ci_gate')?.output_preview;
@@ -91,8 +66,8 @@ export function Results() {
         <div>
           <h1>Результаты проверок</h1>
           <p className="muted">
-            {run ? <>Запуск от {new Date(run.created_at).toLocaleString('ru-RU')} · {STATUS_LABEL[run.status]}{run.commit_sha && <> · коммит <code>{run.commit_sha.slice(0, 7)}</code></>}</>
-              : 'Данные последнего запуска из API'}
+            {run ? <>Запуск от {new Date(run.created_at).toLocaleString('ru-RU')} · {STATUS_LABEL[run.status]}{run.source_snapshot.archive_sha256 && <> · ZIP <code title={run.source_snapshot.archive_sha256}>{run.source_snapshot.archive_sha256.slice(0, 12)}</code></>}{run.commit_sha && <> · коммит <code>{run.commit_sha.slice(0, 7)}</code></>}</>
+              : runId ? (error ? 'Не удалось загрузить запуск.' : 'Загружаем данные запуска…') : 'Выберите запуск в истории рабочего пространства.'}
           </p>
         </div>
         {run && finished && run.status !== 'failed' && (
@@ -103,7 +78,7 @@ export function Results() {
         )}
       </div>
 
-      {!runId && <div className="panel">Запусков пока нет. <Link to="/editor">Запустите сценарий в редакторе.</Link></div>}
+      {!runId && <Link className="btn secondary" to="/history">Открыть историю запусков</Link>}
       {error && <div className="notice error">{error}</div>}
       {reconnecting && <div className="notice info" role="status">Восстанавливаем поток событий…</div>}
       {finished && decision && CI_LABEL[decision] && (
@@ -192,43 +167,7 @@ export function Results() {
         {inspected && <NodeInspector key={`${run.id}:${inspected.node_id}`} node={inspected} />}
       </section>}
 
-      {finished && run.status !== 'failed' && (
-        <div className="panel table-scroll">
-          <div className="panel-heading">
-            <h3>Находки</h3>
-            <select value={category} onChange={e => setCategory(e.target.value)} aria-label="Категория">
-              <option value="">Все категории</option>
-              <option value="secrets">SECRET</option>
-              <option value="sca">SCA</option>
-              <option value="sast">SAST</option>
-            </select>
-          </div>
-          {shown.length ? (
-            <table>
-              <thead>
-                <tr><th>Категория</th><th>Находка</th><th>Критичность</th><th>Путь</th><th>Строка</th><th>Дополнительная проверка</th></tr>
-              </thead>
-              <tbody>
-                {shown.map((f) => (
-                  <tr key={f.id} title={f.remediation}>
-                    <td>{CATEGORY_LABEL[f.category] ?? f.category}</td>
-                    <td>{findingName(f)}<br /><small className="muted">{f.metadata.class ?? f.rule_id}</small></td>
-                    <td><span className="tag" style={SEVERITY_STYLE[f.severity]}>{f.severity.toUpperCase()}</span></td>
-                    <td><code>{f.path}</code></td>
-                    <td>{f.line ?? '—'}{f.end_line && f.end_line !== f.line ? `–${f.end_line}` : ''}</td>
-                    <td>
-                      {f.verification ? <>
-                        {VERIFICATION_LABEL[f.verification.status]}<br />
-                        <small className="muted">{f.verification.message}</small>
-                      </> : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : <p className="muted">Находок нет.</p>}
-        </div>
-      )}
+      {finished && run.status !== 'failed' && <RunFindings key={run.id} runId={run.id} />}
     </div>
   );
 }

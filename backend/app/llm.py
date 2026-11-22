@@ -13,9 +13,7 @@ class ModelError(Exception):
     pass
 
 
-def complete_json[T: BaseModel](
-    settings: Settings, schema: type[T], *, system: str, user: str, constrain_ollama_schema: bool = True,
-) -> T:
+def _provider_headers(settings: Settings) -> dict[str, str]:
     try:
         url = urlsplit(settings.llm_base_url)
         if not url.hostname or url.username or url.password or url.query or url.fragment:
@@ -29,6 +27,24 @@ def complete_json[T: BaseModel](
     headers = {}
     if settings.llm_api_key and settings.llm_api_key.get_secret_value():
         headers["Authorization"] = "Bearer " + settings.llm_api_key.get_secret_value()
+    return headers
+
+
+def installed_ollama_models(settings: Settings) -> list[str]:
+    try:
+        headers = _provider_headers(settings)
+        with httpx.Client(timeout=3, trust_env=False) as client:
+            response = client.get(settings.llm_base_url.rstrip("/") + "/api/tags", headers=headers)
+            response.raise_for_status()
+            return sorted({model["name"] for model in response.json()["models"] if isinstance(model["name"], str)})
+    except (ModelError, httpx.HTTPError, httpx.InvalidURL, TypeError, KeyError, ValueError):
+        return []
+
+
+def complete_json[T: BaseModel](
+    settings: Settings, schema: type[T], *, system: str, user: str, constrain_ollama_schema: bool = True,
+) -> T:
+    headers = _provider_headers(settings)
     native = settings.llm_provider == "ollama"
     endpoint = "/api/chat" if native else "/chat/completions"
     response_schema = schema.model_json_schema()

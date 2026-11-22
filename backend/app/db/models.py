@@ -100,11 +100,13 @@ class WorkspaceMcpToken(Base):
 
 class WorkspaceLLMProfile(Base):
     __tablename__ = "workspace_llm_profiles"
+    __table_args__ = (CheckConstraint("(provider = 'ollama') = (api_key IS NULL)", name="ck_workspace_llm_key"),)
 
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     base_url: Mapped[str] = mapped_column(String(255))
     model: Mapped[str] = mapped_column(String(128))
-    api_key: Mapped[str] = mapped_column(EncryptedText("workspace_llm_profiles.api_key"))
+    provider: Mapped[str] = mapped_column(String(16), server_default="openai")
+    api_key: Mapped[str | None] = mapped_column(EncryptedText("workspace_llm_profiles.api_key"))
 
 
 class WorkspaceDeliverySetting(Base):

@@ -4,6 +4,7 @@ from secrets import randbits
 from uuid import UUID
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import llm
@@ -14,7 +15,12 @@ from backend.tests.test_api import ORIGIN, analysis_graph, api, create_workflow,
 from backend.tests.test_notifications import _prepare_sources
 
 
-def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch):
+@pytest.mark.parametrize("provider_id,endpoint,model", [
+    ("openai", "https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+    ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-flash-latest"),
+    ("groq", "https://api.groq.com/openai/v1/chat/completions", "openai/gpt-oss-20b"),
+])
+def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch, provider_id, endpoint, model):
     client, _ = api
     team = client.post("/api/workspaces", json={"name": "Модели команды"}).json()["id"]
     path = f"/api/workspaces/{team}/llm"
@@ -27,10 +33,12 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch)
 
     def provider(request):
         calls.append(request.url.host)
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "mistral:test"}]})
         payload = json.loads(request.content)
         if request.url.path == "/api/chat":
             return httpx.Response(200, json={"message": {"content": draft}})
-        assert str(request.url) == "https://api.openai.com/v1/chat/completions"
+        assert str(request.url) == endpoint
         assert request.headers["Authorization"] == "Bearer fixture-llm-secret"
         assert payload["response_format"]["type"] == "json_object"
         if not available:
@@ -42,17 +50,24 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch)
     draft = '{"plan":{"name":"Проверка","trigger":"manual","scanners":["secrets"]}}'
     transport_client = httpx.Client
     monkeypatch.setattr(llm.httpx, "Client", lambda **kw: transport_client(transport=httpx.MockTransport(provider), **kw))
-    profile = {"provider": "openai", "model": "gpt-4o-mini", "api_key": "fixture-llm-secret"}
+    catalog = client.get(path + "/models").json()
+    assert model in catalog[provider_id] and "mistral:test" in catalog["ollama"]
+    profile = {"provider": provider_id, "model": model, "api_key": "fixture-llm-secret"}
     assert client.put(path, json=profile).status_code == 502
     assert client.get(path).json()["provider"] == "ollama"
     available = True
     enabled = client.put(path, json=profile)
-    assert enabled.status_code == 200 and enabled.json()["provider"] == "openai"
+    assert enabled.status_code == 200 and enabled.json()["provider"] == provider_id
+    assert client.get(path).json() == {"provider": provider_id, "model": model}
+    other_provider = "gemini" if provider_id != "gemini" else "groq"
+    assert client.put(path, json={"provider": other_provider, "model": catalog[other_provider][0]}).status_code == 422
+    replacement = catalog[provider_id][1]
+    assert client.put(path, json={"provider": provider_id, "model": replacement}).json()["model"] == replacement
     assert "fixture-llm-secret" not in enabled.text + client.get(path).text
     task = {"description": description, "timezone": "UTC"}
     generate = "/api/workflows/generate"
     assert client.post(generate, params={"workspace_id": team}, json=task).json()["graph"]["nodes"]
-    assert calls[-1] == "api.openai.com"
+    assert calls[-1] == httpx.URL(endpoint).host
     second = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
     assert client.post(generate, params={"workspace_id": second}, json=task).status_code == 200
     assert calls[-1] == "127.0.0.1"
@@ -72,6 +87,34 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch)
     assert calls[-1] == "127.0.0.1"
 
 
+def test_selected_ollama_model_is_used_for_generation(api, monkeypatch):
+    client, _ = api
+    team = client.post("/api/workspaces", json={"name": "Локальные модели"}).json()["id"]
+    path = f"/api/workspaces/{team}/llm"
+    model = "library/mistral:test"
+    used = []
+
+    def provider(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": model}]})
+        assert request.url.path == "/api/chat"
+        used.append(json.loads(request.content)["model"])
+        content = '{"ok":true}' if len(used) == 1 else '{"plan":{"name":"Проверка","trigger":"manual","scanners":["secrets"]}}'
+        return httpx.Response(200, json={"message": {"content": content}})
+
+    transport_client = httpx.Client
+    monkeypatch.setattr(llm.httpx, "Client", lambda **kw: transport_client(transport=httpx.MockTransport(provider), **kw))
+    profile = {"provider": "ollama", "model": model}
+    assert model in client.get(path + "/models").json()["ollama"]
+    assert client.put(path, json=profile).json() == profile
+    assert client.put(path, json={"provider": "ollama", "model": "missing"}).status_code == 422
+    assert client.get(path).json() == profile
+    generated = client.post("/api/workflows/generate", params={"workspace_id": team},
+                            json={"description": "Проверить секреты проекта", "timezone": "UTC"})
+    assert generated.json()["graph"]["nodes"]
+    assert used == [model, model]
+
+
 def test_ai_report_uses_project_profile_and_keeps_findings_after_model_error(api, monkeypatch):
     client, sessions = api
     settings = client.app.state.settings
@@ -82,7 +125,7 @@ def test_ai_report_uses_project_profile_and_keeps_findings_after_model_error(api
     calls = []
 
     def provider(request):
-        assert request.url.host == "api.openai.com"
+        assert request.url.host == "generativelanguage.googleapis.com"
         user_message = json.loads(request.content)["messages"][-1]["content"]
         calls.append(user_message)
         content = '{"ok":true}' if len(calls) == 1 else '{"items":[]}'
@@ -91,7 +134,7 @@ def test_ai_report_uses_project_profile_and_keeps_findings_after_model_error(api
     transport_client = httpx.Client
     monkeypatch.setattr(llm.httpx, "Client", lambda **kw: transport_client(transport=httpx.MockTransport(provider), **kw))
     client.put(f"/api/workspaces/{team}/llm", json={
-        "provider": "openai", "model": "gpt-4o-mini", "api_key": "fixture-key",
+        "provider": "gemini", "model": "gemini-flash-latest", "api_key": "fixture-key",
     }).raise_for_status()
     graph = analysis_graph()
     graph["nodes"].append(node("ai", "ai_report"))

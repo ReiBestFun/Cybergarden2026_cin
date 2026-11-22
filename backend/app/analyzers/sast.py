@@ -52,8 +52,10 @@ _RULES: dict[str, tuple[Severity, str, str, str]] = {
 _MAPPING_METHODS = {f"{method.title()}Mapping": method for method in ("GET", "POST", "PUT", "DELETE", "PATCH")}
 _AUTH_ANNOTATIONS = {"PreAuthorize", "Secured", "RolesAllowed", "PostAuthorize"}
 _WEB_INPUTS = {"RequestParam", "PathVariable", "RequestHeader", "RequestBody", "CookieValue", "ModelAttribute"}
-_OWNERS = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\b", re.IGNORECASE)
-_OWNER_BIND = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\s*=\s*(\?)", re.IGNORECASE)
+_OWNER_COLUMN = r"\b(?:owner|customer|user|account|tenant|organizer)_?id\b"
+_OWNERS = re.compile(_OWNER_COLUMN, re.IGNORECASE)
+_OWNER_BIND = re.compile(_OWNER_COLUMN + r"\s*=\s*(\?|:\w+)", re.IGNORECASE)
+_ID_BIND = re.compile(r"\b(?:\w+_)?id\s*=\s*(\?|:\w+)", re.IGNORECASE)
 _SENSITIVE = re.compile(
     r"\b(?:(?:customer|user|account|tenant|owner)_?(?:id|address|number)|"
     r"password|email|email_address|phone|phone_number|ssn)\b", re.IGNORECASE
@@ -432,6 +434,34 @@ def _uses_names(source: kt.KotlinFile, node: Node, names: frozenset[str], depth:
     return False
 
 
+def _permissive_trust_manager(function: Function, managers: Node) -> Node | None:
+    source = function.source
+    array = source.resolve(managers)
+    builder = kt.call(array)
+    if builder and builder.name == "arrayOf" and len(builder.args) == 1:
+        manager = source.resolve(builder.args[0])
+    else:
+        # The Kotlin grammar can parse arrayOf<T>(value) as two binary comparisons.
+        match = re.fullmatch(r"arrayOf\s*<\s*(?:javax\.net\.ssl\.)?(?:X509)?TrustManager\s*>\s*\(\s*(\w+)\s*\)", kt.text(array))
+        binding = source.binding(match[1], array) if match else None
+        manager = source.resolve(binding) if binding is not None else None
+    if manager is None or manager.type != "object_literal":
+        return None
+    parents, body = kt.child(manager, "delegation_specifiers"), kt.child(manager, "class_body")
+    if not parents or not body or not any(_unqualified(_type(base)) == "X509TrustManager" for base in kt.children(parents)):
+        return None
+    for method in kt.children(body):
+        name, implementation = method.child_by_field_name("name"), kt.child(method, "function_body")
+        modifiers = kt.child(method, "modifiers")
+        if (name is not None and kt.text(name) == "checkServerTrusted" and implementation is not None
+                and modifiers is not None and "override" in kt.text(modifiers).split()
+                and len(_parameter_list(method)) == 2):
+            block = kt.child(implementation, "block")
+            if block is not None and not kt.children(block):
+                return method
+    return None
+
+
 def _tls_findings(function: Function) -> Iterator[Finding]:
     for assignment in kt.walk(function.body, "assignment", stop=_FUNCTION_SCOPE):
         left, right = (assignment.child_by_field_name(side) for side in ("left", "right"))
@@ -458,6 +488,12 @@ def _tls_findings(function: Function) -> Iterator[Finding]:
         if receiver_is_https or typed_connection:
             yield _finding("tls-verification", function, assignment)
     for node, call in function.calls():
+        if call.name == "init" and call.receiver is not None and len(call.args) == 3:
+            factory = kt.call(function.source.resolve(call.receiver))
+            if (factory and factory.name == "getInstance" and factory.receiver is not None
+                    and kt.text(factory.receiver) in {"SSLContext", "javax.net.ssl.SSLContext"}):
+                if (unchecked := _permissive_trust_manager(function, call.args[1])) is not None:
+                    yield _finding("tls-verification", function, unchecked)
         if call.name in {"trustManager", "setHostnameVerifier", "hostnameVerifier"} and call.args:
             arg = kt.text(function.source.resolve(call.args[0]))
             if re.fullmatch(r"(?:[\w.]*\.)?(?:InsecureTrustManagerFactory|NoopHostnameVerifier)\.INSTANCE", arg):
@@ -608,6 +644,45 @@ def _checked(function: Function) -> bool:
     )
 
 
+def _private_cors_route(matcher: AccessRule, methods: set[str], routes: list[Route], rules: list[AccessRule]) -> bool:
+    for route in routes:
+        if not matcher.matches(route) or (methods and "*" not in methods and route.method not in methods):
+            continue
+        if route.function.principal:
+            return True
+        access = next((rule for rule in rules if rule.matches(route)), None)
+        if access and access.action in {"authenticated", "hasRole", "hasAnyRole", "hasAuthority"} and _sensitive(route.function):
+            return True
+    return False
+
+
+def _mvc_cors(function: Function, routes: list[Route], rules: list[AccessRule]) -> Iterator[Finding]:
+    if function.name != "addCorsMappings":
+        return
+    for node, call in function.calls():
+        if node.parent and node.parent.type == "navigation_expression":
+            continue  # Inspect the completed registration once, including any later overrides.
+        options = {}
+        while call and call.receiver is not None and call.name != "addMapping":
+            options.setdefault(call.name, call.args)
+            call = kt.call(call.receiver)
+        if not call or call.name != "addMapping" or len(call.args) != 1 or call.receiver is None:
+            continue
+        if _unqualified(function.receiver_type(call.receiver)) != "CorsRegistry":
+            continue
+        path = kt.literal(call.args[0])
+        credentials = options.get("allowCredentials", ())
+        origins = [kt.literal(function.source.resolve(arg)) or "" for arg in options.get("allowedOriginPatterns", ())]
+        if not path or len(credentials) != 1 or kt.text(function.source.resolve(credentials[0])) != "true":
+            continue
+        if not any(re.fullmatch(r"(?:https?://)?\*(?:\.[\w.-]+)?", origin) for origin in origins):
+            continue
+        methods = ({(kt.literal(arg) or "?").upper() for arg in options["allowedMethods"]}
+                   if "allowedMethods" in options else {"GET", "HEAD", "POST"})
+        if _private_cors_route(AccessRule(function, node, "", "*", path), methods, routes, rules):
+            yield _finding("credentialed-cors", function, node)
+
+
 def _cors_findings(
     functions: list[Function], routes: list[Route], rules: list[AccessRule], scan: Scan
 ) -> Iterator[Finding]:
@@ -615,6 +690,7 @@ def _cors_findings(
         scan.warn(Warning("UNRESOLVED_CORS", "Не удалось статически разобрать регистрацию CORS.", function.path), incomplete=True)
 
     for function in functions:
+        yield from _mvc_cors(function, routes, rules)
         for _, call in function.calls():
             if call.name != "registerCorsConfiguration" or len(call.args) != 2:
                 continue
@@ -649,17 +725,7 @@ def _cors_findings(
                 continue
             methods = {value.upper() for _, value in _literal_nodes(fields["allowedMethods"][1])} if "allowedMethods" in fields else set()
             matcher = AccessRule(function, origins[0], "", "*", path)
-            if any(
-                matcher.matches(route) and (not methods or "*" in methods or route.method in methods) and (
-                    route.function.principal
-                    or (
-                        _sensitive(route.function)
-                        and (access := next((rule for rule in rules if rule.matches(route)), None))
-                        and access.action in {"authenticated", "hasRole", "hasAnyRole", "hasAuthority"}
-                    )
-                )
-                for route in routes
-            ):
+            if _private_cors_route(matcher, methods, routes, rules):
                 first, last = sorted((origins[0], credentials[0]), key=lambda node: node.start_byte)
                 yield _finding("credentialed-cors", function, first, last)
 
@@ -693,11 +759,8 @@ def _jdbc_values(args: tuple[Node, ...]) -> list[Node]:
     ]
 
 
-def _object_findings(
-    route: Route, connections: list[tuple[kt.Call, Function]], scan: Scan
-) -> Iterator[Finding]:
-    handler = route.function
-    candidates = [(handler, handler.inputs, handler.principal)]
+def _object_contexts(handler: Function, connections: list[tuple[kt.Call, Function]]):
+    yield handler, handler.inputs, handler.principal
     for call, target in connections:
         parameters = target.parameters
         inputs = frozenset(
@@ -708,24 +771,82 @@ def _object_findings(
             name for arg, name in zip(call.args, parameters)
             if _uses_names(handler.source, arg, handler.principal)
         )
-        if inputs:
-            candidates.append((target, inputs, principal))
-    for function, inputs, principal in candidates:
+        if inputs or principal:
+            yield target, inputs, principal
+
+
+def _bound_value(source: kt.KotlinFile, call: kt.Call, sql: str, placeholder: re.Match[str]) -> Node | None:
+    values = _jdbc_values(call.args)
+    parameter = placeholder[1]
+    if parameter == "?":
+        position = sql.count("?", 0, placeholder.start(1))
+        return values[position] if position < len(values) else None
+    mapping = kt.call(source.resolve(values[0])) if values else None
+    if mapping and mapping.name == "mapOf":
+        for entry in mapping.args:
+            parts = kt.children(entry)
+            if (entry.type == "infix_expression" and len(parts) == 3 and kt.text(parts[1]) == "to"
+                    and kt.literal(parts[0]) == parameter[1:]):
+                return parts[2]
+    return None
+
+
+def _owned_tables(routes: list[Route], index: dict[tuple[str, str], list[Function]]) -> dict[str, set[str]]:
+    """Associate a controller with tables its GET handlers filter by the authenticated principal."""
+    tables: dict[str, set[str]] = {}
+    for route in routes:
+        handler = route.function
+        if route.method != "GET" or not handler.principal:
+            continue
+        for function, _, principal in _object_contexts(handler, list(_direct_calls(handler, index))):
+            if not principal:
+                continue
+            for _, call, _, sql in _sql_calls(function):
+                query = re.match(r"\s*select\b[^;]*?\bfrom\s+(\w+)\s+where\b", sql, re.I)
+                owner = _OWNER_BIND.search(sql, query.end()) if query else None
+                if query and owner and not re.search(r"\bor\b", sql[query.end():], re.I):
+                    bound = _bound_value(function.source, call, sql, owner)
+                    if bound is not None and _uses_names(function.source, bound, principal):
+                        tables.setdefault(handler.owner, set()).add(query[1].lower())
+    return tables
+
+
+def _object_findings(
+    route: Route, connections: list[tuple[kt.Call, Function]], scan: Scan, owned_tables: set[str],
+) -> Iterator[Finding]:
+    handler = route.function
+    for function, inputs, principal in _object_contexts(handler, connections):
+        if not inputs:
+            continue
         for node, call, _, sql in _sql_calls(function):
             where = re.search(r"\bwhere\b", sql, re.IGNORECASE)
-            if where is None or not _OWNERS.search(sql[:where.start()]):
+            if where is None:
+                continue
+            if not _OWNERS.search(sql[:where.start()]):
+                # A sibling read establishes ownership. Follow the bound request ID into a write on that table.
+                write = re.match(r"\s*(?:update|delete\s+from)\s+(\w+)\b", sql, re.I)
+                if (owned_tables and write and write[1].lower() in owned_tables and not handler.principal
+                        and "{" in route.path and not _checked(handler) and not _checked(function)
+                        and not _OWNERS.search(sql[where.end():])):
+                    for match in _ID_BIND.finditer(sql, where.end()):
+                        key = _bound_value(function.source, call, sql, match)
+                        if key is not None and _uses_names(function.source, key, inputs):
+                            yield _finding("object-authorization", function, node)
+                            break
                 continue
             values = _jdbc_values(call.args)
-            if not any(_uses_names(function.source, arg, inputs) for arg in values):
+            if not (any(_uses_names(function.source, arg, inputs) for arg in values) or any(
+                (bound := _bound_value(function.source, call, sql, match)) is not None
+                and _uses_names(function.source, bound, inputs) for match in _ID_BIND.finditer(sql, where.end())
+            )):
                 continue
             if _checks_owner_before_return(function, principal) or _checks_owner_before_return(handler, handler.principal):
                 continue
             predicate = sql[where.end():]
-            owner_filter = _OWNER_BIND.search(predicate)
+            owner_filter = _OWNER_BIND.search(sql, where.end())
             if owner_filter and not re.search(r"\bor\b", predicate, re.IGNORECASE):
-                position = sql.count("?", 0, where.end() + owner_filter.start(1))
-                if position < len(values):
-                    bound = values[position]
+                bound = _bound_value(function.source, call, sql, owner_filter)
+                if bound is not None:
                     if _uses_names(function.source, bound, principal):
                         continue
                     if _uses_names(function.source, bound, inputs):
@@ -794,6 +915,7 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
         for parent in parents:
             implementations.setdefault(parent, []).append(kind)
     findings.extend(_sql_injection_findings(functions, index, implementations))
+    owned_tables = _owned_tables(routes, index)
 
     for route in routes:
         handler = route.function
@@ -801,10 +923,13 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
         rule = next((rule for rule in rules if rule.matches(route)), None)
         if rule and rule.action == "permitAll" and not _checked(handler):
             targets = [target for _, target in connections]
-            if _sensitive(handler) or any(_sensitive(target) and not _checked(target) for target in targets):
+            shadowed = any(later.pattern == route.path and later.matches(route) and later.action != "permitAll"
+                           for later in rules[rules.index(rule) + 1:])
+            if shadowed or _sensitive(handler) or any(_sensitive(target) and not _checked(target) for target in targets):
                 findings.append(_finding("route-authorization", rule.function, rule.node))
         if handler.inputs:
-            findings.extend(_object_findings(route, connections, scan))
+            tables = owned_tables.get(handler.owner, set()) if not rule or rule.action in {"authenticated", "permitAll"} else set()
+            findings.extend(_object_findings(route, connections, scan, tables))
             resolved = {call.name for call, _ in _resolved_calls(handler, index, implementations)}
             if not connections and any(
                 call.receiver is not None and kt.text(call.receiver) in handler.parameter_types

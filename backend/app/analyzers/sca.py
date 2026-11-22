@@ -14,6 +14,7 @@ from tree_sitter import Node
 from . import kotlin
 from .models import Finding, Scan, ScanError, ScanResult, Severity, Snapshot, Warning
 
+BUNDLED_CATALOG = Path(__file__).with_name("maven-advisories.json")
 _COORDINATE = re.compile(r"[A-Za-z0-9_.-]+")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _GHSA = re.compile(r"GHSA-(?:[a-z0-9]{4}-){2}[a-z0-9]{4}")
@@ -289,22 +290,58 @@ def _lock_entries(scan: Scan, path: str, content: str) -> dict[tuple[str, str], 
     return entries
 
 
-def _dependencies(source: kotlin.KotlinFile):
+def _dependency(
+    source: kotlin.KotlinFile, node: Node, properties: dict[str, str], libraries: dict[str, str],
+) -> tuple[str | None, str | None]:
+    # A trailing configuration lambda can wrap the actual invocation in a second call_expression.
+    if node.type != "call_expression":
+        return None, None
+    invocation = kotlin.child(node, "call_expression") or node
+    call = kotlin.call(invocation)
+    if not call or call.receiver is not None or not call.args:
+        return None, None
+    configuration = call.name
+    arguments = kotlin.child(invocation, "value_arguments")
+    named = {}
+    for argument in kotlin.children(arguments) if arguments is not None else ():
+        parts = kotlin.children(argument)
+        if len(parts) == 2 and parts[0].type == "identifier":
+            named[kotlin.text(parts[0])] = parts[1]
+    if named:
+        if not {"group", "name"} <= named.keys():
+            return call.name, None
+        group = _version_reference(source, named["group"], properties)
+        name = _version_reference(source, named["name"], properties)
+        if not group or not name:
+            return configuration, None
+        coordinates = f"{group}:{name}"
+        if "version" in named:
+            coordinates += ":" + (_version_reference(source, named["version"], properties) or "")
+    elif call.name == "add" and len(call.args) >= 2:
+        configuration = kotlin.literal(call.args[0])
+        coordinates = _coordinates(source, call.args[1], properties, libraries)
+    else:
+        coordinates = _coordinates(source, call.args[0], properties, libraries)
+    trailing = kotlin.child(node, "annotated_lambda")
+    if coordinates and trailing is not None:
+        body = kotlin.child(trailing, "lambda_literal")
+        for statement in kotlin.children(body) if body is not None else ():
+            version = kotlin.call(statement)
+            if version and version.name == "version" and version.block is not None:
+                for constraint in kotlin.children(version.block):
+                    rule = kotlin.call(constraint)
+                    if rule and rule.name == "strictly" and len(rule.args) == 1:
+                        resolved = _version_reference(source, rule.args[0], properties) or ""
+                        coordinates = ":".join(coordinates.split(":")[:2] + [resolved])
+    return configuration, coordinates
+
+
+def _dependencies(source: kotlin.KotlinFile, properties: dict[str, str], libraries: dict[str, str]):
     for block in kotlin.children(source.root):
         call = kotlin.call(block)
-        if call is None or call.name != "dependencies" or call.receiver is not None or call.block is None:
-            continue
-        for node in kotlin.children(call.block):
-            declaration = kotlin.call(node)
-            if declaration is None or not declaration.args:
-                yield node, None, None
-            elif declaration.name == "add":
-                if len(declaration.args) >= 2:
-                    yield node, kotlin.literal(declaration.args[0]), declaration.args[1]
-                else:
-                    yield node, None, None
-            else:
-                yield node, declaration.name, declaration.args[0]
+        if call and call.name == "dependencies" and call.receiver is None and call.block is not None:
+            for node in kotlin.children(call.block):
+                yield node, *_dependency(source, node, properties, libraries)
 
 
 def scan_sca(snapshot: Snapshot, catalog: VulnerabilityCatalog) -> ScanResult:
@@ -345,9 +382,8 @@ def scan_sca(snapshot: Snapshot, catalog: VulnerabilityCatalog) -> ScanResult:
         aliases = libraries.get("gradle/libs.versions.toml", {}) | libraries.get(
             (script.parent / "gradle/libs.versions.toml").as_posix(), {}
         )
-        for node, configuration, notation in _dependencies(source):
+        for node, configuration, coordinates in _dependencies(source, settings, aliases):
             line = kotlin.line(node)
-            coordinates = _coordinates(source, notation, settings, aliases) if notation is not None else None
             parts = coordinates.split(":") if coordinates else []
             if (
                 configuration is None or len(parts) not in {2, 3}

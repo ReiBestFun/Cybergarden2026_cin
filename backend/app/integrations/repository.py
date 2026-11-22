@@ -13,6 +13,7 @@ from typing import Iterator
 from urllib.parse import urlsplit
 
 from ..analyzers.models import ScanError, Snapshot, Warning
+from ..analyzers.sca import BUNDLED_CATALOG
 
 TRAINING_REPOSITORY = "https://github.com/TBagirov/training"
 # vulnerability-database/vulnerabilities.json at training commit fe1fcbe212669783480666b9b60147c8a8c6eef4
@@ -125,6 +126,7 @@ def prepare_repository(
         _git(directory, deadline, "checkout", "--quiet", "--detach", sha)
         training_project = directory / "training-project"
         project = training_project if training_project.is_dir() else directory
-        if catalog_path is None and canonical.casefold() == TRAINING_REPOSITORY.casefold():
-            catalog_path = _training_catalog(directory, pin_training_catalog)
+        if catalog_path is None:
+            catalog_path = (_training_catalog(directory, pin_training_catalog)
+                            if canonical.casefold() == TRAINING_REPOSITORY.casefold() else BUNDLED_CATALOG)
         yield RepositorySnapshot(Snapshot.from_directory(project, sha), catalog_path)

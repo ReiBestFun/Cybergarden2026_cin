@@ -10,7 +10,8 @@ from tempfile import TemporaryDirectory
 from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from ..analyzers.models import ScanError, Snapshot, Warning, safe_path
-from .repository import RepositorySnapshot, _training_catalog
+from ..analyzers.sca import BUNDLED_CATALOG
+from .repository import RepositorySnapshot
 
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_EXPANDED_BYTES = 32 * 1024 * 1024
@@ -80,4 +81,4 @@ def prepare_archive(content: bytes, digest: str, catalog_path: Path | None):
     with archive_directory(content) as root:
         project = root / "training-project"
         snapshot = Snapshot.from_directory(project if project.is_dir() else root, digest)
-        yield RepositorySnapshot(snapshot, catalog_path or _training_catalog(root, pinned=True))
+        yield RepositorySnapshot(snapshot, catalog_path or BUNDLED_CATALOG)

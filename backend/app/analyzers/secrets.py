@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import re
@@ -153,6 +154,29 @@ def _fallback(source: kotlin.KotlinFile, node: Node, role: str | None) -> str | 
     return _constant(source, right) if role or (key and _role(key)) else None
 
 
+def _encoded_credential(source: kotlin.KotlinFile, node: Node) -> Node | None:
+    as_text = kotlin.call(source.resolve(node))
+    if not as_text or as_text.name != "decodeToString" or as_text.args or as_text.receiver is None:
+        return None
+    decode = kotlin.call(source.resolve(as_text.receiver))
+    if not decode or decode.name != "decode" or len(decode.args) != 1 or decode.receiver is None:
+        return None
+    factory = kotlin.call(source.resolve(decode.receiver))
+    if not factory or factory.name != "getDecoder" or factory.receiver is None or factory.args:
+        return None
+    if kotlin.text(factory.receiver) not in {"Base64", "java.util.Base64"}:
+        return None
+    literal = source.resolve(decode.args[0])
+    value = kotlin.literal(literal)
+    if value is None or len(value) > 8192:
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except ValueError:
+        return None
+    return literal if _concrete(decoded) else None
+
+
 def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
     inferred: dict[Node, Finding] = {}
     classified: set[Node] = set()
@@ -164,6 +188,9 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
         # The declaration owns inferred context when another expression refers to it.
         if role is None and not (node.start_byte <= origin.start_byte and origin.end_byte <= node.end_byte):
             return None
+        if role and (encoded := _encoded_credential(source, origin)) is not None:
+            classified.add(encoded)
+            return _finding("recoverable-token", path, kotlin.line(encoded), kotlin.end_line(encoded))
         fallback = _fallback(source, origin, role)
         if fallback is not None and _concrete(fallback):
             return _finding("secret-fallback", path, kotlin.line(origin), kotlin.end_line(origin))

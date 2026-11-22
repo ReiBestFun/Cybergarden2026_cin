@@ -16,7 +16,9 @@ from ..config import Settings
 from ..integrations.repository import Allowlist, RepositorySnapshot, ci_repository_allowlist, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup, TelegramConfig
 from ..notifications import build_message
+from ..notifications.content import build_slack_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
+from ..notifications.slack import SLACK_CHANNEL_RECIPIENT
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import CiVerdict, Edge, Graph, Node
 from ..worker import run_scan
@@ -197,6 +199,23 @@ class GraphExecution:
         bundle = next((self.steps[edge.source].bundle for edge in edges if self._active(edge)), None)
         if bundle is None:
             raise ScanError(Warning("NO_REPORT", "На вход уведомления не пришёл отчёт."))
+        if node.type == "notify_slack":
+            settings = self.progress.delivery_settings("slack")
+            if settings is None or not settings.secret:
+                raise ScanError(Warning("SLACK_NOT_CONFIGURED", "Подключите Slack в настройках команды."))
+            message = build_slack_message(bundle, run_id=str(self.progress.claim.id), app_base_url=self.settings.app_base_url)
+            draft = NotificationDraft(
+                "slack", (SLACK_CHANNEL_RECIPIENT,), None, message, settings.workspace_id, settings.version,
+            )
+        else:
+            draft = self._mail_or_telegram(node, edges, bundle)
+        return Step(
+            ports=("delivery",),
+            preview={"channel": draft.channel, "status": "queued", "attachments": [item.filename for item in draft.message.attachments]},
+            notification=draft,
+        )
+
+    def _mail_or_telegram(self, node: Node, edges: list[Edge], bundle: RunReport) -> NotificationDraft:
         config = NOTIFIER_CONFIGS[node.type].model_validate(node.config)
         summary_only = isinstance(config, TelegramConfig) and config.summary_only
         message = build_message(
@@ -219,12 +238,7 @@ class GraphExecution:
             if settings is None or not settings.recipients:
                 raise ScanError(Warning("WORKSPACE_DELIVERY_UNCONFIGURED", "Настройте получателей команды для этого канала."))
             workspace_id, recipients = settings.workspace_id, tuple(settings.recipients)
-        draft = NotificationDraft(channel, recipients, allowed, message, workspace_id)
-        return Step(
-            ports=("delivery",),
-            preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},
-            notification=draft,
-        )
+        return NotificationDraft(channel, recipients, allowed, message, workspace_id)
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]

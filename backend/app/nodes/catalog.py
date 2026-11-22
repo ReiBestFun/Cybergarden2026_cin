@@ -80,7 +80,13 @@ class EmailConfig(NotificationConfig):
     )
 
 
-NOTIFIER_CONFIGS: dict[str, type[TelegramConfig | EmailConfig]] = {"notify_telegram": TelegramConfig, "notify_email": EmailConfig}
+class SlackConfig(Input):
+    pass
+
+
+NOTIFIER_CONFIGS: dict[str, type[TelegramConfig | EmailConfig | SlackConfig]] = {
+    "notify_telegram": TelegramConfig, "notify_email": EmailConfig, "notify_slack": SlackConfig,
+}
 
 
 class Port(BaseModel):
@@ -149,6 +155,8 @@ CATALOG = {node.type: node for node in (
                (NOTIFY_INPUT,), (DELIVERY,), TelegramConfig),
     definition("notify_email", "Почта", "Разослать отчёт по электронной почте.",
                (NOTIFY_INPUT,), (DELIVERY,), EmailConfig),
+    definition("notify_slack", "Slack", "Отправить сводку и ссылку на отчёт в канал команды.",
+               (NOTIFY_INPUT,), (DELIVERY,), SlackConfig),
 )}
 
 

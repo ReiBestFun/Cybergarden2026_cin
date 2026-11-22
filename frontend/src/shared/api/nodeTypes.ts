@@ -62,6 +62,7 @@ const CATEGORIES: Record<string, string> = {
   ai_report: 'AI',
   notify_telegram: 'Уведомления',
   notify_email: 'Уведомления',
+  notify_slack: 'Уведомления',
 };
 
 const FIELD_TITLES: Record<string, string> = {
@@ -121,6 +122,7 @@ const MOCK_CHECK_TYPES: BackendCheckType[] = [
     summary_only: { type: 'boolean', default: false, title: 'Только краткая сводка и ссылка на отчёт' },
     attach_json: { type: 'boolean', default: true, title: 'Прикладывать JSON-отчёт' },
   } } },
+  { type: 'notify_slack', label: 'Slack', description: 'Отправить сводку и ссылку на отчёт в канал команды.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', properties: {} } },
   { type: 'notify_email', label: 'Почта', description: 'Разослать отчёт по электронной почте.', inputs: [{ ...port('report', 'report'), accepts: ['findings_bundle'] }], outputs: [port('delivery', 'delivery')], config_schema: { type: 'object', required: ['recipients'], properties: {
     use_workspace_settings: { type: 'boolean', title: 'Получатели и реквизиты команды', default: false },
     credential_id: { type: 'string', title: 'Учётные данные' },

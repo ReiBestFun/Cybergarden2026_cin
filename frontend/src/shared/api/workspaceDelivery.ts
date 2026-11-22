@@ -1,6 +1,6 @@
 import { api } from './client';
 
-export type DeliveryChannel = 'email' | 'telegram';
+export type DeliveryChannel = 'email' | 'telegram' | 'slack';
 export type ChannelSettings = { version: number; recipients: string[]; has_credentials: boolean };
 type DeliverySettings = Record<DeliveryChannel, ChannelSettings | null>;
 type ChannelChange = { version: number; recipients: string[]; credentials?: { secret: string; username?: string } | null };

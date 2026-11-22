@@ -19,6 +19,8 @@ from .telegram import CHAT_ID
 
 def recipient_key(channel: str, address: str) -> str:
     address = address.strip()
+    if channel == "slack":
+        return address
     if channel == "telegram":
         return address.lower() if address.startswith("@") else str(int(address))
     local, _, domain = address.rpartition("@")
@@ -26,6 +28,8 @@ def recipient_key(channel: str, address: str) -> str:
 
 
 def allowed_recipients(settings: Settings, channel: str) -> frozenset[str] | None:
+    if channel == "slack":
+        return None
     values = settings.notify_email_recipients if channel == "email" else settings.notify_telegram_recipients
     if channel == "telegram" and not values:
         return None
@@ -40,6 +44,7 @@ class NotificationDraft:
     allowed: frozenset[str] | None
     message: Message
     settings_workspace_id: UUID | None = None
+    settings_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,7 @@ class ClaimedDelivery:
     owner_id: UUID | None = None
     workspace_id: UUID | None = None
     settings_workspace_id: UUID | None = None
+    settings_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,7 @@ def enqueue_notification(db: Session, node: NodeRun, draft: NotificationDraft, o
     batch = NotificationBatch(
         node_run_id=node.id, channel=draft.channel, subject=draft.message.subject, body=draft.message.text,
         settings_workspace_id=draft.settings_workspace_id,
+        settings_version=draft.settings_version,
         attachment_name=attachment.filename if attachment else None,
         attachment_content=attachment.content if attachment else None,
     )
@@ -166,7 +173,8 @@ def claim_delivery(db: Session, now: datetime, *, lease_seconds: float) -> Claim
     return ClaimedDelivery(
         delivery.id, run_id, batch.node_run_id, token, batch.channel, delivery.recipient, delivery.phase,
         Message(batch.subject, batch.body, attachment),
-        project_id, UUID(credential_id) if credential_id is not None else None, owner_id, workspace_id, batch.settings_workspace_id,
+        project_id, UUID(credential_id) if credential_id is not None else None, owner_id, workspace_id,
+        batch.settings_workspace_id, batch.settings_version,
     )
 
 
@@ -216,6 +224,8 @@ def finish_delivery(
 
 
 def _mask(channel: str, recipient: str) -> str:
+    if channel == "slack":
+        return "Канал Slack"
     if channel == "email":
         local, _, domain = recipient.rpartition("@")
         return f"{local[:1]}***@{domain}"

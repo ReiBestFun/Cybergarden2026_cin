@@ -58,6 +58,9 @@ export function SettingsPanel() {
           {definition && selectedNode.data.kind === 'condition' &&
             <ConditionSettings schema={definition.params_schema} data={selectedNode.data} onChange={setConditions} />}
           {isTelegram && !usesWorkspace && <TelegramRecipients value={selectedNode.data.config?.recipients ?? ''} onChange={value => updateConfig('recipients', value)} />}
+          {selectedNode.data.kind === 'notify_slack' && <p className="muted">{workspace.personal
+            ? 'Для Slack нужно командное рабочее пространство.'
+            : <Link to="/team">Настроить канал Slack команды</Link>}</p>}
           {usesWorkspace && <p className="muted">{workspace.personal
             ? 'Командные настройки доступны в командном пространстве. Отключите этот режим, чтобы задать получателей в ноде.'
             : <Link to="/team">Изменить получателей и реквизиты команды</Link>}</p>}

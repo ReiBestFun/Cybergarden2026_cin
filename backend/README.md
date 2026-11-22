@@ -22,6 +22,12 @@
 
 Для проверки из Swagger создайте сценарий manual_trigger → repository → scan_secrets → merge_findings и отправьте POST /api/workflows/{workflow_id}/runs. Ответ 202 содержит ID запуска. GET /api/runs/{run_id} показывает переход из queued в итоговый статус, GET /api/runs/{run_id}/findings отдаёт найденные проблемы, GET /api/runs/{run_id}/report показывает покрытие. JSON и Markdown доступны через GET /api/runs/{run_id}/export с параметром format=json или format=markdown.
 
+### Локальный ZIP
+
+Владелец проекта загружает ZIP через `POST /api/projects/{project_id}/archives` с телом `application/zip`. API возвращает SHA-256. Нода `local_archive` принимает его в `config.archive_sha256`, получает параметры триггера и отдаёт анализаторам порт `snapshot`. Архив хранится в зашифрованном виде в PostgreSQL. В скопированном шаблоне нужно выбрать архив своего проекта.
+
+Ограничения одного архива — 8 МиБ при загрузке, 32 МиБ после распаковки и 4096 записей. Поддерживаются ZIP Stored и Deflate. Для SCA укажите `SCA_CATALOG_PATH` либо используйте оригинальный справочник внутри ZIP учебного репозитория. GitHub Actions использует ноду репозитория для подтверждения SHA коммита.
+
 ### Модель рабочего пространства
 
 По умолчанию API и воркер используют Ollama. Укажите в `LLM_MODEL` имя установленной модели из `ollama list`, а в `LLM_BASE_URL` — адрес сервера Ollama, доступный обоим процессам.

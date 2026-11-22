@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from ..analyzers.registry import SCANNER_NODES
 from ..nodes.catalog import (
-    CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft,
+    CATALOG, NOTIFIER_CONFIGS, ArchiveConfig, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft,
     ConditionExpression, ConditionGroup,
 )
 from ..schemas.contracts import CiDecision, Graph, Issue, Node
@@ -16,6 +16,14 @@ _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
 
 def _config_error(node: Node, *, draft: bool) -> Issue | None:
     config = node.config
+    if node.type == "local_archive":
+        if draft and not config:
+            return None
+        try:
+            ArchiveConfig.model_validate(config)
+        except ValidationError:
+            return Issue(code="ARCHIVE_REQUIRED", message="Выберите ZIP-файл в настройках ноды.", node_id=node.id, field="config.archive_sha256")
+        return None
     if node.type == "ci_gate":
         try:
             CiGateConfig.model_validate(config)
@@ -108,9 +116,12 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
         issues.append(Issue(code="TRIGGER_COUNT", message="Требуется ровно один триггер."))
     elif expected_trigger and triggers[0].type != expected_trigger:
         issues.append(Issue(code="WRONG_TRIGGER", message="Тип триггера не подходит для этого запуска.", node_id=triggers[0].id))
-    for kind in ("repository", "merge_findings"):
-        if counts[kind] != 1:
-            issues.append(Issue(code="REQUIRED_NODE_COUNT", message=f"Требуется одна нода {kind}."))
+    if counts["repository"] + counts["local_archive"] != 1:
+        issues.append(Issue(code="REQUIRED_NODE_COUNT", message="Выберите один источник: репозиторий или локальный ZIP."))
+    if counts["ci_trigger"] and counts["local_archive"]:
+        issues.append(Issue(code="CI_REPOSITORY_REQUIRED", message="Для GitHub Actions нужен репозиторий с проверяемым коммитом."))
+    if counts["merge_findings"] != 1:
+        issues.append(Issue(code="REQUIRED_NODE_COUNT", message="Требуется одна нода merge_findings."))
     if not SCANNER_NODES.keys() & counts.keys():
         issues.append(Issue(code="ANALYZER_REQUIRED", message="Подключите хотя бы один анализатор."))
     for kind in ("ai_report", "ci_gate"):

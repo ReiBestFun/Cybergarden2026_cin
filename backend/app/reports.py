@@ -113,10 +113,12 @@ def _warning_text(warning: Warning) -> str:
     return _cell(f"{text} {warning.hint}" if warning.hint else text)
 
 
-def readable_report(report: RunReport) -> str:
+def readable_report(report: RunReport, *, archive_sha256: str | None = None) -> str:
     status = {"succeeded": "Проверка завершена", "partial": "Проверка завершена частично", "failed": "Проверка не выполнена"}
     lines = ["# Отчёт статического анализа", ""]
-    if report.sha:
+    if archive_sha256:
+        lines.extend((f"ZIP · SHA-256 {archive_sha256}", ""))
+    elif report.sha:
         lines.extend((f"Коммит {report.sha}", ""))
     lines.extend((status[report.status], ""))
     for node in report.nodes:

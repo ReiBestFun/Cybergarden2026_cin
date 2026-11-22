@@ -8,7 +8,7 @@ import {
 } from './defaults';
 import { validateConnection } from './validateConnection';
 import { fromApiGraph, toApiGraph } from './graph';
-import { ApiError, errorMessage } from '../../shared/api/client';
+import { api, ApiError, errorMessage } from '../../shared/api/client';
 import { watchRun } from '../../shared/api/runEvents';
 import {
   createWorkflow, ensureProject, getProject, getSchedule, getWorkflow, setSchedule, startCiTest, startRun, updateWorkflow, validateWorkflow,
@@ -25,7 +25,8 @@ type EditorState = {
   profileTimezone: string;
   workspaceId: string | null;
   savedDraft: string | null;
-  busy: 'save' | 'run' | 'load' | null; notice: Notice; run: RunDetail | null;
+  busy: 'save' | 'run' | 'load' | 'upload' | null; notice: Notice; run: RunDetail | null;
+  uploadArchive: (nodeId: string, file: File) => Promise<void>;
   setNodes: (update: FlowNode[] | ((nodes: FlowNode[]) => FlowNode[])) => void;
   setEdges: (update: Edge[] | ((edges: Edge[]) => Edge[])) => void;
   onNodesChange: (changes: NodeChange<FlowNode>[]) => void;
@@ -63,6 +64,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   let runUpdates: AbortController | undefined;
   let workflowLoad: AbortController | undefined;
   let workflowSave: AbortController | undefined;
+  let archiveUpload: AbortController | undefined;
   let loadRequest = 0;
   // Shows an API error and, when it names a node, selects that node.
   const fail = (error: unknown) => {
@@ -119,6 +121,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     hasUnsavedChanges: () => get().savedDraft !== null && get().savedDraft !== draftSnapshot(get()),
 
     newWorkflow: (preset, target) => {
+      archiveUpload?.abort();
       workflowLoad?.abort();
       workflowSave?.abort();
       runUpdates?.abort();
@@ -154,6 +157,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     loadWorkflow: async (id) => {
+      archiveUpload?.abort();
       workflowLoad?.abort();
       workflowSave?.abort();
       const controller = new AbortController();
@@ -191,9 +195,33 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }
     },
 
+    uploadArchive: async (nodeId, file) => {
+      const s = get();
+      if (!s.workspaceId || s.busy) return;
+      const controller = new AbortController();
+      archiveUpload = controller;
+      set({ busy: 'upload', notice: null });
+      try {
+        const project = await ensureProject(s.workspaceId, s.project, s.projectId, controller.signal);
+        const archive = await api<{ sha256: string }>(`/api/projects/${project.id}/archives`, {
+          method: 'POST', body: file, headers: { 'Content-Type': 'application/zip' }, signal: controller.signal,
+        });
+        if (controller.signal.aborted || s.project !== get().project || !get().nodes.some(n => n.id === nodeId)) return;
+        set(state => ({
+          nodes: state.nodes.map(n => n.id === nodeId ? { ...n, data: { ...n.data, config: { archive_sha256: archive.sha256, filename: file.name.slice(0, 255) || 'archive.zip' } } } : n),
+          notice: { kind: 'success', text: `Файл «${file.name}» подключён. Сохраните сценарий.` },
+        }));
+      } catch (error) {
+        if (!controller.signal.aborted) fail(error);
+      } finally {
+        if (archiveUpload === controller) archiveUpload = undefined;
+        if (!controller.signal.aborted && get().busy === 'upload') set({ busy: null });
+      }
+    },
+
     save: async () => {
       const s = get();
-      if (!s.workspaceId) return null;
+      if (!s.workspaceId || s.busy === 'upload') return null;
       workflowSave?.abort();
       const controller = new AbortController();
       workflowSave = controller;

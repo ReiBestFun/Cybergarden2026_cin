@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Finding, Warning
 from ..config import Settings
-from ..db.models import FindingRow, NodeRun, Project, ScanRun, WorkspaceDeliverySetting
+from ..db.models import FindingRow, NodeRun, Project, ProjectArchive, ScanRun, WorkspaceDeliverySetting
 from ..nodes.catalog import CATALOG
 from ..notifications.queue import NotificationDraft, enqueue_notification
 from ..schemas.contracts import NodeStatus, RunStatus
@@ -43,6 +43,12 @@ class RunProgress:
     def __init__(self, sessions: sessionmaker[Session], claim: ClaimedRun):
         self.sessions = sessions
         self.claim = claim
+
+    def archive_content(self, digest: str) -> bytes | None:
+        with self.sessions() as db:
+            return db.scalar(select(ProjectArchive.content).where(
+                ProjectArchive.project_id == self.claim.project_id, ProjectArchive.sha256 == digest,
+            ))
 
     def llm_settings(self, settings: Settings) -> Settings:
         with self.sessions() as db:

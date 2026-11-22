@@ -37,7 +37,8 @@ def readable_summary(report: RunReport, *, repository: str, results_url: str, at
     categories = Counter(finding.category for finding in report.findings)
     lines = [
         "CyberFlow: результаты проверки безопасности",
-        f"Репозиторий: {repository}" + (f" @ {report.sha[:7]}" if report.sha else ""),
+        (f"Репозиторий: {repository}" + (f" @ {report.sha[:7]}" if report.sha else "")
+         if repository else f"Локальный ZIP · SHA-256 {report.sha[:12]}"),
         f"Статус: {_STATUS[report.status]}",
         f"Находок: {len(report.findings)}",
     ]
@@ -76,7 +77,8 @@ def build_message(
         ))
         return Message(title, text)
     total = len(report.findings)
-    subject = f"CyberFlow: {total} находок в {repository.rstrip('/').rsplit('/', 1)[-1]} ({short_sha})"
+    source = repository.rstrip("/").rsplit("/", 1)[-1] if repository else "ZIP"
+    subject = f"CyberFlow: {total} находок в {source} ({short_sha})"
     attachments: tuple[Attachment, ...] = ()
     if attach_json and report.status != "failed":
         content = submission_json(report).encode("utf-8")

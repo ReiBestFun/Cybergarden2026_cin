@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { Bell, Bot, GitBranch, Mail, Merge, Play, Send, Settings2, ShieldCheck } from 'lucide-react';
+import { Bell, Bot, FileArchive, GitBranch, Mail, Merge, Play, Send, Settings2, ShieldCheck } from 'lucide-react';
 import type { FlowNode } from './types';
 import { useNodeTypesStore } from './nodeTypesStore';
 
@@ -9,6 +9,7 @@ const STATUS_TITLE: Record<string, string> = { succeeded: 'Выполнено', 
 function NodeIcon({ kind }: { kind: string }) {
   if (kind.endsWith('_trigger')) return <Play size={18} />;
   if (kind === 'repository') return <GitBranch size={18} />;
+  if (kind === 'local_archive') return <FileArchive size={18} />;
   if (kind === 'merge_findings') return <Merge size={18} />;
   if (kind === 'condition') return <Settings2 size={18} />;
   if (kind === 'ai_report') return <Bot size={18} />;

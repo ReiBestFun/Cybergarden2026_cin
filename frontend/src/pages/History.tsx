@@ -36,7 +36,7 @@ export function History() {
         {!runs ? <p className="muted">Загрузка…</p> : runs.length === 0 ? !error && <p className="muted">Запусков пока нет.</p> : (
           <table>
             <thead>
-              <tr><th>Дата</th><th>Репозиторий</th><th>Триггер</th><th>Статус</th><th>Находки</th><th>Коммит</th></tr>
+              <tr><th>Дата</th><th>Проект</th><th>Триггер</th><th>Статус</th><th>Находки</th><th>Снимок</th></tr>
             </thead>
             <tbody>
               {runs.map(r => (
@@ -46,7 +46,7 @@ export function History() {
                   <td>{TRIGGER_LABEL[r.trigger]}</td>
                   <td><span className={`tag run-${r.status}`}>{STATUS_LABEL[r.status]}</span></td>
                   <td>{r.summary?.total ?? '—'}</td>
-                  <td>{r.commit_sha ? <code>{r.commit_sha.slice(0, 7)}</code> : '—'}</td>
+                  <td>{r.source_snapshot.archive_sha256 ? <code title={r.source_snapshot.archive_sha256}>ZIP · {r.source_snapshot.archive_sha256.slice(0, 12)}</code> : r.commit_sha ? <code>{r.commit_sha.slice(0, 7)}</code> : '—'}</td>
                 </tr>
               ))}
             </tbody>

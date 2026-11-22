@@ -53,6 +53,8 @@ def _reusable_graph(graph_json: dict) -> dict:
             node.config.pop("recipients", None)
             node.config.pop("subject", None)
             node.config.pop("use_workspace_settings", None)
+        elif node.type == "local_archive":
+            node.config.clear()
         elif node.type == "ci_trigger":
             node.config.pop("branch", None)
     return checked_draft(graph)

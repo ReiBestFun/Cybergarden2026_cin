@@ -235,6 +235,14 @@ class TelegramChallengeLimit(Base):
     next_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class ProjectArchive(Base):
+    __tablename__ = "project_archives"
+
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content: Mapped[bytes] = mapped_column(EncryptedBinary("project_archives.content"))
+
+
 class Workflow(Base):
     __tablename__ = "workflows"
     __table_args__ = (Index("ix_workflows_project_updated", "project_id", "updated_at"),)

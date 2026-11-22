@@ -5,14 +5,14 @@ from uuid import UUID
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
-from ..db.models import Project, Schedule, Workflow
+from ..db.models import Project, ProjectArchive, Schedule, Workflow
 from ..db.session import Database
 from ..db.workspaces import project_access
 from ..integrations.repository import is_repository_allowed
 from ..llm import ModelError
 from ..nodes.catalog import CATALOG, CatalogRead
 from ..schemas.contracts import (
-    Graph, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
+    Graph, Issue, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
     WorkflowCreate, WorkflowPatch, WorkflowRead,
 )
 from ..workflows.generation import GeneratedWorkflow, GenerationError, GenerationRequest, generate_workflow
@@ -44,6 +44,26 @@ def checked_draft(graph: Graph) -> dict:
     if issues := validate_draft(graph):
         raise graph_error(issues[0])
     return graph.model_dump(mode="json")
+
+
+def archive_issue(graph: Graph, db: Database, project_id: UUID) -> Issue | None:
+    sources = [(node.id, node.config["archive_sha256"]) for node in graph.nodes
+               if node.type == "local_archive" and node.config.get("archive_sha256")]
+    if sources:
+        attached = set(db.scalars(select(ProjectArchive.sha256).where(
+            ProjectArchive.project_id == project_id, ProjectArchive.sha256.in_([digest for _, digest in sources]),
+        )))
+        for node_id, digest in sources:
+            if digest not in attached:
+                return Issue(code="ARCHIVE_NOT_FOUND", message="Загрузите ZIP в этот проект.", node_id=node_id)
+    return None
+
+
+def checked_project_draft(graph: Graph, db: Database, project_id: UUID) -> dict:
+    draft = checked_draft(graph)
+    if issue := archive_issue(graph, db, project_id):
+        raise graph_error(issue)
+    return draft
 
 
 @router.get("/check-types", response_model=CatalogRead)
@@ -83,7 +103,7 @@ def list_workflows(project_id: UUID, db: Database, pagination: PageQuery, user: 
 @router.post("/projects/{project_id}/workflows", status_code=201, response_model=WorkflowRead)
 def create_workflow(project_id: UUID, data: WorkflowCreate, db: Database, user: CurrentUser) -> Workflow:
     get_project(project_id, db, user.id, owner_required=True)
-    workflow = Workflow(project_id=project_id, name=data.name, graph_json=checked_draft(data.graph))
+    workflow = Workflow(project_id=project_id, name=data.name, graph_json=checked_project_draft(data.graph, db, project_id))
     db.add(workflow)
     db.commit()
     return workflow
@@ -100,7 +120,7 @@ def modify_workflow(workflow_id: UUID, data: WorkflowPatch, db: Database, user: 
     if data.name is not None:
         workflow.name = data.name
     if data.graph is not None:
-        workflow.graph_json = checked_draft(data.graph)
+        workflow.graph_json = checked_project_draft(data.graph, db, workflow.project_id)
         schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id).with_for_update())
         if schedule is not None and schedule.enabled:
             issues = validate_graph(data.graph, expected_trigger="schedule_trigger")
@@ -117,6 +137,8 @@ def validate_workflow(workflow_id: UUID, db: Database, user: CurrentUser, data: 
     workflow = get_workflow(workflow_id, db, user.id)
     graph = data.graph if data and data.graph is not None else Graph.model_validate(workflow.graph_json)
     issues = validate_graph(graph)
+    if not issues and (issue := archive_issue(graph, db, workflow.project_id)):
+        issues.append(issue)
     return ValidationResult(valid=not issues, issues=issues)
 
 

@@ -13,6 +13,7 @@ from ..ai_reports import ReportError, explain_report
 from ..analyzers.models import Finding, ScanError, Warning, finding_key
 from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
+from ..integrations.archives import prepare_archive
 from ..integrations.repository import Allowlist, RepositorySnapshot, ci_repository_allowlist, prepare_repository
 from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup, TelegramConfig
 from ..notifications import build_message
@@ -142,6 +143,13 @@ class GraphExecution:
     def _execute_node(self, node: Node, edges: list[Edge], resources: ExitStack) -> Step:
         if node.type in {"manual_trigger", "schedule_trigger", "ci_trigger"}:
             return Step(ports=("params",), preview={"trigger": self.progress.claim.trigger, "ref": self.source.get("ref")})
+        if node.type == "local_archive":
+            digest = node.config["archive_sha256"]
+            content = self.progress.archive_content(digest)
+            if content is None:
+                raise ScanError(Warning("ARCHIVE_NOT_FOUND", "Загрузите ZIP в этот проект."))
+            self.prepared = resources.enter_context(prepare_archive(content, digest, self.settings.sca_catalog_path))
+            return Step(ports=("snapshot",), preview={"archive_sha256": digest, "files": len(self.prepared.snapshot.files)})
         if node.type == "repository":
             url, ref = self.source.get("repository_url"), self.source.get("ref")
             if not isinstance(url, str) or not isinstance(ref, str):

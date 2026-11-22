@@ -27,13 +27,16 @@ def _enqueue(
     trigger: str, schedule: Schedule | None = None, scheduled_for: datetime | None = None,
     ci_request_id: str | None = None,
 ) -> ScanRun:
+    archive = next((node for node in graph.nodes if node.type == "local_archive"), None)
+    source = ({"archive_sha256": archive.config["archive_sha256"]} if archive
+              else {"repository_url": project.repository_url, "ref": ref})
     run = ScanRun(
         project_id=project.id,
         workflow_id=workflow.id,
         trigger=trigger,
         status="queued",
         graph_snapshot=graph.model_dump(mode="json"),
-        source_snapshot={"repository_url": project.repository_url, "ref": ref},
+        source_snapshot=source,
         ci_request_id=ci_request_id,
         schedule_id=schedule.id if schedule else None,
         scheduled_for=scheduled_for,

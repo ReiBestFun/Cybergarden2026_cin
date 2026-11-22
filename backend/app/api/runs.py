@@ -243,7 +243,8 @@ def export_run(
                 scan = ScanResult(category, tuple(by_node_run[node.id]), warnings, Coverage(**coverage))
                 nodes.append(NodeResult(category, check["status"], result=scan))
         report = RunReport(report.sha, report.status, tuple(nodes), report.findings)
-        body, media_type, extension = readable_report(report), "text/markdown", "md"
+        body = readable_report(report, archive_sha256=run.source_snapshot.get("archive_sha256"))
+        media_type, extension = "text/markdown", "md"
         explanation = ((run.report or {}).get("llm") or {}).get("text")
         if explanation:
             paragraphs = ("    " + line if line.strip() else "" for line in explanation.splitlines())

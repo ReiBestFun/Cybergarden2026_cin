@@ -33,6 +33,11 @@ class ConditionGroup(Input):
 ConditionExpression = RootModel[ConditionConfig | ConditionGroup]
 
 
+class ArchiveConfig(Input):
+    archive_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] = Field(title="ZIP-архив")
+    filename: Annotated[str, StringConstraints(min_length=1, max_length=255)] | None = Field(default=None, title="Имя файла")
+
+
 class CiGateConfig(Input):
     threshold: CiThreshold = Field(default="CRITICAL", title="Блокировать начиная с")
 
@@ -138,6 +143,7 @@ CATALOG = {node.type: node for node in (
     definition("schedule_trigger", "Расписание", "Поставить запуск в очередь по расписанию.", (), (PARAMS,)),
     definition("ci_trigger", "GitHub Actions", "Проверить коммит, полученный из CI.", (), (PARAMS,), CiTriggerConfig),
     definition("repository", "Репозиторий", "Подготовить исходники и зафиксировать коммит.", (PARAMS,), (SNAPSHOT,)),
+    definition("local_archive", "Локальный ZIP", "Взять исходники из загруженного ZIP-архива.", (PARAMS,), (SNAPSHOT,), ArchiveConfig),
     definition("scan_secrets", "Secrets", "Найти встроенные секреты.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sca", "SCA", "Сопоставить зависимости с учебным справочником.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),

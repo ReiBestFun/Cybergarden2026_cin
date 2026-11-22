@@ -100,7 +100,7 @@ class WorkspaceMcpToken(Base):
 
 class WorkspaceDeliverySetting(Base):
     __tablename__ = "workspace_delivery_settings"
-    __table_args__ = (CheckConstraint("channel IN ('email', 'telegram')", name="ck_workspace_delivery_channel"),)
+    __table_args__ = (CheckConstraint("channel IN ('email', 'telegram', 'slack')", name="ck_workspace_delivery_channel"),)
 
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     channel: Mapped[str] = mapped_column(String(16), primary_key=True)
@@ -333,8 +333,13 @@ class FindingRow(Base):
 class NotificationBatch(Base):
     __tablename__ = "notification_batches"
     settings_workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"))
+    settings_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
-        CheckConstraint("channel IN ('email', 'telegram')", name="ck_notification_channel"),
+        CheckConstraint("channel IN ('email', 'telegram', 'slack')", name="ck_notification_channel"),
+        CheckConstraint(
+            "channel <> 'slack' OR (settings_workspace_id IS NOT NULL AND settings_version IS NOT NULL)",
+            name="ck_slack_notification_scope",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

@@ -44,7 +44,7 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
             return None
         return _condition_error(condition, node.id, "config")
     if node.type in NOTIFIER_CONFIGS:
-        if draft and not config.get("recipients"):
+        if draft and node.type != "notify_slack" and not config.get("recipients"):
             # A draft may be saved before recipients are filled in; running it is still blocked.
             config = {**config, "recipients": ["@placeholder"] if node.type == "notify_telegram" else ["draft@example.org"]}
         try:

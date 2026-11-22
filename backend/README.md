@@ -120,6 +120,14 @@ SMTP подключается к серверу из серверной конф
 
 API настроек — `GET /api/workspaces/{workspace_id}/delivery` и `PATCH /api/workspaces/{workspace_id}/delivery/{email|telegram}`. PATCH принимает `recipients`, версию `version` из GET (для новых настроек — 0) и необязательный `credentials` с `secret` и логином `username` для SMTP. Пропущенное поле оставляет реквизиты, `null` возвращает серверные. Ответы содержат версию, список получателей и признак `has_credentials`. При устаревшей версии сервер отвечает `409 DELIVERY_SETTINGS_CHANGED`. Доступ проверяется по роли владельца команды.
 
+### Сводка в Slack
+
+1. Создайте Slack App с Incoming Webhooks, добавьте webhook для нужного канала и сохраните его URL. Для первой проверки используйте отдельный тестовый канал. [Инструкция Slack](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)
+2. В CyberFlow выберите командное пространство и откройте «Настройки команды → Доставка отчётов → Slack». Укажите URL webhook и сохраните. Только владелец пространства может подключить, заменить или отключить его. Приложение хранит URL зашифрованным и показывает только статус подключения.
+3. В редакторе соедините «Объединение находок» → «Slack». Запустите сценарий и откройте результаты, чтобы увидеть статус доставки. В Slack отправляются статус, счётчики и ссылка на отчёт. Для команды задайте доступный ей `APP_BASE_URL`.
+
+Запустите воркер `python -m backend.app.notification_worker` после применения миграций. При замене webhook уже поставленные в очередь сообщения не переадресуются в новый канал. Если воркер уже начал отправку, текущая попытка может завершиться. API для Slack использует `PATCH /api/workspaces/{workspace_id}/delivery/slack` с пустым `recipients`, версией и `credentials.secret` с URL webhook. Чтобы отключить интеграцию, передайте `credentials: null`.
+
 Оба воркера должны использовать одни и те же DATABASE_URL, DATA_ENCRYPTION_KEY и настройки доставки. Пустой NOTIFY_EMAIL_RECIPIENTS блокирует почту. NOTIFY_TELEGRAM_RECIPIENTS задаёт дополнительное ограничение на чаты, если список заполнен.
 
     APP_BASE_URL=https://cyberflow.example.org

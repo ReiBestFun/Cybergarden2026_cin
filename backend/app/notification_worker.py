@@ -19,11 +19,17 @@ from .notifications.base import DeliveryError, NotifierError
 from .notifications.destinations import verified_telegram_recipients
 from .notifications.email import EmailChannel
 from .notifications.queue import ClaimedDelivery, allowed_recipients, claim_delivery, expire_deliveries, finish_delivery
+from .notifications.slack import send_slack_summary
 from .notifications.telegram import TelegramChannel
 from .schemas.credentials import CredentialValue
 from .technical_log import log_event
 
 def _send(job: ClaimedDelivery, settings: Settings, credential: CredentialValue | None) -> str | None:
+    if job.channel == "slack":
+        if credential is None:
+            raise DeliveryError("SLACK_NOT_CONFIGURED", "Подключите Slack в настройках команды.")
+        send_slack_summary(credential.secret.get_secret_value(), job.message.text, timeout=settings.notify_timeout_seconds)
+        return None
     if job.channel == "email":
         username = credential.username.get_secret_value() if credential and credential.username else settings.smtp_username
         password = credential.secret if credential else settings.smtp_password
@@ -74,7 +80,10 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
                 raise DeliveryError("WORKSPACE_DELIVERY_CHANGED", "Проект больше не принадлежит пространству этого уведомления.")
             with sessions() as db:
                 policy = db.get(WorkspaceDeliverySetting, (job.settings_workspace_id, job.channel))
-                if policy is None or job.recipient not in policy.recipients:
+                if job.channel == "slack":
+                    if policy is None or policy.version != job.settings_version or policy.secret is None:
+                        raise DeliveryError("SLACK_DESTINATION_CHANGED", "Webhook Slack изменился после постановки в очередь.")
+                elif policy is None or job.recipient not in policy.recipients:
                     raise DeliveryError("WORKSPACE_RECIPIENT_REMOVED", "Получатель удалён из настроек команды.")
                 if policy.secret is not None:
                     credential = CredentialValue(secret=policy.secret, username=policy.username)

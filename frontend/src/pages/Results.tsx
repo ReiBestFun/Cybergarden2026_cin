@@ -28,6 +28,7 @@ const DELIVERY_LABEL: Record<string, string> = {
   sent: 'отправлено', succeeded: 'отправлено', failed: 'ошибка отправки',
   partial: 'частичная отправка', unknown: 'результат неизвестен', skipped: 'пропущено', cancelled: 'отменено',
 };
+const DELIVERY_CHANNEL_LABEL: Record<string, string> = { email: 'Почта', telegram: 'Telegram', slack: 'Slack' };
 
 function findingName(f: Finding) {
   if (f.category === 'sca') {
@@ -150,7 +151,7 @@ export function Results() {
           <h3>Доставка оповещений</h3>
           {deliveries.map(([nodeId, delivery]) => (
             <section key={nodeId}>
-              <h4>{delivery.channel === 'email' ? 'Почта' : delivery.channel === 'telegram' ? 'Telegram' : nodeId}</h4>
+              <h4>{DELIVERY_CHANNEL_LABEL[delivery.channel ?? ''] ?? nodeId}</h4>
               <p>{DELIVERY_LABEL[delivery.status] ?? delivery.status}</p>
               {delivery.error && <p className="muted">{delivery.error.message}</p>}
               {delivery.recipients && (

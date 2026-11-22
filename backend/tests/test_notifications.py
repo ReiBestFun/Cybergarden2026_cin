@@ -40,7 +40,7 @@ def test_workspace_delivery_settings_hide_secrets_and_enforce_membership(api, mo
     workspace = client.post("/api/workspaces", json={"name": "Команда доставки"}).json()["id"]
     path = f"/api/workspaces/{workspace}/delivery"
     client.app.state.settings.notify_email_recipients = ["team@example.org", "second@example.org"]
-    assert client.get(path).json() == {"email": None, "telegram": None}
+    assert client.get(path).json() == {"email": None, "telegram": None, "slack": None}
     value = {"version": 0, "recipients": ["team@example.org"], "credentials": {"username": "smtp-user", "secret": "fixture-smtp-secret"}}
     changed = client.patch(path + "/email", json=value)
     assert changed.status_code == 200 and changed.json() == {"version": 1, "recipients": ["team@example.org"], "has_credentials": True}
@@ -391,6 +391,75 @@ def test_team_telegram_requires_confirmation_and_uses_workspace_token(api, teleg
     [delivery] = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"]
     assert delivery["status"] == "accepted"
     assert [json.loads(body)["chat_id"] for _, _, body in _FakeTelegram.calls] == [chat_id]
+
+
+@pytest.mark.parametrize("provider_status, rotated", [(200, False), (403, False), (302, False), (200, True)])
+def test_slack_workspace_workflow_sends_only_summary_and_preserves_destination(api, monkeypatch, provider_status, rotated):
+    client, sessions = api
+    settings = client.app.state.settings
+    team = client.post("/api/workspaces", json={"name": "Команда Slack"}).json()["id"]
+    path = f"/api/workspaces/{team}/delivery/slack"
+    webhook = "https://hooks.slack.com/services/T000FIXTURE/B000FIXTURE/fake-webhook-secret"
+    rejected = client.patch(path, json={"version": 0, "recipients": [], "credentials": {"secret": "https://example.org/services/x/y/z"}})
+    assert rejected.status_code == 422
+    configured = client.patch(path, json={"version": 0, "recipients": [], "credentials": {"secret": webhook}})
+    assert configured.status_code == 200 and configured.json()["has_credentials"]
+    assert "fake-webhook-secret" not in client.get(path.rsplit("/", 1)[0]).text
+    project = client.post("/api/projects", json={
+        "name": "Учебный проект Slack", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team,
+    }).json()["id"]
+    workflow = create_workflow(client, project, _graph(("notify_slack", {})).model_dump())
+    response = client.post(f"/api/workflows/{workflow}/runs")
+    assert response.status_code == 202
+    run_id = response.json()["id"]
+    with sessions.begin() as db:
+        db.get(ScanRun, UUID(run_id)).created_at = datetime(1980, 1, 1, tzinfo=UTC)
+    _prepare_sources(monkeypatch)
+    assert run_next(sessions, settings, allowed_repository_urls(settings.allowed_repositories))
+    if rotated:
+        client.patch(path, json={"version": 1, "recipients": [], "credentials": {
+            "secret": "https://hooks.slack.com/services/T000FIXTURE/B000OTHER/fake-other-secret",
+        }}).raise_for_status()
+    else:
+        assert client.patch(path, json={"version": 1, "recipients": []}).json()["version"] == 1
+
+    [queued] = client.get(f"/api/runs/{run_id}/report").json()["delivery"]["n0"]["recipients"]
+    with sessions.begin() as db:
+        db.get(NotificationDelivery, UUID(queued["id"])).next_attempt_at = datetime(1980, 1, 1, tzinfo=UTC)
+
+    requests = []
+
+    import io
+    from types import SimpleNamespace
+    from urllib.error import HTTPError
+    from backend.app.notifications import slack
+
+    class FixtureOpener:
+        @contextmanager
+        def open(self, request, timeout):
+            assert request.get_method() == "POST"
+            requests.append((request.full_url, json.loads(request.data)))
+            if provider_status != 200:
+                raise HTTPError(request.full_url, provider_status, "fake-provider-secret", {}, io.BytesIO())
+            yield SimpleNamespace(status=200, read=lambda size: b"ok")
+
+    def fixture_opener(proxy, redirect_handler):
+        assert redirect_handler.redirect_request(None, None, 302, "", {}, "https://example.org") is None
+        return FixtureOpener()
+
+    monkeypatch.setattr(slack.urllib.request, "build_opener", fixture_opener)
+    assert process_next(sessions, settings)
+    response = client.get(f"/api/runs/{run_id}/report")
+    [delivery] = response.json()["delivery"]["n0"]["recipients"]
+    assert "fake-webhook-secret" not in response.text and "fake-provider-secret" not in response.text
+    if rotated:
+        assert requests == [] and delivery["error_code"] == "SLACK_DESTINATION_CHANGED"
+    else:
+        [(destination, payload)] = requests
+        assert destination == webhook
+        assert f"/results?run={run_id}" in payload["text"] and "Находок: 1" in payload["text"]
+        assert "fixture-auth-83" not in payload["text"] and "App.kt" not in payload["text"]
+        assert delivery["status"] == ("accepted" if provider_status == 200 else "failed")
 
 
 @pytest.mark.parametrize("failure", [None, "repository", "delivery"])

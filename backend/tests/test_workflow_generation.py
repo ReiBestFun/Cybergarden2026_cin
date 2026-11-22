@@ -1,3 +1,5 @@
+import json
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -20,6 +22,9 @@ def _client() -> TestClient:
 def test_generation_returns_editable_graph_with_schedule_and_conditional_delivery(monkeypatch):
     def provider(request):
         assert request.url.path == "/api/chat"
+        payload = json.loads(request.content)
+        assert payload["format"] == "json"
+        assert "WorkflowPlan" in payload["messages"][0]["content"]
         answer = ModelAnswer(plan={
             "name": "Отчёт по будням", "trigger": "schedule", "scanners": ["secrets", "sca"],
             "schedule": {"frequency": "weekly", "time": "14:00", "weekdays": [0, 1, 2, 3, 4]},

@@ -13,7 +13,9 @@ class ModelError(Exception):
     pass
 
 
-def complete_json[T: BaseModel](settings: Settings, schema: type[T], *, system: str, user: str) -> T:
+def complete_json[T: BaseModel](
+    settings: Settings, schema: type[T], *, system: str, user: str, constrain_ollama_schema: bool = True,
+) -> T:
     try:
         url = urlsplit(settings.llm_base_url)
         if not url.hostname or url.username or url.password or url.query or url.fragment:
@@ -29,7 +31,8 @@ def complete_json[T: BaseModel](settings: Settings, schema: type[T], *, system: 
         headers["Authorization"] = "Bearer " + settings.llm_api_key.get_secret_value()
     native = settings.llm_provider == "ollama"
     endpoint = "/api/chat" if native else "/chat/completions"
-    schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+    response_schema = schema.model_json_schema()
+    schema_json = json.dumps(response_schema, ensure_ascii=False)
     body = {
         "model": settings.llm_model,
         "messages": [{"role": "system", "content": f"{system}\nСхема JSON-ответа:\n{schema_json}"},
@@ -37,7 +40,7 @@ def complete_json[T: BaseModel](settings: Settings, schema: type[T], *, system: 
         "stream": False,
     }
     if native:
-        body.update(format="json", think=False,
+        body.update(format=response_schema if constrain_ollama_schema else "json", think=False,
                     options={"temperature": 0, "num_predict": 1800})
     else:
         body.update(response_format={"type": "json_object"}, temperature=0, max_tokens=1800)

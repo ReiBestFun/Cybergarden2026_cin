@@ -84,7 +84,9 @@ def generate_workflow(data: GenerationRequest, settings: Settings, repository_ur
     answer = complete_json(
         settings, ModelAnswer,
         system=_SYSTEM_PROMPT,
-        user=data.description,
+        # Compiling the full workflow grammar can terminate an Ollama runner.
+        # JSON mode still validates the result against ModelAnswer in complete_json.
+        user=data.description, constrain_ollama_schema=False,
     )
     if answer.plan is None:
         raise GenerationError("Опишите учебную проверку, её запуск, сканеры и нужные уведомления.")

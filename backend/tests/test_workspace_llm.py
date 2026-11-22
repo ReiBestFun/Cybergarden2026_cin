@@ -18,6 +18,9 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch)
     client, _ = api
     team = client.post("/api/workspaces", json={"name": "Модели команды"}).json()["id"]
     path = f"/api/workspaces/{team}/llm"
+    # Existing server-wide external settings must not enable sharing for a new workspace.
+    client.app.state.settings.llm_provider = "openai_compatible"
+    client.app.state.settings.llm_base_url = "https://legacy-provider.example/v1"
     assert client.get(path).json()["provider"] == "ollama"
     calls = []
     available = False

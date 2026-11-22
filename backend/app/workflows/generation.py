@@ -1,6 +1,5 @@
 """Turn a model's interpretation into a graph with known nodes and ports."""
 
-import json
 import re
 from typing import Annotated, Literal
 
@@ -84,7 +83,7 @@ def generate_workflow(data: GenerationRequest, settings: Settings, repository_ur
     # Schema describes the model's intent. The application owns the graph topology.
     answer = complete_json(
         settings, ModelAnswer,
-        system=_SYSTEM_PROMPT + "\nСхема ответа:\n" + json.dumps(ModelAnswer.model_json_schema(), ensure_ascii=False),
+        system=_SYSTEM_PROMPT,
         user=data.description,
     )
     if answer.plan is None:

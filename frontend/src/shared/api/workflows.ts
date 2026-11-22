@@ -111,8 +111,10 @@ export async function ensureProject(workspaceId: string, repositoryUrl: string, 
 
 export const listWorkflows = (projectId: string, signal?: AbortSignal) =>
   listAll<Workflow>(`/api/projects/${projectId}/workflows`, {}, signal);
-export const generateWorkflow = (description: string, timezone: string, signal: AbortSignal) =>
-  api<GeneratedWorkflow>('/api/workflows/generate', { method: 'POST', json: { description, timezone }, signal });
+export const generateWorkflow = (description: string, timezone: string, workspaceId: string, signal: AbortSignal) =>
+  api<GeneratedWorkflow>('/api/workflows/generate?' + new URLSearchParams({ workspace_id: workspaceId }), {
+    method: 'POST', json: { description, timezone }, signal,
+  });
 export const getWorkflow = (id: string, signal?: AbortSignal) => api<Workflow>(`/api/workflows/${id}`, { signal });
 export const createWorkflow = (projectId: string, name: string, graph: ApiGraph, signal?: AbortSignal) =>
   api<Workflow>(`/api/projects/${projectId}/workflows`, { method: 'POST', json: { name, graph }, signal });

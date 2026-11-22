@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .api import auth, ci, credentials, delivery_settings, destinations, mcp_access, projects, runs, templates, workflows, workspaces
+from .api import auth, ci, credentials, delivery_settings, destinations, mcp_access, projects, runs, templates, workflows, workspace_llm, workspaces
 from .api.common import ApiError
 from .config import Settings
 from .db.session import Database, make_engine
@@ -111,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.include_router(projects.router)
     api.include_router(workspaces.router)
     api.include_router(delivery_settings.router)
+    api.include_router(workspace_llm.router)
     api.include_router(mcp_access.router)
     api.include_router(workflows.router)
     api.include_router(runs.router)

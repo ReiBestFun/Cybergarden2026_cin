@@ -19,9 +19,11 @@ from ..workflows.generation import GeneratedWorkflow, GenerationError, Generatio
 from ..workflows.scheduling import ScheduleSpecError, next_slot
 from ..workflows.schedules import apply_spec, preview, schedule_read, spec_from_settings
 from ..workflows.validation import validate_draft, validate_graph
+from ..workspace_llm import model_settings
 from .auth import CurrentUser
 from .common import ApiError, PageQuery, graph_error, normalize_repository, page
 from .projects import get_project
+from .workspaces import workspace_role
 
 router = APIRouter(tags=["workflows"])
 
@@ -50,7 +52,11 @@ def list_node_types(user: CurrentUser) -> CatalogRead:
 
 
 @router.post("/workflows/generate", response_model=GeneratedWorkflow)
-def generate_draft(data: GenerationRequest, request: Request, user: CurrentUser) -> GeneratedWorkflow:
+def generate_draft(
+    data: GenerationRequest, request: Request, user: CurrentUser, db: Database, workspace_id: UUID | None = None,
+) -> GeneratedWorkflow:
+    if workspace_id is not None:
+        workspace_role(db, workspace_id, user.id)
     urls = {normalize_repository(url.rstrip(".,;:!?")) for url in re.findall(
         r"""https://github\.com/[^\s<>()\[\]{}"'\x60]+""", data.description,
     )}
@@ -60,7 +66,7 @@ def generate_draft(data: GenerationRequest, request: Request, user: CurrentUser)
     if repository_url is not None and not is_repository_allowed(repository_url, request.app.state.allowed_repositories):
         raise ApiError(422, "REPOSITORY_NOT_ALLOWED", "Репозиторий отсутствует в списке учебных источников.")
     try:
-        return generate_workflow(data, request.app.state.settings, repository_url)
+        return generate_workflow(data, model_settings(db, workspace_id, request.app.state.settings), repository_url)
     except ModelError as error:
         raise ApiError(502, "MODEL_ERROR", str(error)) from None
     except GenerationError as error:

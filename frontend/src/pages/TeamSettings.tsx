@@ -3,6 +3,7 @@ import { useWorkspace } from '../app/workspaceContext';
 import { api, errorMessage } from '../shared/api/client';
 import type { Workspace } from '../shared/api/workspaces';
 import { WorkspaceDeliverySettings } from './WorkspaceDeliverySettings';
+import { WorkspaceModelSettings } from './WorkspaceModelSettings';
 
 type Role = Workspace['role'];
 type Member = { id: string; github_login: string; role: Role };
@@ -82,5 +83,6 @@ export function TeamSettings({ userId }: { userId: string }) {
       </div>)}
     </section>
     <WorkspaceDeliverySettings />
+    <WorkspaceModelSettings key={workspace.id} />
   </main>;
 }

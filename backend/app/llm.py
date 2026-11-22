@@ -1,5 +1,6 @@
 """Shared provider client for structured model responses."""
 
+import json
 from urllib.parse import urlsplit
 
 import httpx
@@ -28,14 +29,15 @@ def complete_json[T: BaseModel](settings: Settings, schema: type[T], *, system: 
         headers["Authorization"] = "Bearer " + settings.llm_api_key.get_secret_value()
     native = settings.llm_provider == "ollama"
     endpoint = "/api/chat" if native else "/chat/completions"
+    schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
     body = {
         "model": settings.llm_model,
-        "messages": [{"role": "system", "content": system},
+        "messages": [{"role": "system", "content": f"{system}\nСхема JSON-ответа:\n{schema_json}"},
                      {"role": "user", "content": user}],
         "stream": False,
     }
     if native:
-        body.update(format=schema.model_json_schema(), think=False,
+        body.update(format="json", think=False,
                     options={"temperature": 0, "num_predict": 1800})
     else:
         body.update(response_format={"type": "json_object"}, temperature=0, max_tokens=1800)

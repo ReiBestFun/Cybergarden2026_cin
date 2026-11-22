@@ -187,12 +187,13 @@ class GraphExecution:
             bundle = self.steps[edges[0].source].bundle
             assert bundle is not None
             try:
-                text = explain_report(bundle, self.settings)
+                settings = self.progress.llm_settings(self.settings)
+                text = explain_report(bundle, settings)
             except ReportError as error:
                 # Keep the scanner report available to downstream notifications.
                 return Step("failed", ports=("report",), bundle=bundle,
                             warning=Warning("AI_REPORT_UNAVAILABLE", str(error)))
-            return Step(ports=("report",), bundle=bundle, preview={"text": text, "model": self.settings.llm_model})
+            return Step(ports=("report",), bundle=bundle, preview={"text": text, "model": settings.llm_model})
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
 
     def _notify(self, node: Node, edges: list[Edge]) -> Step:

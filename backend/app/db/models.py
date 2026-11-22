@@ -98,6 +98,15 @@ class WorkspaceMcpToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WorkspaceLLMProfile(Base):
+    __tablename__ = "workspace_llm_profiles"
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    base_url: Mapped[str] = mapped_column(String(255))
+    model: Mapped[str] = mapped_column(String(128))
+    api_key: Mapped[str] = mapped_column(EncryptedText("workspace_llm_profiles.api_key"))
+
+
 class WorkspaceDeliverySetting(Base):
     __tablename__ = "workspace_delivery_settings"
     __table_args__ = (CheckConstraint("channel IN ('email', 'telegram', 'slack')", name="ck_workspace_delivery_channel"),)

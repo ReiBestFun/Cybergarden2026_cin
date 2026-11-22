@@ -4,6 +4,7 @@ import {
   renameTelegramDestination, sendTelegramCode, verifyTelegramDestination, type Profile, type TelegramDestination,
 } from '../shared/api/account';
 import { errorMessage } from '../shared/api/client';
+import { McpAccessSettings } from './McpAccessSettings';
 
 export function AccountProfile({ profile, onChange }: { profile: Profile; onChange: (profile: Profile) => void }) {
   const [name, setName] = useState(profile.display_name);
@@ -48,6 +49,7 @@ export function AccountProfile({ profile, onChange }: { profile: Profile; onChan
         <button className="btn primary" disabled={saving}>Сохранить профиль</button>
       </form>
       <TelegramDestinations />
+      <McpAccessSettings />
     </div>
   );
 }

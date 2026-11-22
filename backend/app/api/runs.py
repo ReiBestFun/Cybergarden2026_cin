@@ -167,23 +167,25 @@ def list_findings(run_id: UUID, db: Database, filters: Annotated[FindingFilters,
     return page(db, statement, filters.limit, filters.offset)
 
 
+def _run_summary(db: Database, run: ScanRun) -> RunSummary:
+    if run.summary is None:
+        statement = (
+            select(FindingRow.severity, func.count())
+            .where(FindingRow.run_id == run.id)
+            .group_by(FindingRow.severity)
+        )
+        counts = {severity: count for severity, count in db.execute(statement)}
+        return RunSummary(total=sum(counts.values()), high_count=counts.get("high", 0), critical_count=counts.get("critical", 0))
+    return RunSummary.model_validate(run.summary)
+
+
 @router.get("/runs/{run_id}/report", response_model=RunReportRead)
 def get_report(run_id: UUID, db: Database, user: CurrentUser, request: Request) -> RunReportRead:
     run = _get_run(run_id, db, user.id, request)
     payload = run.report or {}
-    if run.summary is None:
-        statement = (
-            select(FindingRow.severity, func.count())
-            .where(FindingRow.run_id == run_id)
-            .group_by(FindingRow.severity)
-        )
-        counts = {severity: count for severity, count in db.execute(statement)}
-        summary = RunSummary(total=sum(counts.values()), high_count=counts.get("high", 0), critical_count=counts.get("critical", 0))
-    else:
-        summary = RunSummary.model_validate(run.summary)
     delivery = (payload.get("delivery") or {}) | delivery_summary(db, run_id)
     return RunReportRead(
-        status=run.status, summary=summary, coverage=payload.get("coverage", {}),
+        status=run.status, summary=_run_summary(db, run), coverage=payload.get("coverage", {}),
         llm=payload.get("llm"), delivery=delivery or None, error=run.error,
     )
 

@@ -3,7 +3,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text,
+    Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text,
     UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -77,6 +77,25 @@ class WorkspaceMembership(Base):
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
     role: Mapped[str] = mapped_column(String(16))
+
+
+class WorkspaceMcpToken(Base):
+    __tablename__ = "workspace_mcp_tokens"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("workspace_id", "user_id"),
+            ("workspace_memberships.workspace_id", "workspace_memberships.user_id"),
+            ondelete="CASCADE",
+        ),
+        Index("ix_workspace_mcp_tokens_membership", "workspace_id", "user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    name: Mapped[str] = mapped_column(EncryptedText("workspace_mcp_tokens.name"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class WorkspaceDeliverySetting(Base):

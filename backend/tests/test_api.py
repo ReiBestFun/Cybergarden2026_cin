@@ -32,7 +32,7 @@ from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
 from backend.app.db.encryption import require_cipher
 from backend.app.notifications.destinations import telegram_chat_key
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceInvitation
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceInvitation, WorkspaceMcpToken
 from backend.app.integrations.github_actions import security_workflow
 from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
@@ -500,6 +500,81 @@ def create_workflow(client, project, graph=None):
     response = client.post(f"/api/projects/{project}/workflows", json=payload)
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def test_mcp_token_is_read_only_workspace_scoped_and_revocable(api):
+    client, sessions = api
+    personal = client.get("/api/workspaces").json()["items"][0]["id"]
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph())
+    run = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+    team = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    other_project = client.post("/api/projects", json={
+        "workspace_id": team, "name": "Другой проект", "repository_url": "https://github.com/TBagirov/training",
+    }).json()["id"]
+    other_workflow = create_workflow(client, other_project, analysis_graph())
+    other_run = client.post(f"/api/workflows/{other_workflow}/runs").json()["id"]
+
+    path = f"/api/workspaces/{personal}/mcp-tokens"
+    issued = client.post(path, json={"name": "Локальный MCP"})
+    assert issued.status_code == 201
+    access = issued.json()
+    assert access["token"] not in client.get(path).text
+    with sessions.begin() as db:
+        assert db.get(WorkspaceMcpToken, UUID(access["id"])).token_hash != access["token"]
+        scanned = db.scalar(select(NodeRun).where(NodeRun.run_id == UUID(run), NodeRun.type == "scan_secrets"))
+        db.add(FindingRow(
+            run_id=UUID(run), node_run_id=scanned.id, rule_id="fixture.rule", category="sast", severity="high",
+            title="Синтетическая находка", description="private-description", remediation="private-remediation",
+            path="Demo.kt", line=3, end_line=3, evidence="private-evidence",
+            details={"advisory_id": "FIXTURE-1", "other": "private-metadata"},
+        ))
+    assert client.get("/api/mcp/runs").status_code == 401
+    headers = {"Authorization": f"Bearer {access['token']}"}
+    with TestClient(client.app, base_url=ORIGIN) as mcp_client:
+        listings = mcp_client.get("/api/mcp/runs", headers=headers).json()
+        assert [item["id"] for item in listings["items"]] == [run]
+        assert mcp_client.get(f"/api/mcp/runs/{run}/summary", headers=headers).json()["status"] == "queued"
+        findings = mcp_client.get(f"/api/mcp/runs/{run}/findings", headers=headers)
+        [finding] = findings.json()["items"]
+        assert finding["advisory_id"] == "FIXTURE-1" and "private-" not in findings.text
+        assert set(finding) == {"id", "category", "rule_id", "severity", "title", "path", "line", "end_line", "advisory_id"}
+        assert mcp_client.get(f"/api/mcp/runs/{other_run}/summary", headers=headers).status_code == 404
+        assert mcp_client.get(f"/api/mcp/runs/{other_run}/findings", headers=headers).status_code == 404
+        assert mcp_client.get("/api/me", headers=headers).status_code == 401
+        assert mcp_client.post(f"/api/workflows/{workflow}/runs", headers=headers).status_code == 401
+        draft_path = f"/api/workspaces/{personal}/workflow-drafts/validate"
+        assert mcp_client.post(draft_path, headers=headers, json=analysis_graph()).status_code == 401
+        assert client.post(draft_path, json=analysis_graph()).json() == analysis_graph()
+        assert len(client.get(f"/api/projects/{project}/workflows").json()["items"]) == 1
+        assert client.delete(f"{path}/{access['id']}").status_code == 204
+        assert mcp_client.get(f"/api/mcp/runs/{run}/findings", headers=headers).status_code == 401
+        expiring = client.post(path, json={"name": "Истекает"}).json()
+        with sessions.begin() as db:
+            db.get(WorkspaceMcpToken, UUID(expiring["id"])).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        assert mcp_client.get("/api/mcp/runs", headers={"Authorization": f"Bearer {expiring['token']}"}).status_code == 401
+
+
+def test_removing_a_member_invalidates_old_mcp_tokens_even_after_rejoin(api, monkeypatch):
+    owner, _ = api
+    team = owner.post("/api/workspaces", json={"name": "Команда MCP"}).json()["id"]
+    base = f"/api/workspaces/{team}"
+
+    def invitation():
+        return owner.post(f"{base}/invitations", json={"role": "member"}).json()["token"]
+
+    with TestClient(owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as member:
+        login(member, monkeypatch, randbits(48) + 1)
+        member_id = member.get("/api/me").json()["id"]
+        assert member.post(f"{base}/join", json={"token": invitation()}).status_code == 200
+        access = member.post(f"{base}/mcp-tokens", json={"name": "Участник"}).json()
+        headers = {"Authorization": f"Bearer {access['token']}"}
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 200
+        assert owner.get(f"{base}/mcp-tokens").json() == []
+        assert owner.delete(f"{base}/members/{member_id}").status_code == 204
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 401
+        assert member.post(f"{base}/join", json={"token": invitation()}).status_code == 200
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 401
 
 
 def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypatch):

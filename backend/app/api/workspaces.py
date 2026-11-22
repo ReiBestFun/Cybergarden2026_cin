@@ -119,11 +119,13 @@ def invitations(workspace_id: UUID, user: CurrentUser, db: Database):
 
 @router.delete("/workspaces/{workspace_id}/invitations/{invitation_id}", status_code=204)
 def revoke(workspace_id: UUID, invitation_id: UUID, user: CurrentUser, db: Database) -> Response:
-    audit_action(db, workspace_id, user.id, "invitation.revoke")
+    audit = audit_action(db, workspace_id, user.id, "invitation.revoke")
     require_team_owner(db, workspace_id, user.id)
-    db.execute(delete(WorkspaceInvitation).where(
+    deleted = db.scalar(delete(WorkspaceInvitation).where(
         WorkspaceInvitation.workspace_id == workspace_id, WorkspaceInvitation.id == invitation_id,
-    ))
+    ).returning(WorkspaceInvitation.id))
+    if deleted is None:
+        audit.result = "unchanged"
     db.commit()
     return Response(status_code=204)
 

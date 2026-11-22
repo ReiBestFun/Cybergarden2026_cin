@@ -101,11 +101,13 @@ def issue_token(workspace_id: UUID, data: TokenCreate, user: CurrentUser, db: Da
 
 @router.delete("/workspaces/{workspace_id}/mcp-tokens/{token_id}", status_code=204)
 def revoke_token(workspace_id: UUID, token_id: UUID, user: CurrentUser, db: Database) -> Response:
-    audit_action(db, workspace_id, user.id, "mcp.revoke")
+    audit = audit_action(db, workspace_id, user.id, "mcp.revoke")
     workspace_role(db, workspace_id, user.id)
-    db.execute(delete(WorkspaceMcpToken).where(
+    deleted = db.scalar(delete(WorkspaceMcpToken).where(
         WorkspaceMcpToken.id == token_id, WorkspaceMcpToken.workspace_id == workspace_id, WorkspaceMcpToken.user_id == user.id,
-    ))
+    ).returning(WorkspaceMcpToken.id))
+    if deleted is None:
+        audit.result = "unchanged"
     db.commit()
     return Response(status_code=204)
 

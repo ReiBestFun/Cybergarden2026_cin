@@ -696,3 +696,7 @@ def test_delivery_requires_finished_report_and_cancels_failed_run(api, caplog, m
     [recovered] = [event for event in events if event["action"] == "delivery.recover" and event["run_id"] == str(run_id)]
     assert recovered["result"] == "cancelled"
     assert recovered["delivery_id"] == report["delivery"]["n0"]["recipients"][0]["id"]
+    workspace = client.get("/api/me").raise_for_status().json()["id"]
+    rows = client.get(f"/api/workspaces/{workspace}/logs", params={"run_id": str(run_id)}).raise_for_status().json()["items"]
+    recovery = next(row for row in rows if row["action"] == "delivery.recover")
+    assert recovery["result"] == "cancelled" and recovery["delivery_id"] == recovered["delivery_id"]

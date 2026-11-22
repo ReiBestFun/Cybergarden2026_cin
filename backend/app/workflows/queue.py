@@ -40,7 +40,7 @@ def _enqueue(
     )
     db.add(run)
     db.flush()
-    diagnostic(db, run, "run.enqueue", "queued")
+    diagnostic(db, run.id, "run.enqueue", "queued")
     db.add_all([
         NodeRun(run_id=run.id, node_id=node.id, type=node.type, status="pending")
         for node in graph.nodes
@@ -72,7 +72,7 @@ def claim_next(db: Session) -> ClaimedRun | None:
     run.claim_token = token
     run.started_at = now
     run.heartbeat_at = now
-    diagnostic(db, run, "run.claim", "running")
+    diagnostic(db, run.id, "run.claim", "running")
     return ClaimedRun(run.id, run.project_id, token, run.trigger, run.graph_snapshot, run.source_snapshot)
 
 
@@ -97,9 +97,9 @@ def fail_run(db: Session, run: ScanRun, code: str, message: str) -> FailedRun:
             .values(status=status, finished_at=now, error=error).returning(NodeRun.id, NodeRun.type)
         )
         nodes.extend((node_id, node_type, status) for node_id, node_type in rows)
-    diagnostic(db, run, "run.finish", "failed")
+    diagnostic(db, run.id, "run.finish", "failed")
     for node_id, _, status in nodes:
-        diagnostic(db, run, "node.finish", status, node_id)
+        diagnostic(db, run.id, "node.finish", status, node_id)
     return FailedRun(run.id, nodes)
 
 

@@ -37,6 +37,7 @@ def test_destinations_and_retention_are_scoped_by_kind_and_workspace(api, tmp_pa
 
     client, sessions = api
     settings = client.app.state.settings
+    (tmp_path / ".cyberflow-destination").write_text("archive\n", encoding="ascii")
     settings.log_destinations = {"archive": tmp_path}
     teams = [client.post("/api/workspaces", json={"name": name}).json()["id"] for name in ("A", "B")]
     paths = [f"/api/workspaces/{team}/logs" for team in teams]
@@ -45,7 +46,9 @@ def test_destinations_and_retention_are_scoped_by_kind_and_workspace(api, tmp_pa
     assert (first["policy"]["diagnostic_days"], first["policy"]["audit_days"]) == (14, 90)
     policy = {**first["policy"], "destination": "archive", "audit_days": 3, "diagnostic_days": 1}
     client.put(paths[0] + "/policy", json=policy).raise_for_status()
-    assert client.get(paths[0] + "/policy").json()["policy"] == policy
+    saved = client.get(paths[0] + "/policy").json()["policy"]
+    assert saved == {**policy, "version": 1}
+    assert client.put(paths[0] + "/policy", json=policy).status_code == 409
     assert client.put(paths[0] + "/policy", json={**policy, "destination": "https://invalid.test"}).status_code == 422
 
     for team in teams:
@@ -94,17 +97,18 @@ def test_independent_permissions_and_redaction(api, monkeypatch, caplog, capfd):
     client.put(team_path + "/llm", json={"provider": "ollama"}).raise_for_status()
     client.post("/api/templates", json={"name": "Общий шаблон", "workspace_id": team, "workflow_id": workflow}).raise_for_status()
     issued = client.post(team_path + "/mcp-tokens", json={"name": secret}).raise_for_status().json()
-    client.delete(team_path + "/mcp-tokens/" + issued["id"]).raise_for_status()
+    for _ in range(2):
+        client.delete(team_path + "/mcp-tokens/" + issued["id"]).raise_for_status()
     invitation = client.post(team_path + "/invitations", json={"role": "member"}).json()
     with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as member:
         login(member, monkeypatch, randbits(48) + 1)
         member.post(team_path + "/join", json={"token": invitation["token"]}).raise_for_status()
         member_id = member.get("/api/me").json()["id"]
         client.patch(team_path + "/members/" + member_id, json={"role": "member"}).raise_for_status()
-        original = client.get(path + "/policy").json()["policy"]
         for permission in ("view", "export", "manage"):
-            policy = {**original, "member_" + permission: True}
-            client.put(path + "/policy", json=policy).raise_for_status()
+            current = client.get(path + "/policy").raise_for_status().json()["policy"]
+            rights = {"member_" + right: right == permission for right in ("view", "export", "manage")}
+            policy = client.put(path + "/policy", json={**current, **rights}).raise_for_status().json()["policy"]
             assert member.get(path).status_code == (200 if permission == "view" else 403)
             assert member.get(path + "/export").status_code == (200 if permission == "export" else 403)
             assert member.put(path + "/policy", json=policy).status_code == (200 if permission == "manage" else 403)
@@ -122,9 +126,52 @@ def test_independent_permissions_and_redaction(api, monkeypatch, caplog, capfd):
             "mcp.issue", "mcp.revoke", "logs.policy", "logs.export"} <= {
         row["action"] for row in exported.json() if row["result"] == "succeeded"
     }
+    assert any(row["action"] == "mcp.revoke" and row["result"] == "unchanged" for row in exported.json())
     with sessions() as db:
         stored = str(db.scalars(text("SELECT row_to_json(entry)::text FROM workspace_logs AS entry WHERE workspace_id=:team"),
                                 {"team": UUID(team)}).all())
-    console = caplog.text + capfd.readouterr().err
+    captured = capfd.readouterr()
+    console = caplog.text + captured.out + captured.err
     for marker in (secret, issued["token"], invitation["token"]):
         assert marker not in stored and marker not in console and marker not in exported.text
+
+
+def test_unmounted_archive_and_one_broken_workspace_do_not_lose_records(api, tmp_path):
+    client, sessions = api
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / ".cyberflow-destination").write_text("shared", encoding="ascii")
+    settings = client.app.state.settings
+    settings.log_destinations = {"shared": mount}
+    teams = [client.post("/api/workspaces", json={"name": name}).json()["id"] for name in ("Первая", "Вторая")]
+    for team in teams:
+        policy = f"/api/workspaces/{team}/logs/policy"
+        defaults = client.get(policy).json()["policy"]
+        client.put(policy, json={**defaults, "destination": "shared", "audit_days": 1}).raise_for_status()
+
+    # A non-directory at the first team's path must not block the next team.
+    obstacle = mount / teams[0]
+    obstacle.touch()
+    now = datetime.now(UTC)
+    maintain_logs(sessions, settings, now)
+    assert len(list((mount / teams[1]).glob("*.json"))) == 1
+    obstacle.unlink()
+    maintain_logs(sessions, settings, now + timedelta(minutes=6))
+    assert len(list((mount / teams[0]).glob("*.json"))) == 1
+
+    offline = tmp_path / "detached"
+    mount.rename(offline)
+    mount.mkdir()
+    (mount / ".cyberflow-destination").write_text("wrong-volume", encoding="ascii")
+    expiry = now + timedelta(days=2)
+    maintain_logs(sessions, settings, expiry)
+    assert len(list(offline.rglob("*.json"))) == 2
+    assert not list(mount.rglob("*.json"))
+    with sessions() as db:
+        assert db.scalar(text("SELECT count(*) FROM workspace_logs WHERE destination='shared'")) == 2
+    mount.rename(tmp_path / "empty-mountpoint")
+    offline.rename(mount)
+    maintain_logs(sessions, settings, expiry)
+    assert not list(mount.rglob("*.json"))
+    with sessions() as db:
+        assert db.scalar(text("SELECT count(*) FROM workspace_logs WHERE destination='shared'")) == 0

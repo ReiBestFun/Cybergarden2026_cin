@@ -13,7 +13,7 @@ from .analyzers.models import ScanError
 from .config import Settings
 from .credentials import resolve_credential
 from .db.encryption import check_storage_key
-from .db.models import ScanRun, WorkspaceDeliverySetting
+from .db.models import WorkspaceDeliverySetting
 from .db.session import make_engine
 from .notifications.base import DeliveryError, NotifierError
 from .notifications.destinations import verified_telegram_recipients
@@ -53,7 +53,11 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
     with sessions.begin() as db:
         now = datetime.now(UTC)
         recovered = expire_deliveries(db, now)
+        for delivery in recovered:
+            diagnostic(db, delivery.run_id, "delivery.recover", delivery.status, delivery.node_run_id, delivery.id)
         job = claim_delivery(db, now, lease_seconds=max(60, settings.notify_timeout_seconds * 12))
+        if job is not None:
+            diagnostic(db, job.run_id, "delivery.claim", "sending", job.node_run_id, job.id)
         unverified = job is not None and job.settings_workspace_id is None and job.channel == "telegram" and not verified_telegram_recipients(
             db, job.owner_id, [job.recipient],
         )
@@ -104,7 +108,7 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
     with sessions.begin() as db:
         status = finish_delivery(db, job, provider_id=provider_id, error=error, max_attempts=settings.notify_max_attempts)
         if status is not None:
-            diagnostic(db, db.get(ScanRun, job.run_id), "delivery.finish", status, job.node_run_id)
+            diagnostic(db, job.run_id, "delivery.finish", status, job.node_run_id, job.id)
     level = logging.WARNING if status is None or error is not None else logging.INFO
     log_event("notification_worker", "delivery.finish", status or "claim_lost", level=level,
               run_id=job.run_id, node_run_id=job.node_run_id, delivery_id=job.id, phase=job.phase)

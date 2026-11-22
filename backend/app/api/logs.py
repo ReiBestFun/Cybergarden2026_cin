@@ -2,20 +2,25 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db.models import Project, ScanRun, Workspace, WorkspaceLog, WorkspaceLogPolicy
 from ..db.session import Database
 from ..db.workspaces import project_access
 from ..schemas.contracts import Page, ReadModel
-from ..workspace_logs import LogPolicy, LogRecord, audit_action, policy_for
+from ..workspace_logs import LogPolicy, LogRecord, audit_action, expires_at, policy_for
 from .auth import CurrentUser
-from .common import ApiError, page
+from .common import ApiError, Pagination, page
 from .workspaces import workspace_role
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/logs", tags=["workspace logs"])
 Kind = Literal["audit", "diagnostic"]
+
+
+class LogFilters(Pagination):
+    kind: Kind | None = None
+    run_id: UUID | None = None
 
 
 class Permissions(ReadModel):
@@ -63,7 +68,9 @@ def set_policy(workspace_id: UUID, data: LogPolicy, user: CurrentUser, db: Datab
         _require(settings.permissions.grant)
     if data.destination not in settings.destinations:
         raise ApiError(422, "UNKNOWN_LOG_DESTINATION", "Выберите подключённое оператором хранилище.")
-    db.merge(WorkspaceLogPolicy(workspace_id=workspace_id, **data.model_dump()))
+    if data.version != settings.policy.version:
+        raise ApiError(409, "LOG_POLICY_CHANGED", "Политика изменилась. Обновите страницу перед сохранением.")
+    db.merge(WorkspaceLogPolicy(workspace_id=workspace_id, **data.model_dump(exclude={"version"}), version=data.version + 1))
     db.flush()
     db.commit()
     return _settings(db, workspace_id, user.id, request)
@@ -73,8 +80,8 @@ def _records(db: Session, workspace_id: UUID, user_id: UUID, kind: Kind | None, 
     visible_runs = select(ScanRun.id).join(Project, Project.id == ScanRun.project_id).where(
         Project.workspace_id == workspace_id, project_access(user_id),
     )
-    query = select(WorkspaceLog).where(
-        WorkspaceLog.workspace_id == workspace_id,
+    query = select(WorkspaceLog).outerjoin(WorkspaceLogPolicy, WorkspaceLogPolicy.workspace_id == WorkspaceLog.workspace_id).where(
+        WorkspaceLog.workspace_id == workspace_id, expires_at() > func.statement_timestamp(),
         or_(WorkspaceLog.kind == "audit", WorkspaceLog.run_id.in_(visible_runs)),
     )
     if run_id is not None:
@@ -88,10 +95,9 @@ def _records(db: Session, workspace_id: UUID, user_id: UUID, kind: Kind | None, 
 
 @router.get("", response_model=Page[LogRecord])
 def list_logs(workspace_id: UUID, user: CurrentUser, db: Database, request: Request,
-              kind: Kind | None = None, run_id: UUID | None = None,
-              limit: Annotated[int, Query(ge=1, le=200)] = 50, offset: Annotated[int, Query(ge=0)] = 0):
+              filters: Annotated[LogFilters, Query()]):
     _require(_settings(db, workspace_id, user.id, request).permissions.view)
-    return page(db, _records(db, workspace_id, user.id, kind, run_id), limit, offset)
+    return page(db, _records(db, workspace_id, user.id, filters.kind, filters.run_id), filters.limit, filters.offset)
 
 
 @router.get("/export", response_model=list[LogRecord])

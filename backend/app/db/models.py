@@ -131,6 +131,7 @@ class WorkspaceLogPolicy(Base):
     member_view: Mapped[bool]
     member_export: Mapped[bool]
     member_manage: Mapped[bool]
+    version: Mapped[int] = mapped_column(server_default=text("0"))
 
 
 class WorkspaceLog(Base):
@@ -147,6 +148,8 @@ class WorkspaceLog(Base):
     run_id: Mapped[UUID | None] = mapped_column(index=True)
     node_run_id: Mapped[UUID | None]
     destination: Mapped[str] = mapped_column(String(48))
+    delivery_id: Mapped[UUID | None]
+    archive_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived: Mapped[bool] = mapped_column(server_default=text("false"))
 
 

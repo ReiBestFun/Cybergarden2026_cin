@@ -4,7 +4,7 @@ import { useWorkspace } from '../app/workspaceContext';
 import { api, apiFile, errorMessage } from '../shared/api/client';
 
 type Policy = {
-  destination: string; audit_days: number; diagnostic_days: number;
+  version: number; destination: string; audit_days: number; diagnostic_days: number;
   member_view: boolean; member_export: boolean; member_manage: boolean;
 };
 type Settings = { policy: Policy; permissions: { view: boolean; export: boolean; manage: boolean; grant: boolean }; destinations: string[] };
@@ -18,11 +18,13 @@ const actions: Record<string, string> = {
   'llm.configure': 'Настройка модели', 'mcp.issue': 'Выпуск токена MCP', 'mcp.revoke': 'Отзыв токена MCP',
   'logs.policy': 'Изменение политики журналов', 'logs.export': 'Экспорт журнала', 'run.enqueue': 'Добавление запуска в очередь',
   'run.claim': 'Начало запуска', 'run.finish': 'Завершение запуска', 'node.start': 'Начало узла', 'node.finish': 'Завершение узла',
-  'delivery.finish': 'Доставка уведомления',
+  'delivery.enqueue': 'Постановка письма или сообщения в очередь', 'delivery.claim': 'Отправка уведомления',
+  'delivery.recover': 'Восстановление доставки', 'delivery.finish': 'Доставка уведомления',
 };
 const results: Record<string, string> = {
   succeeded: 'Успешно', denied: 'Отказано', failed: 'Ошибка', running: 'Выполняется', queued: 'В очереди',
   partial: 'Частично', skipped: 'Пропущено', accepted: 'Принято', unknown: 'Неизвестно',
+  unchanged: 'Без изменений', cancelled: 'Отменено', sending: 'Отправляется',
 };
 const memberRights = { member_view: 'Просматривать', member_export: 'Экспортировать', member_manage: 'Менять политику' } as const;
 

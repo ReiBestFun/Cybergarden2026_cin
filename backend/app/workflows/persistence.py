@@ -85,7 +85,7 @@ class RunProgress:
             run.heartbeat_at = now
             node.status = "running"
             node.started_at = now
-            diagnostic(db, run, "node.start", "running", node.id)
+            diagnostic(db, run.id, "node.start", "running", node.id)
             node.input_preview = inputs
             node_run_id = node.id
             node_type = node.type
@@ -119,7 +119,7 @@ class RunProgress:
                 node.input_preview = input_preview
             node.error = error_payload(warning)
             node.finished_at = now
-            diagnostic(db, run, "node.finish", status, node.id)
+            diagnostic(db, run.id, "node.finish", status, node.id)
             node_run_id = node.id
             node_type = node.type
             if notification is not None:
@@ -127,6 +127,8 @@ class RunProgress:
                 if owner_id is None:
                     raise ClaimLost
                 deliveries = enqueue_notification(db, node, notification, owner_id)
+                for delivery_id, delivery_status in deliveries:
+                    diagnostic(db, run.id, "delivery.enqueue", delivery_status, node.id, delivery_id)
             for finding in findings:
                 details = dict(finding.metadata)
                 if finding.verification is not None:
@@ -149,7 +151,7 @@ class RunProgress:
         with self.sessions.begin() as db:
             run = self._lock(db)
             run.status = status
-            diagnostic(db, run, "run.finish", status)
+            diagnostic(db, run.id, "run.finish", status)
             run.summary = summary
             run.report = report
             run.error = error_payload(warning)

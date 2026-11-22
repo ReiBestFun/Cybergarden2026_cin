@@ -175,3 +175,26 @@ def test_unmounted_archive_and_one_broken_workspace_do_not_lose_records(api, tmp
     assert not list(mount.rglob("*.json"))
     with sessions() as db:
         assert db.scalar(text("SELECT count(*) FROM workspace_logs WHERE destination='shared'")) == 0
+
+
+def test_ready_workspace_progresses_past_a_full_batch_of_old_archive_retries(api, tmp_path):
+    client, sessions = api
+    settings = client.app.state.settings
+    settings.log_destinations = {"shared": tmp_path}
+    (tmp_path / ".cyberflow-destination").write_text("shared", encoding="ascii")
+    teams = [client.post("/api/workspaces", json={"name": n}).json()["id"] for n in ("Сбой", "Очередь")]
+    now = datetime.now(UTC)
+    with sessions.begin() as db:
+        # A previous tick delayed a full batch from the unavailable first workspace.
+        db.execute(text("""
+            INSERT INTO workspace_logs (id, workspace_id, at, kind, action, result, destination, archive_retry_at)
+            SELECT gen_random_uuid(), :team, :at, 'audit', 'logs.export', 'succeeded', 'shared', :retry
+            FROM generate_series(1, 500)
+        """), {"team": UUID(teams[0]), "at": now - timedelta(hours=2), "retry": now - timedelta(minutes=1)})
+        db.execute(text("""
+            INSERT INTO workspace_logs (id, workspace_id, at, kind, action, result, destination)
+            VALUES (gen_random_uuid(), :team, :at, 'audit', 'logs.policy', 'succeeded', 'shared')
+        """), {"team": UUID(teams[1]), "at": now - timedelta(minutes=10)})
+    (tmp_path / teams[0]).touch()
+    maintain_logs(sessions, settings, now)
+    assert len(list((tmp_path / teams[1]).glob("*.json"))) == 1

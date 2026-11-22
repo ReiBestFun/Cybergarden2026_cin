@@ -6,7 +6,7 @@ from contextlib import contextmanager, nullcontext, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
@@ -73,20 +73,23 @@ def _process_batch(db: Session, alias: str, root: int | None, now: datetime) -> 
         WorkspaceLogPolicy, WorkspaceLogPolicy.workspace_id == WorkspaceLog.workspace_id,
     ).where(WorkspaceLog.destination == alias, needs_work,
             or_(WorkspaceLog.archive_retry_at.is_(None), WorkspaceLog.archive_retry_at <= now))
-        .order_by(WorkspaceLog.at, WorkspaceLog.id).limit(500)
+        .order_by(func.coalesce(WorkspaceLog.archive_retry_at, WorkspaceLog.at), WorkspaceLog.id).limit(500)
         .with_for_update(of=WorkspaceLog, skip_locked=True))
+    failures = 0
     for row, is_expired in rows:
         if root is not None:
             try:
                 _write_or_expire(root, row, is_expired)
             except OSError:
                 row.archive_retry_at = now + timedelta(minutes=5)
-                log_event("queue_worker", "logs.archive", "failed", level=logging.WARNING)
+                failures += 1
                 continue
             row.archived = True
             row.archive_retry_at = None
         if is_expired:
             db.delete(row)
+    if failures:
+        log_event("queue_worker", "logs.archive", "failed", level=logging.WARNING, count=failures)
 
 
 def maintain_logs(sessions: sessionmaker[Session], settings: Settings, now: datetime | None = None) -> None:

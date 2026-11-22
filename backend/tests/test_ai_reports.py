@@ -46,6 +46,21 @@ def test_provider_contract_and_grounding(monkeypatch, failure):
         assert "private/path.kt:13" in result and "Смените пароль." in result
 
 
+@pytest.mark.parametrize(("url", "provider", "key", "permitted"), [
+    ("http://ollama:11434", "ollama", "", True),
+    ("http://ollama:11434", "ollama", "secret", False),
+    ("http://ollama:11434", "openai_compatible", "", False),
+    ("http://ollama.example:11434", "ollama", "", False),
+])
+def test_compose_ollama_address(url, provider, key, permitted):
+    settings = Settings(_env_file=None, llm_base_url=url, llm_provider=provider, llm_api_key=key)
+    if permitted:
+        assert llm._provider_headers(settings) == {}
+    else:
+        with pytest.raises(llm.ModelError, match="HTTPS"):
+            llm._provider_headers(settings)
+
+
 @pytest.mark.parametrize("available", [True, False])
 def test_ai_node_passes_original_bundle_to_notification(monkeypatch, available):
     def generate(bundle, settings):

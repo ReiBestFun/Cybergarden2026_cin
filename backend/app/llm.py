@@ -32,14 +32,14 @@ def _provider_headers(settings: Settings) -> dict[str, str]:
             raise ValueError
     except ValueError:
         raise ModelError("Проверьте базовый URL модели в настройках воркера.") from None
-    if url.scheme != "https" and not (
+    api_key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else ""
+    compose_ollama = (settings.llm_provider == "ollama" and not api_key
+                      and settings.llm_base_url.rstrip("/") == "http://ollama:11434")
+    if url.scheme != "https" and not compose_ollama and not (
         url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
     ):
         raise ModelError("Для удалённой модели требуется HTTPS.")
-    headers = {}
-    if settings.llm_api_key and settings.llm_api_key.get_secret_value():
-        headers["Authorization"] = "Bearer " + settings.llm_api_key.get_secret_value()
-    return headers
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
 
 
 def installed_ollama_models(settings: Settings) -> list[str]:

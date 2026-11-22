@@ -63,6 +63,39 @@ def test_generation_returns_editable_graph_with_schedule_and_conditional_deliver
     assert validate_graph(graph, expected_trigger="schedule_trigger") == []
 
 
+def test_generation_connects_all_catalog_analyzers(monkeypatch):
+    scanners = ["secrets", "sca", "sast", "spring_config", "password_hashing", "sensitive_logging"]
+    description = ("Вручную запусти все анализаторы, включая конфигурацию Spring Boot, "
+                   "хеширование паролей и утечки в логи.")
+
+    def provider(request):
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        guide, schema = prompt.split("Схема JSON-ответа:\n")
+        assert all(f"- {scanner}:" in guide for scanner in scanners)
+        field = json.loads(schema)["$defs"]["WorkflowPlan"]["properties"]["scanners"]
+        assert set(field["items"]["enum"]) == set(scanners) and field["maxItems"] == len(scanners)
+        answer = {"plan": {"name": "Все анализаторы", "trigger": "manual", "scanners": scanners}}
+        return httpx.Response(200, json={"message": {"content": json.dumps(answer)}})
+
+    client_class = httpx.Client
+    monkeypatch.setattr(llm.httpx, "Client", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(provider), **kwargs,
+    ))
+    with _client() as client:
+        response = client.post("/api/workflows/generate", json={"description": description, "timezone": "UTC"})
+    assert response.status_code == 200, response.text
+    graph = Graph.model_validate(response.json()["graph"])
+    nodes = {node.id: node.type for node in graph.nodes}
+    scans = {kind for kind in nodes.values() if kind.startswith("scan_")}
+    assert scans == {f"scan_{scanner}" for scanner in scanners}
+    assert {(nodes[edge.source], nodes[edge.target]) for edge in graph.edges} == {
+        ("manual_trigger", "repository"),
+        *(("repository", scan) for scan in scans),
+        *((scan, "merge_findings") for scan in scans),
+    }
+    assert validate_graph(graph, expected_trigger="manual_trigger") == []
+
+
 def test_generation_rejects_repository_outside_allowlist_before_calling_model(monkeypatch):
     def unexpected(*args, **kwargs):
         raise AssertionError("Provider should not be called")

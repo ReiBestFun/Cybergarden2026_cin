@@ -3,8 +3,9 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import AfterValidator, Field, StringConstraints, WithJsonSchema
 
+from ..analyzers.registry import SCANNERS, SCANNER_NODES
 from ..config import Settings
 from ..llm import complete_json
 from ..nodes.catalog import CATALOG, CiGateConfig, ConditionConfig
@@ -25,10 +26,21 @@ class NotificationPlan(Input):
     recipients: list[str] = Field(default_factory=list, max_length=50)
 
 
+def _known_scanner(name: str) -> str:
+    if name not in SCANNERS:
+        raise ValueError("Тип анализатора отсутствует в каталоге.")
+    return name
+
+
+ScannerName = Annotated[str, AfterValidator(_known_scanner), WithJsonSchema({
+    "type": "string", "enum": list(SCANNERS),
+})]
+
+
 class WorkflowPlan(Input):
     name: Name
     trigger: Literal["manual", "schedule", "ci"]
-    scanners: list[Literal["secrets", "sca", "sast"]] = Field(min_length=1, max_length=3)
+    scanners: list[ScannerName] = Field(min_length=1, max_length=len(SCANNERS))
     schedule: ScheduleSettings | None = None
     ci_branch: Ref | None = None
     ci_threshold: CiThreshold = CiGateConfig().threshold
@@ -53,12 +65,18 @@ class GenerationError(Exception):
     pass
 
 
+_SCANNER_GUIDE = "\n".join(
+    f"- {name}: {CATALOG[kind].label}. {CATALOG[kind].description}"
+    for kind, name in SCANNER_NODES.items()
+)
+
 _SYSTEM_PROMPT = """Ты переводишь описание защитной проверки собственного учебного проекта в план CyberFlow.
 Ответь только JSON: {"plan":{"name":"...","trigger":"manual","scanners":["secrets"]}}.
 Дай сценарию короткое название на языке пользователя.
 Заполняй только поддерживаемые поля. Если запрос нельзя выразить средствами приложения, верни {"plan":null}.
 Триггеры: manual — разовый запуск, schedule — периодический, ci — GitHub Actions.
-Сканеры: secrets — поиск секретов, sca — зависимости, sast — статический анализ. Если пользователь просит общую проверку, выбери все три.
+В scanners перечисли идентификаторы запрошенных анализаторов из каталога ниже. Для явно названной специализированной проверки используй её отдельный идентификатор.
+Если запрошены все анализаторы, перечисли весь каталог. Для общей проверки без уточнений выбери secrets, sca и sast.
 Для schedule укажи schedule с frequency (daily, weekly, monthly, cron), time в формате HH:MM,
 weekdays (0 — понедельник, 6 — воскресенье), day_of_month или cron, смотря какие поля нужны.
 Укажи timezone только если пользователь назвал часовой пояс. «По Москве» = Europe/Moscow.
@@ -71,6 +89,7 @@ weekdays (0 — понедельник, 6 — воскресенье), day_of_mo
 Если есть условие, примени его к соответствующим уведомлениям. Добавляй ai_report=true только по явной просьбе об AI-пояснении.
 Заполняй recipients только явно указанными адресами или Telegram chat_id / @username. Не подставляй выдуманных получателей.
 Расположение, связи и адрес репозитория определяет само приложение."""
+_SYSTEM_PROMPT += "\nКаталог анализаторов:\n" + _SCANNER_GUIDE
 
 
 def _recipient_mentioned(recipient: str, description: str) -> bool:

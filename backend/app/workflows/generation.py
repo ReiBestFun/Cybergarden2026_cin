@@ -109,10 +109,13 @@ def generate_workflow(data: GenerationRequest, settings: Settings, repository_ur
     )
     if answer.plan is None:
         raise GenerationError("Опишите учебную проверку, её запуск, сканеры и нужные уведомления.")
-    return _build_workflow(answer.plan, data, repository_url)
+    return build_workflow(answer.plan, description=data.description, timezone=data.timezone, repository_url=repository_url)
 
 
-def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url: str | None) -> GeneratedWorkflow:
+def build_workflow(
+    plan: WorkflowPlan, *, description: str = "", timezone: str = "UTC",
+    repository_url: str | None = None, source: Literal["repository", "local_archive"] = "repository",
+) -> GeneratedWorkflow:
     graph = Graph()
     issues: list[Issue] = []
 
@@ -128,13 +131,13 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
 
     trigger_config = {"branch": plan.ci_branch} if plan.trigger == "ci" and plan.ci_branch else {}
     trigger = add(f"{plan.trigger}_trigger", 0, **trigger_config)
-    repository = add("repository", 1)
+    source_id = add(source, 1)
     merged = add("merge_findings", 3)
-    connect(trigger, "params", repository, "params")
+    connect(trigger, "params", source_id, "params")
     scanners = list(dict.fromkeys(plan.scanners))
     for index, kind in enumerate(scanners):
         scanner = add(f"scan_{kind}", 2, index - (len(scanners) - 1) / 2)
-        connect(repository, "snapshot", scanner, "snapshot")
+        connect(source_id, "snapshot", scanner, "snapshot")
         connect(scanner, "result", merged, "results")
 
     column = 4
@@ -168,7 +171,7 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
 
     missing_recipients = set()
     for index, item in enumerate(plan.notifications):
-        recipients = list(dict.fromkeys(r for r in item.recipients if _recipient_mentioned(r, data.description)))
+        recipients = list(dict.fromkeys(r for r in item.recipients if _recipient_mentioned(r, description)))
         kind = f"notify_{item.channel}"
         config = {"recipients": recipients} if recipients else {}
         node = add(kind, column, index - (len(plan.notifications) - 1) / 2, **config)
@@ -177,7 +180,9 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
         connect(*outputs[item.when], node, "report")
 
     for issue in validate_graph(graph):
-        if issue.node_id in missing_recipients and issue.field == "config.recipients":
+        if issue.code == "ARCHIVE_REQUIRED" and issue.node_id == source_id:
+            issues.append(issue)
+        elif issue.node_id in missing_recipients and issue.field == "config.recipients":
             label = CATALOG[next(n.type for n in graph.nodes if n.id == issue.node_id)].label
             issues.append(Issue(code="RECIPIENTS_REQUIRED", message=f"Укажите получателей в ноде «{label}».",
                                 node_id=issue.node_id, field=issue.field))
@@ -187,7 +192,7 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
     schedule = None
     if plan.trigger == "schedule":
         schedule = plan.schedule or ScheduleSettings()
-        schedule = schedule.model_copy(update={"timezone": schedule.timezone or data.timezone})
+        schedule = schedule.model_copy(update={"timezone": schedule.timezone or timezone})
         try:
             spec_from_settings(schedule)
         except ScheduleSpecError as error:

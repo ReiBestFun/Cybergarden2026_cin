@@ -155,7 +155,7 @@ def test_personal_projects_templates_and_reports_are_isolated_and_encrypted(api,
         assert other.post(f"/api/workflows/{workflow_id}/runs").status_code == 404
         for suffix in ("", "/findings", "/report", "/export", "/events"):
             assert other.get(f"/api/runs/{run_id}{suffix}").status_code == 404
-        assert other.get("/api/templates").json()["total"] == 0
+        assert all(item["is_builtin"] for item in other.get("/api/templates").json()["items"])
         assert other.get(f"/api/templates/{template_id}").status_code == 404
         assert other.delete(f"/api/templates/{template_id}").status_code == 404
         assert owner.post(f"/api/templates/{template_id}/instantiate", json={"project_id": other_project}).status_code == 404

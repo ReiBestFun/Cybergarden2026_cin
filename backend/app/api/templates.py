@@ -13,6 +13,7 @@ from ..workspace_logs import audit_action
 from ..nodes.catalog import NOTIFIER_CONFIGS
 from ..schemas.contracts import Graph, Input, Name, Page, ScheduleSettings, WorkflowRead
 from ..schemas.templates import DraftPublication, TemplateCopy, TemplatePublish, TemplateRead
+from ..workflows.builtin_templates import BUILTIN_TEMPLATES
 from ..workflows.schedules import apply_spec, schedule_read, spec_from_settings
 from .auth import CurrentUser
 from .common import ApiError, PageQuery, page
@@ -93,7 +94,12 @@ def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, works
                     WorkflowTemplate.draft_source_workspace_id.is_(None),
                 )),
             ))
-    return page(db, query, pagination.limit, pagination.offset)
+    # The shared templates occupy the first six slots of the same paginated catalog.
+    offset, limit = pagination.offset, pagination.limit
+    defaults = BUILTIN_TEMPLATES[offset:offset + limit]
+    saved = page(db, query, limit - len(defaults), max(0, offset - len(BUILTIN_TEMPLATES)))
+    return {"items": [*defaults, *saved["items"]], "total": len(BUILTIN_TEMPLATES) + saved["total"],
+            "offset": offset, "limit": limit}
 
 
 @router.post("", status_code=201, response_model=TemplateRead)
@@ -115,8 +121,11 @@ def create_template(data: TemplatePublish, db: Database, user: CurrentUser) -> W
 
 
 @router.get("/{template_id}", response_model=TemplateRead)
-def template_detail(template_id: UUID, db: Database, user: CurrentUser) -> WorkflowTemplate:
-    return _template(template_id, user.id, db)
+def template_detail(template_id: UUID, db: Database, user: CurrentUser) -> TemplateRead:
+    for template in BUILTIN_TEMPLATES:
+        if template.id == template_id:
+            return template
+    return TemplateRead.model_validate(_template(template_id, user.id, db))
 
 
 @router.patch("/{template_id}", response_model=TemplateRead)
@@ -159,17 +168,17 @@ def publish_draft(template_id: UUID, data: DraftPublication, db: Database, user:
 @router.post("/{template_id}/copy", status_code=201, response_model=WorkflowRead)
 @router.post("/{template_id}/instantiate", status_code=201, response_model=WorkflowRead)
 def instantiate_template(template_id: UUID, data: TemplateCopy, db: Database, user: CurrentUser) -> Workflow:
-    template = _template(template_id, user.id, db)
+    template = template_detail(template_id, db, user)
     project = get_project(data.project_id, db, user.id, owner_required=True)
     source = template.workspace_id or template.draft_source_workspace_id
-    if project.workspace_id != user.id and source not in (user.id, project.workspace_id):
+    if not template.is_builtin and project.workspace_id != user.id and source not in (user.id, project.workspace_id):
         raise ApiError(409, "TEMPLATE_WORKSPACE_MISMATCH", "Выберите проект этой команды или своего личного пространства.")
-    workflow = Workflow(project_id=project.id, name=data.name or template.name, graph_json=template.graph_json)
+    workflow = Workflow(project_id=project.id, name=data.name or template.name, graph_json=template.graph.model_dump(mode="json"))
     db.add(workflow)
     if template.schedule is not None:
         db.flush()
         schedule = Schedule(workflow_id=workflow.id, enabled=False)
-        apply_spec(schedule, spec_from_settings(ScheduleSettings.model_validate(template.schedule)))
+        apply_spec(schedule, spec_from_settings(template.schedule))
         db.add(schedule)
     db.commit()
     return workflow

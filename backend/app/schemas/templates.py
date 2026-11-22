@@ -26,9 +26,10 @@ class TemplateRead(ReadModel):
     description: str
     graph: Graph = Field(validation_alias="graph_json")
     schedule: ScheduleSettings | None
-    created_at: datetime
-    updated_at: datetime
+    created_at: datetime | None
+    updated_at: datetime | None
     can_edit: bool
+    is_builtin: bool = False
 
 
 class TemplateCopy(Input):

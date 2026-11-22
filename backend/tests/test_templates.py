@@ -4,8 +4,56 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from backend.app.db.models import WorkflowTemplate
+from backend.app.schemas.contracts import Graph
+from backend.app.workflows.validation import validate_graph
 
 from backend.tests.test_api import ORIGIN, analysis_graph, api, create_project, create_workflow, edge, login, node
+
+
+def test_builtin_catalog_and_independent_copies(api):
+    client, _ = api
+    user = client.get("/api/me").json()["id"]
+    team = client.post("/api/workspaces", json={"name": "Шаблоны"}).raise_for_status().json()["id"]
+    project = client.post("/api/projects", json={
+        "name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team,
+    }).raise_for_status().json()["id"]
+    catalog = client.get("/api/templates", params={"workspace_id": user}).raise_for_status().json()
+    assert catalog["total"] == len(catalog["items"]) == 6
+    assert client.get("/api/templates", params={"workspace_id": team}).json()["items"] == catalog["items"]
+    variants = set()
+    for template in catalog["items"]:
+        assert template["is_builtin"] and not template["can_edit"]
+        path = "/api/templates/" + template["id"]
+        assert client.get(path).raise_for_status().json() == template
+        assert client.delete(path).status_code == 404
+        assert client.patch(path, json={"name": "Изменено"}).status_code == 404
+        assert client.post(path + "/publish", json={"workspace_id": team}).status_code == 404
+        copied = client.post(path + "/copy", json={"project_id": project}).raise_for_status().json()
+        assert copied["name"] == template["name"] and copied["graph"] == template["graph"]
+        graph = Graph.model_validate(copied["graph"])
+        kinds = tuple(node.type for node in graph.nodes)
+        variants.add(kinds)
+        if "local_archive" in kinds:
+            archive = next(node for node in graph.nodes if node.type == "local_archive")
+            assert not archive.config and [err.code for err in validate_graph(graph)] == ["ARCHIVE_REQUIRED"]
+            archive.config["archive_sha256"] = "a" * 64
+        assert validate_graph(graph) == []
+        if template["schedule"]:
+            schedule = client.get(f"/api/workflows/{copied['id']}/schedule").raise_for_status().json()
+            assert (schedule["frequency"], schedule["weekdays"], schedule["time"], schedule["timezone"]) == (
+                "weekly", [0], "09:00", "UTC",
+            )
+            assert schedule["enabled"] is False
+        client.patch(f"/api/workflows/{copied['id']}", json={"graph": analysis_graph()}).raise_for_status()
+        assert client.get(path).json() == template
+    assert len(variants) == 6
+
+    custom = client.post("/api/templates", json={"name": "Свой", "workflow_id": copied["id"]}).raise_for_status().json()
+    expected_ids = [item["id"] for item in catalog["items"]] + [custom["id"]]
+    for offset in (0, 4, 5, 6, 7, 20):
+        page = client.get("/api/templates", params={"workspace_id": team, "limit": 2, "offset": offset}).json()
+        assert (page["limit"], page["offset"], page["total"]) == (2, offset, 7)
+        assert [item["id"] for item in page["items"]] == expected_ids[offset:offset + 2]
 
 
 def test_author_publishes_private_draft_to_the_team_library(api, monkeypatch):
@@ -35,7 +83,7 @@ def test_author_publishes_private_draft_to_the_team_library(api, monkeypatch):
         assert colleague.post(path + "/copy", json={"project_id": personal_project}).status_code == 404
         invitation = author.post(f"/api/workspaces/{team}/invitations", json={"role": "member"}).json()
         colleague.post(f"/api/workspaces/{team}/join", json={"token": invitation["token"]}).raise_for_status()
-        assert colleague.get(catalog).json()["items"] == []
+        assert all(item["is_builtin"] for item in colleague.get(catalog).json()["items"])
         assert colleague.get(path).status_code == 404
         assert colleague.post(publish, json={"workspace_id": team}).status_code in (403, 404)
         other_team = author.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
@@ -44,7 +92,7 @@ def test_author_publishes_private_draft_to_the_team_library(api, monkeypatch):
         published = author.post(publish, json={"workspace_id": team}).raise_for_status().json()
         assert published["id"] == draft["id"] and published["workspace_id"] == team
         assert published["description"] == "Проверки перед слиянием"
-        assert [item["id"] for item in colleague.get(catalog).json()["items"]] == [draft["id"]]
+        assert [item["id"] for item in colleague.get(catalog).json()["items"] if not item["is_builtin"]] == [draft["id"]]
         nodes = published["graph"]["nodes"]
         assert nodes[0]["config"] == {} and nodes[-1]["config"] == {"attach_json": False}
         assert "project_id" not in published

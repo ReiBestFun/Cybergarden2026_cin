@@ -9,9 +9,10 @@ export type WorkflowTemplate = {
   description: string;
   graph: ApiGraph;
   schedule: ScheduleSettings | null;
-  created_at: string;
-  updated_at: string;
+  created_at: string | null;
+  updated_at: string | null;
   can_edit: boolean;
+  is_builtin: boolean;
 };
 
 export const listTemplates = (workspaceId: string, offset: number, limit: number, signal: AbortSignal) =>

@@ -160,12 +160,12 @@ export function Templates() {
         return <article className="panel template-card" data-expanded={selected} key={template.id}>
           <GraphPreview graph={template.graph} />
           <div className="template-overview">
-            <span className="template-scope">{template.can_edit ? <LockKeyhole size={14} /> : <UsersRound size={14} />}
-              {template.can_edit ? 'Личный черновик' : 'Командный шаблон'}</span>
+            <span className="template-scope">{template.is_builtin ? <BookMarked size={14} /> : template.can_edit ? <LockKeyhole size={14} /> : <UsersRound size={14} />}
+              {template.is_builtin ? 'Встроенный шаблон' : template.can_edit ? 'Личный черновик' : 'Командный шаблон'}</span>
             <h2>{template.name}</h2>
             {template.description && <p className="template-description">{template.description}</p>}
             <div className="template-meta"><span><Workflow size={14} />Блоков: {template.graph.nodes.length}</span>
-              <span><CalendarDays size={14} />{new Date(template.created_at).toLocaleDateString('ru-RU')}</span></div>
+              {template.created_at && <span><CalendarDays size={14} />{new Date(template.created_at).toLocaleDateString('ru-RU')}</span>}</div>
             <button className="btn secondary" aria-expanded={selected} disabled={busy} onClick={() => {
               setSelectedId(selected ? '' : template.id);
               setEditing(null);

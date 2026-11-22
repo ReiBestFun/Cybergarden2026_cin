@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select
 from ..analyzers.models import Category, Severity
 from ..db.models import Project, ScanRun, Workflow, WorkspaceMcpToken, WorkspaceMembership
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..schemas.contracts import Graph, Input, Name, Page, ReadModel, RunStatus, RunSummary
 from .auth import CurrentUser, token_hash
 from .common import ApiError, page
@@ -78,6 +79,7 @@ def list_tokens(workspace_id: UUID, user: CurrentUser, db: Database):
 
 @router.post("/workspaces/{workspace_id}/mcp-tokens", status_code=201)
 def issue_token(workspace_id: UUID, data: TokenCreate, user: CurrentUser, db: Database) -> TokenIssued:
+    audit_action(db, workspace_id, user.id, "mcp.issue")
     membership = db.scalar(select(WorkspaceMembership).where(
         WorkspaceMembership.workspace_id == workspace_id, WorkspaceMembership.user_id == user.id,
     ).with_for_update())
@@ -99,6 +101,7 @@ def issue_token(workspace_id: UUID, data: TokenCreate, user: CurrentUser, db: Da
 
 @router.delete("/workspaces/{workspace_id}/mcp-tokens/{token_id}", status_code=204)
 def revoke_token(workspace_id: UUID, token_id: UUID, user: CurrentUser, db: Database) -> Response:
+    audit_action(db, workspace_id, user.id, "mcp.revoke")
     workspace_role(db, workspace_id, user.id)
     db.execute(delete(WorkspaceMcpToken).where(
         WorkspaceMcpToken.id == token_id, WorkspaceMcpToken.workspace_id == workspace_id, WorkspaceMcpToken.user_id == user.id,

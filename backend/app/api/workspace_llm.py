@@ -8,6 +8,7 @@ from sqlalchemy import select
 from ..config import Settings
 from ..db.models import WorkspaceLLMProfile
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..llm import ModelError, complete_json, installed_ollama_models
 from ..schemas.contracts import Input, ReadModel
 from ..workspace_llm import EXTERNAL_MODELS, PROVIDER_URLS, ExternalProvider, Provider, external_settings, ollama_settings
@@ -63,6 +64,7 @@ def list_models(workspace_id: UUID, user: CurrentUser, db: Database, request: Re
 def configure_profile(
     workspace_id: UUID, data: LocalProfile | ExternalProfile, user: CurrentUser, db: Database, request: Request,
 ) -> ProfileRead:
+    audit_action(db, workspace_id, user.id, "llm.configure")
     settings: Settings = request.app.state.settings
     require_team_owner(db, workspace_id, user.id, lock=False)
     local = ollama_settings(settings)

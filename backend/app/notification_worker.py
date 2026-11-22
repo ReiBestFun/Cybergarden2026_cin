@@ -13,7 +13,7 @@ from .analyzers.models import ScanError
 from .config import Settings
 from .credentials import resolve_credential
 from .db.encryption import check_storage_key
-from .db.models import WorkspaceDeliverySetting
+from .db.models import ScanRun, WorkspaceDeliverySetting
 from .db.session import make_engine
 from .notifications.base import DeliveryError, NotifierError
 from .notifications.destinations import verified_telegram_recipients
@@ -23,6 +23,7 @@ from .notifications.slack import send_slack_summary
 from .notifications.telegram import TelegramChannel
 from .schemas.credentials import CredentialValue
 from .technical_log import log_event
+from .workspace_logs import diagnostic
 
 def _send(job: ClaimedDelivery, settings: Settings, credential: CredentialValue | None) -> str | None:
     if job.channel == "slack":
@@ -102,6 +103,8 @@ def process_next(sessions: sessionmaker[Session], settings: Settings) -> bool:
         error = DeliveryError("DELIVERY_OUTCOME_UNKNOWN", "Отправка завершилась без подтверждения.", outcome="unknown")
     with sessions.begin() as db:
         status = finish_delivery(db, job, provider_id=provider_id, error=error, max_attempts=settings.notify_max_attempts)
+        if status is not None:
+            diagnostic(db, db.get(ScanRun, job.run_id), "delivery.finish", status, job.node_run_id)
     level = logging.WARNING if status is None or error is not None else logging.INFO
     log_event("notification_worker", "delivery.finish", status or "claim_lost", level=level,
               run_id=job.run_id, node_run_id=job.node_run_id, delivery_id=job.id, phase=job.phase)

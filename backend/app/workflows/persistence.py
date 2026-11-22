@@ -14,6 +14,7 @@ from ..notifications.queue import NotificationDraft, enqueue_notification
 from ..schemas.contracts import NodeStatus, RunStatus
 from ..technical_log import log_event
 from ..workspace_llm import model_settings
+from ..workspace_logs import diagnostic
 from .queue import ClaimedRun, FailedRun, fail_run
 
 
@@ -84,6 +85,7 @@ class RunProgress:
             run.heartbeat_at = now
             node.status = "running"
             node.started_at = now
+            diagnostic(db, run, "node.start", "running", node.id)
             node.input_preview = inputs
             node_run_id = node.id
             node_type = node.type
@@ -117,6 +119,7 @@ class RunProgress:
                 node.input_preview = input_preview
             node.error = error_payload(warning)
             node.finished_at = now
+            diagnostic(db, run, "node.finish", status, node.id)
             node_run_id = node.id
             node_type = node.type
             if notification is not None:
@@ -146,6 +149,7 @@ class RunProgress:
         with self.sessions.begin() as db:
             run = self._lock(db)
             run.status = status
+            diagnostic(db, run, "run.finish", status)
             run.summary = summary
             run.report = report
             run.error = error_payload(warning)

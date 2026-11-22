@@ -11,6 +11,7 @@ import { Credentials } from '../pages/Credentials';
 import { Repositories } from '../pages/Repositories';
 import { Templates } from '../pages/Templates';
 import { TeamSettings } from '../pages/TeamSettings';
+import { WorkspaceLogs } from '../pages/WorkspaceLogs';
 import { JoinTeam, pendingInvitation, rememberInvitation } from '../pages/JoinTeam';
 import { AccountProfile } from '../pages/Profile';
 import { ApiError, apiUrl, errorMessage, SESSION_EXPIRED, WORKSPACE_UNAVAILABLE } from '../shared/api/client';
@@ -150,6 +151,7 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
           <NavLink to="/history">
             <HistoryIcon size={18} /> История
           </NavLink>
+          <NavLink to="/settings/logs"><FileSearch size={18} /> Журналы</NavLink>
           <NavLink to="/profile">
             <UserRound size={18} /> Профиль
           </NavLink>
@@ -190,6 +192,7 @@ function Shell({ user, onProfileChanged }: { user: Profile; onProfileChanged: (p
             <Results />
           </WorkspaceResource>} />
           <Route path="/history" element={<History />} />
+          <Route path="/settings/logs" element={<WorkspaceLogs key={workspace.id} />} />
           <Route path="/credentials" element={<WorkspaceResource param="project" onSwitch={id => selectWorkspace(id, true)}>
             {workspace.role === 'owner' ? <Credentials /> : <Navigate to="/" replace />}
           </WorkspaceResource>} />

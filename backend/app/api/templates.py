@@ -9,6 +9,7 @@ from sqlalchemy import and_, or_, select
 
 from ..db.models import Schedule, Workflow, WorkflowTemplate, WorkspaceMembership
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..nodes.catalog import NOTIFIER_CONFIGS
 from ..schemas.contracts import Graph, Input, Name, Page, ScheduleSettings, WorkflowRead
 from ..schemas.templates import DraftPublication, TemplateCopy, TemplatePublish, TemplateRead
@@ -95,6 +96,8 @@ def list_templates(db: Database, user: CurrentUser, pagination: PageQuery, works
 
 @router.post("", status_code=201, response_model=TemplateRead)
 def create_template(data: TemplatePublish, db: Database, user: CurrentUser) -> WorkflowTemplate:
+    if data.workspace_id is not None:
+        audit_action(db, data.workspace_id, user.id, "template.publish")
     template = WorkflowTemplate(name=data.name, description=data.description, owner_id=user.id)
     _set_template_source(template, data.workflow_id, user.id, db)
     if data.workspace_id is not None:
@@ -136,6 +139,7 @@ def delete_template(template_id: UUID, db: Database, user: CurrentUser) -> Respo
 
 @router.post("/{template_id}/publish", response_model=TemplateRead)
 def publish_draft(template_id: UUID, data: DraftPublication, db: Database, user: CurrentUser) -> WorkflowTemplate:
+    audit_action(db, data.workspace_id, user.id, "template.publish")
     require_team_owner(db, data.workspace_id, user.id)
     draft = _template(template_id, user.id, db, lock=True)
     if draft.draft_source_workspace_id is None:

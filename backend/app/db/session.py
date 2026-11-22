@@ -6,6 +6,8 @@ from pydantic import SecretStr
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
+from ..api.common import ApiError
+from ..workspace_logs import rejected_action
 from .encryption import StorageCipher
 
 
@@ -21,7 +23,11 @@ def make_engine(database_url: str, encryption_key: SecretStr | None = None) -> E
 
 def get_session(request: Request) -> Iterator[Session]:
     with request.app.state.session_factory() as session:
-        yield session
+        try:
+            yield session
+        except ApiError as error:
+            rejected_action(session, error.status)
+            raise
 
 
 Database = Annotated[Session, Depends(get_session)]

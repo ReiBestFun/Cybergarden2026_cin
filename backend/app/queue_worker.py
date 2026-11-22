@@ -16,6 +16,7 @@ from .db.encryption import check_storage_key
 from .db.session import make_engine
 from .integrations.repository import Allowlist, repository_allowlist
 from .technical_log import log_event
+from .log_maintenance import maintain_logs
 from .workflows.execution import GraphExecution
 from .workflows.persistence import ClaimLost, RunProgress, log_failed_run
 from .workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
@@ -97,6 +98,10 @@ def main() -> int:
                     tick_schedules(sessions)
                 except SQLAlchemyError:
                     log_event("queue_worker", "schedule.enqueue", "failed", level=logging.ERROR)
+                try:
+                    maintain_logs(sessions, settings)
+                except SQLAlchemyError:
+                    log_event("queue_worker", "logs.maintenance", "failed", level=logging.ERROR)
                 next_tick = monotonic() + settings.scheduler_poll_seconds
             try:
                 processed = run_next(sessions, settings, allowed)

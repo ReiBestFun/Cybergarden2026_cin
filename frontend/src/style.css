@@ -1111,3 +1111,9 @@ tr.clickable:hover td { background: #faf6f1; }
   margin: 7px 0;
 }
 .workspace-delivery-settings .telegram-picker input { width: auto; flex: none; }
+
+.workspace-logs .log-rights { display: flex; flex-wrap: wrap; gap: .8rem 1.4rem; padding: .75rem 1rem; }
+.workspace-logs .log-rights label { display: inline-flex; align-items: center; gap: .45rem; }
+.workspace-logs .log-rights input { width: auto; min-height: auto; }
+.log-records { list-style: none; padding: 0; display: grid; gap: .75rem; }
+.log-records li { display: grid; gap: .25rem; overflow-wrap: anywhere; padding-block: .65rem; border-bottom: 1px solid var(--border); }

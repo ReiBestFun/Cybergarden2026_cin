@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db.models import User, Workspace, WorkspaceInvitation, WorkspaceMembership
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..schemas.contracts import Input, Page, ReadModel, WorkspaceCreate, WorkspaceRead, WorkspaceRole
 from .auth import CurrentUser, token_hash
 from .common import ApiError, PageQuery
@@ -98,6 +99,7 @@ def require_team_owner(db: Session, workspace_id: UUID, user_id: UUID, *, lock: 
 
 @router.post("/workspaces/{workspace_id}/invitations", status_code=201)
 def invite(workspace_id: UUID, data: InviteCreate, user: CurrentUser, db: Database) -> InviteIssued:
+    audit_action(db, workspace_id, user.id, "invitation.issue")
     require_team_owner(db, workspace_id, user.id)
     token = token_urlsafe(32)
     row = WorkspaceInvitation(workspace_id=workspace_id, issuer_id=user.id, token_hash=token_hash(token), role=data.role,
@@ -117,6 +119,7 @@ def invitations(workspace_id: UUID, user: CurrentUser, db: Database):
 
 @router.delete("/workspaces/{workspace_id}/invitations/{invitation_id}", status_code=204)
 def revoke(workspace_id: UUID, invitation_id: UUID, user: CurrentUser, db: Database) -> Response:
+    audit_action(db, workspace_id, user.id, "invitation.revoke")
     require_team_owner(db, workspace_id, user.id)
     db.execute(delete(WorkspaceInvitation).where(
         WorkspaceInvitation.workspace_id == workspace_id, WorkspaceInvitation.id == invitation_id,
@@ -127,6 +130,7 @@ def revoke(workspace_id: UUID, invitation_id: UUID, user: CurrentUser, db: Datab
 
 @router.post("/workspaces/{workspace_id}/join")
 def join_team(workspace_id: UUID, data: Redeem, user: CurrentUser, db: Database) -> WorkspaceRead:
+    audit_action(db, workspace_id, user.id, "invitation.redeem")
     team = _team(db, workspace_id, lock=True)
     role = db.scalar(delete(WorkspaceInvitation).where(
         WorkspaceInvitation.workspace_id == team.id, WorkspaceInvitation.token_hash == token_hash(data.token),
@@ -173,11 +177,13 @@ def _change_member(db: Session, workspace_id: UUID, actor_id: UUID, member_id: U
 
 @router.patch("/workspaces/{workspace_id}/members/{member_id}")
 def change_role(workspace_id: UUID, member_id: UUID, data: MemberRole, user: CurrentUser, db: Database) -> MemberRole:
+    audit_action(db, workspace_id, user.id, "member.role")
     _change_member(db, workspace_id, user.id, member_id, data.role)
     return data
 
 
 @router.delete("/workspaces/{workspace_id}/members/{member_id}", status_code=204)
 def remove_member(workspace_id: UUID, member_id: UUID, user: CurrentUser, db: Database) -> Response:
+    audit_action(db, workspace_id, user.id, "member.remove")
     _change_member(db, workspace_id, user.id, member_id, None)
     return Response(status_code=204)

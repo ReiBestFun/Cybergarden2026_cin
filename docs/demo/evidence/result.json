@@ -1,0 +1,34 @@
+{
+  "run": "32740e9a-5c3a-4619-9c7a-db6e07409729",
+  "commit": "fe1fcbe212669783480666b9b60147c8a8c6eef4",
+  "status": "partial",
+  "nodes": {
+    "manual_trigger": "succeeded",
+    "repository": "succeeded",
+    "scan_secrets": "succeeded",
+    "scan_sca": "succeeded",
+    "scan_sast": "succeeded",
+    "merge_findings": "succeeded",
+    "ai_report": "succeeded",
+    "notify_email": "succeeded"
+  },
+  "findings": {
+    "total": 15,
+    "high_count": 7,
+    "critical_count": 1
+  },
+  "model": "mistral:latest",
+  "smtp": {
+    "subject": "CyberFlow: 15 находок в training (fe1fcbe)",
+    "to": [
+      "review@example.test"
+    ],
+    "text": "CyberFlow: результаты проверки безопасности\nРепозиторий: https://github.com/TBagirov/training @ fe1fcbe\nСтатус: проверка завершена частично\nНаходок: 15\nПо критичности: CRITICAL 1, HIGH 7, MEDIUM 6, LOW 1\nПо категориям: SECRET 5, SCA 5, SAST 5\nSCA — частичное покрытие.\n\nОтчёт: http://localhost:5173/results?run=32740e9a-5c3a-4619-9c7a-db6e07409729\nJSON с находками приложен.\n\nCRITICAL · Уязвимая зависимость Maven (1) · build.gradle.kts:31 · GHSA-599f-7c49-w659\nКритическая уязвимость в зависимости Maven Обновите или измените уязвимую зависимость Maven\n\nHIGH · Отсутствует ограничение доступа к маршруту (1) · src/main/kotlin/lab/repairdesk/config/RepairSecurity.kt:18\nВысокий риск отсутствия ограничения доступа к маршруту Добавьте проверку на авторизацию перед выполнением маршрута\n\nHIGH · Пользовательский ввод в SQL (1) · src/main/kotlin/lab/repairdesk/repair/RepairLookupController.kt:14\nВысокий риск SQL-инъекции из-за пользовательского ввода в SQL Используйте параметризованные запросы или экранирование для предотвращения SQL-инъекций\n\nHIGH · Отсутствует проверка владельца объекта (1) · src/main/kotlin/lab/repairdesk/repair/RepairTicketReader.kt:10\nВысокий риск отсутствия проверки владельца объекта Добавьте проверку на владельца объекта перед его изменением или удалением\n\nHIGH · Уязвимая зависимость Maven (1) · build.gradle.kts:32 · GHSA-m72m-mhq2-9p6c\nВысокий риск уязвимости в зависимости Maven Обновите или измените уязвимую зависимость Maven\n\nHIGH · Уязвимая зависимость Maven (1) · build.gradle.kts:38 · GHSA-4jq9-2xhw-jpx7\nВысокий риск уязвимости в зависимости Maven Обновите или измените уязвимую зависимость Maven\n\nЕщё групп в полном отчёте: 9.\n",
+    "attachment": "findings-fe1fcbe.json"
+  },
+  "synthetic": {
+    "sast.error-stacktrace": "application.properties:1",
+    "sast.weak-password-hash": "Demo.kt:1",
+    "sast.sensitive-logging": "Demo.kt:2"
+  }
+}

@@ -237,7 +237,8 @@ def export_run(
         body, media_type, extension = readable_report(report), "text/markdown", "md"
         explanation = ((run.report or {}).get("llm") or {}).get("text")
         if explanation:
-            body += "\n## AI-рекомендации\n\n" + "\n".join("    " + line for line in explanation.splitlines()) + "\n"
+            paragraphs = ("    " + line if line.strip() else "" for line in explanation.splitlines())
+            body += "\n## AI-рекомендации\n\n" + "\n".join(paragraphs) + "\n"
     return Response(
         body, media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="report-{run.id}.{extension}"'},

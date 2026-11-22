@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db.models import NodeRun, Project, ScanRun, Schedule, Workflow
 from ..schemas.contracts import Graph, NodeStatus
+from ..workspace_logs import diagnostic
 from .schedules import advance
 from .validation import validate_graph
 
@@ -39,6 +40,7 @@ def _enqueue(
     )
     db.add(run)
     db.flush()
+    diagnostic(db, run, "run.enqueue", "queued")
     db.add_all([
         NodeRun(run_id=run.id, node_id=node.id, type=node.type, status="pending")
         for node in graph.nodes
@@ -70,6 +72,7 @@ def claim_next(db: Session) -> ClaimedRun | None:
     run.claim_token = token
     run.started_at = now
     run.heartbeat_at = now
+    diagnostic(db, run, "run.claim", "running")
     return ClaimedRun(run.id, run.project_id, token, run.trigger, run.graph_snapshot, run.source_snapshot)
 
 
@@ -94,6 +97,9 @@ def fail_run(db: Session, run: ScanRun, code: str, message: str) -> FailedRun:
             .values(status=status, finished_at=now, error=error).returning(NodeRun.id, NodeRun.type)
         )
         nodes.extend((node_id, node_type, status) for node_id, node_type in rows)
+    diagnostic(db, run, "run.finish", "failed")
+    for node_id, _, status in nodes:
+        diagnostic(db, run, "node.finish", status, node_id)
     return FailedRun(run.id, nodes)
 
 

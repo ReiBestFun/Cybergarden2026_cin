@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useWorkspace } from '../app/workspaceContext';
 import { api, errorMessage } from '../shared/api/client';
 import type { Workspace } from '../shared/api/workspaces';
@@ -82,6 +83,7 @@ export function TeamSettings({ userId }: { userId: string }) {
         </div>
       </div>)}
     </section>
+    <Link className="btn secondary" to="/settings/logs">Журналы и сроки хранения</Link>
     <WorkspaceDeliverySettings />
     <WorkspaceModelSettings key={workspace.id} />
   </main>;

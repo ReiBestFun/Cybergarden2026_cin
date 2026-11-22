@@ -7,11 +7,13 @@ from ..analyzers.models import ScanError
 from ..credentials import encrypt_credential
 from ..db.models import Credential
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..schemas.contracts import Page
 from ..schemas.credentials import CredentialCreate, CredentialPatch, CredentialRead, CredentialValue
 from .auth import CurrentUser
 from .common import ApiError, PageQuery, page
 from .projects import get_project
+from .workspaces import require_workspace_owner
 
 router = APIRouter(prefix="/projects/{project_id}/credentials", tags=["credentials"])
 
@@ -34,7 +36,9 @@ def list_credentials(project_id: UUID, db: Database, pagination: PageQuery, user
 
 @router.post("", status_code=201, response_model=CredentialRead)
 def create_credential(project_id: UUID, data: CredentialCreate, db: Database, request: Request, user: CurrentUser) -> Credential:
-    get_project(project_id, db, user.id, owner_required=True)
+    project = get_project(project_id, db, user.id, lock=True)
+    audit_action(db, project.workspace_id, user.id, "credential.create")
+    require_workspace_owner(db, project.workspace_id, user.id)
     credential = Credential(id=uuid4(), project_id=project_id, name=data.name, kind=data.kind, active=True)
     credential.ciphertext = _encrypt(request, credential, data.value)
     db.add(credential)
@@ -46,7 +50,9 @@ def create_credential(project_id: UUID, data: CredentialCreate, db: Database, re
 def update_credential(
     project_id: UUID, credential_id: UUID, data: CredentialPatch, db: Database, request: Request, user: CurrentUser,
 ) -> Credential:
-    get_project(project_id, db, user.id, owner_required=True)
+    project = get_project(project_id, db, user.id, lock=True)
+    audit_action(db, project.workspace_id, user.id, "credential.update")
+    require_workspace_owner(db, project.workspace_id, user.id)
     credential = db.scalar(select(Credential).where(
         Credential.id == credential_id, Credential.project_id == project_id,
     ).with_for_update())

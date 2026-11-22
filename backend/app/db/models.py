@@ -121,6 +121,35 @@ class WorkspaceDeliverySetting(Base):
     secret: Mapped[str | None] = mapped_column(EncryptedText("workspace_delivery_settings.secret"))
 
 
+class WorkspaceLogPolicy(Base):
+    __tablename__ = "workspace_log_policies"
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    destination: Mapped[str] = mapped_column(String(48))
+    audit_days: Mapped[int]
+    diagnostic_days: Mapped[int]
+    member_view: Mapped[bool]
+    member_export: Mapped[bool]
+    member_manage: Mapped[bool]
+
+
+class WorkspaceLog(Base):
+    __tablename__ = "workspace_logs"
+    __table_args__ = (Index("ix_workspace_logs_lookup", "workspace_id", "kind", "at"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
+    kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[UUID | None]
+    action: Mapped[str] = mapped_column(String(48))
+    result: Mapped[str] = mapped_column(String(16))
+    run_id: Mapped[UUID | None] = mapped_column(index=True)
+    node_run_id: Mapped[UUID | None]
+    destination: Mapped[str] = mapped_column(String(48))
+    archived: Mapped[bool] = mapped_column(server_default=text("false"))
+
+
 class WorkspaceInvitation(Base):
     __tablename__ = "workspace_invitations"
     __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_invitation_role"),)

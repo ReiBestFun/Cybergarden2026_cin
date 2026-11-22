@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from ..db.models import WorkspaceDeliverySetting
 from ..db.session import Database
+from ..workspace_logs import audit_action
 from ..notifications.destinations import numeric_chat_id, verified_telegram_recipients
 from ..notifications.email import ADDRESS
 from ..notifications.queue import allowed_recipients, recipient_key
@@ -56,6 +57,7 @@ def read_delivery_settings(workspace_id: UUID, user: CurrentUser, db: Database) 
 def update_delivery_settings(
     workspace_id: UUID, channel: Channel, data: DeliverySettingsPatch, request: Request, user: CurrentUser, db: Database,
 ) -> ChannelRead:
+    audit_action(db, workspace_id, user.id, "delivery.configure")
     require_team_owner(db, workspace_id, user.id)
     row = db.get(WorkspaceDeliverySetting, (workspace_id, channel))
     version = row.version if row else 0

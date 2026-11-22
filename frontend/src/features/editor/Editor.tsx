@@ -9,6 +9,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { CiSetup } from './CiSetup';
 import { PublishTemplate } from './PublishTemplate';
 import { WorkflowGenerator } from './WorkflowGenerator';
+import { ImportMcpDraft } from './ImportMcpDraft';
 import { toApiGraph } from './graph';
 import { errorMessage } from '../../shared/api/client';
 import { getSecurityWorkflow } from '../../shared/api/workflows';
@@ -98,6 +99,7 @@ export function Editor() {
           <button className="btn secondary" onClick={exportJson}>
             <Download size={16} /> JSON
           </button>
+          <ImportMcpDraft onImported={() => setParams({}, { replace: true })} />
           <button className="btn secondary" disabled={!!busy} aria-expanded={publishing} onClick={() => setPublishing(value => !value)}>В шаблоны</button>
           {hasCiTrigger && (
             <button className="btn secondary" disabled={!!busy || downloadingCi} onClick={() => void exportCi()}>

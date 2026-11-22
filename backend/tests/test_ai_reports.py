@@ -72,3 +72,16 @@ def test_ai_node_passes_original_bundle_to_notification(monkeypatch, available):
     message = result.notification.message
     assert ("AI объяснение" if available else "AI-рекомендации недоступны") in message.text
     assert json.loads(message.attachments[0].content) == {"findings": []}
+
+    telegram = Node(id="team", type="notify_telegram", position=ai.position,
+                    config={"recipients": ["@team_alerts"], "summary_only": True})
+    team_edge = Edge(id="team-out", source="ai", source_port="report", target="team", target_port="report")
+    with ExitStack() as stack:
+        summary = worker._execute_node(telegram, [team_edge], stack).notification.message
+    assert summary.text.splitlines() == [
+        "CyberFlow: сводка проверки",
+        "Результат анализа: проверка завершена",
+        "Находок: 0 · HIGH: 0 · CRITICAL: 0",
+        f"Отчёт: {settings.app_base_url}/results?run={claim.id}",
+    ]
+    assert summary.attachments == ()

@@ -17,7 +17,7 @@ from backend.tests.test_notifications import _prepare_sources
 
 @pytest.mark.parametrize("provider_id,endpoint,model", [
     ("openai", "https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
-    ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-flash-latest"),
+("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-3.1-flash-lite"),
     ("groq", "https://api.groq.com/openai/v1/chat/completions", "openai/gpt-oss-20b"),
 ])
 def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch, provider_id, endpoint, model):
@@ -30,6 +30,7 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch,
     assert client.get(path).json()["provider"] == "ollama"
     calls = []
     available = False
+    provider_status = 503 if provider_id == "gemini" else 401
 
     def provider(request):
         calls.append(request.url.host)
@@ -42,7 +43,7 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch,
         assert request.headers["Authorization"] == "Bearer fixture-llm-secret"
         assert payload["response_format"]["type"] == "json_object"
         if not available:
-            return httpx.Response(401)
+            return httpx.Response(provider_status, json={"error": "internal fixture-llm-secret"})
         content = draft if payload["messages"][-1]["content"] == description else '{"ok":true}'
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
@@ -53,7 +54,15 @@ def test_owner_enables_verified_model_only_for_their_workspace(api, monkeypatch,
     catalog = client.get(path + "/models").json()
     assert model in catalog[provider_id] and "mistral:test" in catalog["ollama"]
     profile = {"provider": provider_id, "model": model, "api_key": "fixture-llm-secret"}
-    assert client.put(path, json=profile).status_code == 502
+    failed = client.put(path, json=profile)
+    assert failed.status_code == 502
+    message = failed.json()["error"]["message"]
+    assert f"HTTP {provider_status}" in message and "fixture-llm-secret" not in failed.text
+    if provider_id == "gemini":
+        assert catalog[provider_id][0] == "gemini-3.1-flash-lite"
+        assert "временно" in message
+    else:
+        assert "ключ" in message
     assert client.get(path).json()["provider"] == "ollama"
     available = True
     enabled = client.put(path, json=profile)

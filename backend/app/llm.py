@@ -13,6 +13,18 @@ class ModelError(Exception):
     pass
 
 
+def _status_message(status: int) -> str:
+    if status in {401, 403}:
+        return f"Провайдер отклонил доступ (HTTP {status}). Проверьте API-ключ и права проекта."
+    if status == 404:
+        return "Провайдер не нашёл модель (HTTP 404). Попробуйте другую модель."
+    if status == 429:
+        return "Провайдер ограничил запросы (HTTP 429). Проверьте квоту или повторите позже."
+    if status >= 500:
+        return f"Провайдер временно недоступен (HTTP {status}). Повторите позже или выберите другую модель."
+    return f"Провайдер отклонил запрос (HTTP {status})."
+
+
 def _provider_headers(settings: Settings) -> dict[str, str]:
     try:
         url = urlsplit(settings.llm_base_url)
@@ -68,7 +80,11 @@ def complete_json[T: BaseModel](
             payload = response.json()
             message = payload["message"] if native else payload["choices"][0]["message"]
             return schema.model_validate_json(message["content"])
-    except (httpx.HTTPError, httpx.InvalidURL):
-        raise ModelError("Модель недоступна или отклонила запрос.") from None
+    except httpx.HTTPStatusError as error:
+        raise ModelError(_status_message(error.response.status_code)) from None
+    except httpx.TimeoutException:
+        raise ModelError("Провайдер не ответил вовремя. Повторите запрос.") from None
+    except (httpx.RequestError, httpx.InvalidURL):
+        raise ModelError("Не удалось подключиться к провайдеру модели.") from None
     except (ValueError, KeyError, IndexError, TypeError):
         raise ModelError("Модель вернула ответ с неверной структурой.") from None

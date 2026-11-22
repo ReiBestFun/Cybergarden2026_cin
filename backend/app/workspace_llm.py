@@ -17,7 +17,7 @@ PROVIDER_URLS: dict[ExternalProvider, str] = {
 }
 EXTERNAL_MODELS = {
     "openai": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1"],
-    "gemini": ["gemini-flash-latest", "gemini-3.1-flash-lite"],
+    "gemini": ["gemini-3.1-flash-lite", "gemini-flash-latest"],
     "groq": ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
 }
 

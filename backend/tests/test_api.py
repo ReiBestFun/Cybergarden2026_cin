@@ -9,7 +9,6 @@ from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from secrets import randbits
 from threading import Barrier, Event, Lock
-from types import SimpleNamespace
 from typing import get_args
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
@@ -275,11 +274,12 @@ def test_template_is_portable_and_schedule_stays_disabled(api):
     assert schedule["enabled"] is False and schedule["time"] == "08:30" and schedule["next_run_at"] is None
 
 
-def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch):
+@pytest.mark.parametrize("logout", [False, True])
+def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch, logout):
     client, sessions = api
     workflow_id = create_workflow(client, create_project(client), analysis_graph())
     run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
-    user = SimpleNamespace(id=UUID(client.get("/api/me").json()["id"]))
+    session_hash = auth.token_hash(client.cookies["cyberflow_session"])
     initial = RunDetail.model_validate(client.get(f"/api/runs/{run_id}").json())
     dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     listening = Event()
@@ -291,7 +291,7 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
         return run
 
     monkeypatch.setattr(runs_api, "_run_detail", observed_read)
-    events = runs_api._run_events(initial, sessions, dsn, user)
+    events = runs_api._run_events(initial, sessions, dsn, session_hash)
     assert '"status":"queued"' in next(events)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(next, events)
@@ -300,9 +300,16 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
             db.get(ScanRun, run_id).status = "running"
         runtime = json.loads(pending.result(timeout=4).split("data: ", 1)[1])
         assert runtime["status"] == "running"
-    events.close()
+    if logout:
+        assert client.post("/api/auth/logout").status_code == 204
     with sessions.begin() as db:
         db.get(ScanRun, run_id).status = "succeeded"
+    if logout:
+        # Ignore keepalives. A closed session must receive no further run data.
+        assert all(chunk.startswith(":") for chunk in events)
+        assert client.get(f"/api/runs/{run_id}/events").status_code == 401
+        return
+    assert any('"status":"succeeded"' in chunk for chunk in events)
     terminal = client.get(f"/api/runs/{run_id}/events")
     assert terminal.headers["content-type"].startswith("text/event-stream")
     assert '"status":"succeeded"' in terminal.text

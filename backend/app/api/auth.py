@@ -67,17 +67,24 @@ def _require_origin(request: Request) -> None:
         raise ApiError(403, "INVALID_REQUEST_ORIGIN", "Запрос должен быть отправлен со страницы CyberFlow.")
 
 
-def _current_user(
-    request: Request,
-    db: Database,
-    session: Annotated[str | None, Cookie(alias=_SESSION)] = None,
-) -> User:
+def _session_hash(session: Annotated[str | None, Cookie(alias=_SESSION)] = None) -> str:
     if session is None or len(session) != 43:
         raise ApiError(401, "AUTH_REQUIRED", "Войдите через GitHub.")
-    user = db.scalar(
+    return token_hash(session)
+
+
+SessionHash = Annotated[str, Depends(_session_hash)]
+
+
+def session_user(db: Database, session_hash: str) -> User | None:
+    return db.scalar(
         select(User).join(UserSession, User.id == UserSession.user_id)
-        .where(UserSession.token_hash == token_hash(session), UserSession.expires_at > datetime.now(UTC))
+        .where(UserSession.token_hash == session_hash, UserSession.expires_at > datetime.now(UTC))
     )
+
+
+def _current_user(request: Request, db: Database, session_hash: SessionHash) -> User:
+    user = session_user(db, session_hash)
     if user is None:
         raise ApiError(401, "AUTH_REQUIRED", "Войдите через GitHub.")
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
@@ -214,10 +221,9 @@ def update_profile(data: ProfileUpdate, user: CurrentUser, db: Database) -> User
 
 @router.post("/auth/logout", status_code=204)
 def logout(
-    request: Request, db: Database, user: CurrentUser,
-    session: Annotated[str, Cookie(alias=_SESSION)],
+    request: Request, db: Database, user: CurrentUser, session_hash: SessionHash,
 ) -> Response:
-    db.execute(delete(UserSession).where(UserSession.token_hash == token_hash(session), UserSession.user_id == user.id))
+    db.execute(delete(UserSession).where(UserSession.token_hash == session_hash, UserSession.user_id == user.id))
     db.commit()
     response = Response(status_code=204)
     _clear_cookie(response, _SESSION, app_origin(request))

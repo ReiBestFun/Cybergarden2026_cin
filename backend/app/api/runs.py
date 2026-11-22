@@ -11,7 +11,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..analyzers.models import Category, Coverage, Finding, ScanResult, Severity, Warning
-from ..db.models import User, FindingRow, NodeRun, Project, ScanRun
+from ..db.models import FindingRow, NodeRun, Project, ScanRun
 from ..db.session import Database
 from ..db.workspaces import project_access
 from ..nodes.catalog import NOTIFIER_CONFIGS
@@ -23,7 +23,7 @@ from ..schemas.contracts import (
 )
 from ..workflows.queue import enqueue_manual_run
 from ..workflows.validation import validate_graph
-from .auth import CurrentUser
+from .auth import CurrentUser, SessionHash, session_user
 from .common import ApiError, Pagination, graph_error, page
 from .projects import get_project
 from .workflows import get_workflow
@@ -123,7 +123,7 @@ def _stream_finished(run: RunDetail, wait_for_delivery: bool) -> bool:
     )
 
 
-def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user: User, *, wait_for_delivery: bool = False) -> Iterator[str]:
+def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, session_hash: str, *, wait_for_delivery: bool = False) -> Iterator[str]:
     previous = run.model_dump_json()
     yield f"retry: 1500\nevent: run\ndata: {previous}\n\n"
     if _stream_finished(run, wait_for_delivery):
@@ -133,7 +133,16 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user:
         while True:
             # Take a new snapshot after LISTEN to include changes since the first read.
             with sessions() as db:
-                run = _run_detail(_get_run(run.id, db, user.id), db)
+                user = session_user(db, session_hash)
+                if user is None:
+                    return
+                try:
+                    row = _get_run(run.id, db, user.id)
+                except ApiError as error:
+                    if error.status == 404:
+                        return
+                    raise
+                run = _run_detail(row, db)
             current = run.model_dump_json()
             if current != previous:
                 yield f"event: run\ndata: {current}\n\n"
@@ -145,13 +154,13 @@ def _run_events(run: RunDetail, sessions: sessionmaker[Session], dsn: str, user:
 
 
 @router.get("/runs/{run_id}/events")
-def stream_run(run_id: UUID, request: Request, user: CurrentUser, wait_for_delivery: bool = False) -> StreamingResponse:
+def stream_run(run_id: UUID, request: Request, user: CurrentUser, session_hash: SessionHash, wait_for_delivery: bool = False) -> StreamingResponse:
     sessions = request.app.state.session_factory
     with sessions() as db:
         initial = _run_detail(_get_run(run_id, db, user.id, request), db)
     dsn = make_url(request.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     return StreamingResponse(
-        _run_events(initial, sessions, dsn, user, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
+        _run_events(initial, sessions, dsn, session_hash, wait_for_delivery=wait_for_delivery), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 

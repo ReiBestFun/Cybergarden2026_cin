@@ -4,15 +4,26 @@ from typing import get_args
 
 from pydantic import ValidationError
 
-from ..nodes.catalog import CATALOG, NOTIFIER_CONFIGS, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft
+from ..analyzers.registry import SCANNER_NODES
+from ..nodes.catalog import (
+    CATALOG, NOTIFIER_CONFIGS, ArchiveConfig, CiGateConfig, CiTriggerConfig, ConditionConfig, ConditionDraft,
+    ConditionExpression, ConditionGroup,
+)
 from ..schemas.contracts import CiDecision, Graph, Issue, Node
 
-_ANALYZERS = {"scan_secrets", "scan_sca", "scan_sast"}
 _TRIGGERS = {"manual_trigger", "schedule_trigger", "ci_trigger"}
 
 
 def _config_error(node: Node, *, draft: bool) -> Issue | None:
     config = node.config
+    if node.type == "local_archive":
+        if draft and not config:
+            return None
+        try:
+            ArchiveConfig.model_validate(config)
+        except ValidationError:
+            return Issue(code="ARCHIVE_REQUIRED", message="Выберите ZIP-файл в настройках ноды.", node_id=node.id, field="config.archive_sha256")
+        return None
     if node.type == "ci_gate":
         try:
             CiGateConfig.model_validate(config)
@@ -31,25 +42,17 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
             if draft and config.keys() < allowed:
                 ConditionDraft.model_validate(config)
                 return None
-            condition = ConditionConfig.model_validate(config)
+            condition = ConditionExpression.model_validate(config).root
         except ValidationError:
-            return Issue(code="INVALID_CONFIG", message="Укажите поле, операцию и значение условия.", node_id=node.id, field="config")
-        if condition.field == "ci.decision":
-            if condition.operator not in {"eq", "ne"} or condition.value not in get_args(CiDecision):
-                return Issue(code="INVALID_CONFIG", message="Для вердикта CI выберите passed, blocked или error и операцию eq или ne.", node_id=node.id, field="config.value")
-        elif condition.field == "coverage.status":
-            if not isinstance(condition.value, str) or condition.operator not in {"eq", "ne", "matches"}:
-                return Issue(code="INVALID_CONFIG", message="Для покрытия нужна строка и операция eq, ne или matches.", node_id=node.id, field="config")
-            if condition.operator == "matches" and condition.value:
-                try:
-                    re.compile(condition.value)
-                except (re.error, RecursionError):
-                    return Issue(code="INVALID_REGEX", message="Неверный шаблон регулярного выражения.", node_id=node.id, field="config.value")
-        elif type(condition.value) is not int or condition.operator == "matches":
-            return Issue(code="INVALID_CONFIG", message="Для счётчика требуется целое число и операция сравнения.", node_id=node.id, field="config")
-        return None
+            return Issue(code="INVALID_CONFIG", message="Заполните условия. Для группы выберите AND или OR и задайте минимум две проверки.", node_id=node.id, field="config")
+        if isinstance(condition, ConditionGroup):
+            for index, rule in enumerate(condition.conditions):
+                if issue := _condition_error(rule, node.id, f"config.conditions.{index}"):
+                    return issue
+            return None
+        return _condition_error(condition, node.id, "config")
     if node.type in NOTIFIER_CONFIGS:
-        if draft and not config.get("recipients"):
+        if draft and node.type != "notify_slack" and not config.get("recipients"):
             # A draft may be saved before recipients are filled in; running it is still blocked.
             config = {**config, "recipients": ["@placeholder"] if node.type == "notify_telegram" else ["draft@example.org"]}
         try:
@@ -65,6 +68,23 @@ def _config_error(node: Node, *, draft: bool) -> Issue | None:
         return None
     if config:
         return Issue(code="INVALID_CONFIG", message="У этого типа ноды нет настроек графа.", node_id=node.id, field="config")
+    return None
+
+
+def _condition_error(condition: ConditionConfig, node_id: str, path: str) -> Issue | None:
+    if condition.field == "ci.decision":
+        if condition.operator not in {"eq", "ne"} or condition.value not in get_args(CiDecision):
+            return Issue(code="INVALID_CONFIG", message="Для вердикта CI выберите passed, blocked или error и операцию eq или ne.", node_id=node_id, field=f"{path}.value")
+    elif condition.field == "coverage.status":
+        if not isinstance(condition.value, str) or condition.operator not in {"eq", "ne", "matches"}:
+            return Issue(code="INVALID_CONFIG", message="Для покрытия нужна строка и операция eq, ne или matches.", node_id=node_id, field=path)
+        if condition.operator == "matches" and condition.value:
+            try:
+                re.compile(condition.value)
+            except (re.error, RecursionError):
+                return Issue(code="INVALID_REGEX", message="Неверный шаблон регулярного выражения.", node_id=node_id, field=f"{path}.value")
+    elif type(condition.value) is not int or condition.operator == "matches":
+        return Issue(code="INVALID_CONFIG", message="Для счётчика требуется целое число и операция сравнения.", node_id=node_id, field=path)
     return None
 
 
@@ -96,10 +116,13 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
         issues.append(Issue(code="TRIGGER_COUNT", message="Требуется ровно один триггер."))
     elif expected_trigger and triggers[0].type != expected_trigger:
         issues.append(Issue(code="WRONG_TRIGGER", message="Тип триггера не подходит для этого запуска.", node_id=triggers[0].id))
-    for kind in ("repository", "merge_findings"):
-        if counts[kind] != 1:
-            issues.append(Issue(code="REQUIRED_NODE_COUNT", message=f"Требуется одна нода {kind}."))
-    if not _ANALYZERS & counts.keys():
+    if counts["repository"] + counts["local_archive"] != 1:
+        issues.append(Issue(code="REQUIRED_NODE_COUNT", message="Выберите один источник: репозиторий или локальный ZIP."))
+    if counts["ci_trigger"] and counts["local_archive"]:
+        issues.append(Issue(code="CI_REPOSITORY_REQUIRED", message="Для GitHub Actions нужен репозиторий с проверяемым коммитом."))
+    if counts["merge_findings"] != 1:
+        issues.append(Issue(code="REQUIRED_NODE_COUNT", message="Требуется одна нода merge_findings."))
+    if not SCANNER_NODES.keys() & counts.keys():
         issues.append(Issue(code="ANALYZER_REQUIRED", message="Подключите хотя бы один анализатор."))
     for kind in ("ai_report", "ci_gate"):
         if counts[kind] > 1:
@@ -175,6 +198,6 @@ def validate_graph(graph: Graph, *, expected_trigger: str | None = None) -> list
         if gate.id not in outgoing[merge.id]:
             return [Issue(code="CI_GATE_INPUT", message="Подключите порог CI напрямую к объединению находок.", node_id=gate.id)]
         for node in nodes.values():
-            if node.type in _ANALYZERS and merge.id not in outgoing[node.id]:
+            if node.type in SCANNER_NODES and merge.id not in outgoing[node.id]:
                 issues.append(Issue(code="CI_SCAN_INPUT", message="Подключите анализатор к объединению находок.", node_id=node.id))
     return issues

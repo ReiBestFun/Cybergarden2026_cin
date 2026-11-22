@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, JsonValue, StringConstraints
 
-from ..analyzers.models import Category, Severity
+from ..analyzers.models import Category, FindingVerification, Severity
 from ..integrations.repository import REF_PATTERN
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
@@ -83,14 +83,39 @@ class ProjectCreate(Input):
     name: Name
     repository_url: Annotated[str, StringConstraints(max_length=2048)]
     default_ref: Ref = "main"
+    workspace_id: UUID | None = None
 
 
 class ProjectRead(ReadModel):
     id: UUID
+    workspace_id: UUID
     name: str
     repository_url: str
     default_ref: str
     created_at: datetime
+
+
+class ProjectPatch(Input):
+    name: Name | None = None
+    default_ref: Ref | None = None
+
+
+class ProjectMove(Input):
+    workspace_id: UUID
+
+
+class WorkspaceCreate(Input):
+    name: Name
+
+
+WorkspaceRole = Literal["owner", "member"]
+
+
+class WorkspaceRead(ReadModel):
+    id: UUID
+    name: str
+    personal: bool
+    role: WorkspaceRole
 
 
 class WorkflowCreate(Input):
@@ -230,7 +255,8 @@ class FindingRead(ReadModel):
     line: int | None
     end_line: int | None
     evidence: str
-    metadata: dict[str, str] = Field(validation_alias="details")
+    metadata: dict[str, str] = Field(validation_alias="finding_metadata")
+    verification: FindingVerification | None = None
 
 
 class RunReportRead(BaseModel):

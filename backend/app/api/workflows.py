@@ -5,46 +5,78 @@ from uuid import UUID
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
-from ..db.models import Schedule, Workflow
+from ..db.models import Project, ProjectArchive, Schedule, Workflow
 from ..db.session import Database
+from ..db.workspaces import project_access
 from ..integrations.repository import is_repository_allowed
 from ..llm import ModelError
 from ..nodes.catalog import CATALOG, CatalogRead
 from ..schemas.contracts import (
-    Graph, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
+    Graph, Issue, Page, SchedulePreview, ScheduleRead, ScheduleSettings, ScheduleUpdate, ValidateWorkflow, ValidationResult,
     WorkflowCreate, WorkflowPatch, WorkflowRead,
 )
 from ..workflows.generation import GeneratedWorkflow, GenerationError, GenerationRequest, generate_workflow
 from ..workflows.scheduling import ScheduleSpecError, next_slot
 from ..workflows.schedules import apply_spec, preview, schedule_read, spec_from_settings
 from ..workflows.validation import validate_draft, validate_graph
+from ..workspace_llm import model_settings
+from .auth import CurrentUser
 from .common import ApiError, PageQuery, graph_error, normalize_repository, page
 from .projects import get_project
+from .workspaces import workspace_role
 
 router = APIRouter(tags=["workflows"])
 
 
-def get_workflow(workflow_id: UUID, db: Database, *, lock: bool = False) -> Workflow:
-    statement = select(Workflow).where(Workflow.id == workflow_id)
-    workflow = db.scalar(statement.with_for_update() if lock else statement)
+def get_workflow(workflow_id: UUID, db: Database, user_id: UUID, *, lock: bool = False, owner_required: bool = False) -> Workflow:
+    statement = select(Workflow).join(Project, Project.id == Workflow.project_id).where(
+        Workflow.id == workflow_id, project_access(user_id),
+    )
+    workflow = db.scalar(statement.with_for_update(of=Workflow) if lock else statement)
     if workflow is None:
         raise ApiError(404, "WORKFLOW_NOT_FOUND", "Сценарий не найден.")
+    if owner_required:
+        get_project(workflow.project_id, db, user_id, owner_required=True)
     return workflow
 
 
-def _draft(graph: Graph) -> dict:
+def checked_draft(graph: Graph) -> dict:
     if issues := validate_draft(graph):
         raise graph_error(issues[0])
     return graph.model_dump(mode="json")
 
 
+def archive_issue(graph: Graph, db: Database, project_id: UUID) -> Issue | None:
+    sources = [(node.id, node.config["archive_sha256"]) for node in graph.nodes
+               if node.type == "local_archive" and node.config.get("archive_sha256")]
+    if sources:
+        attached = set(db.scalars(select(ProjectArchive.sha256).where(
+            ProjectArchive.project_id == project_id, ProjectArchive.sha256.in_([digest for _, digest in sources]),
+        )))
+        for node_id, digest in sources:
+            if digest not in attached:
+                return Issue(code="ARCHIVE_NOT_FOUND", message="Загрузите ZIP в этот проект.", node_id=node_id)
+    return None
+
+
+def checked_project_draft(graph: Graph, db: Database, project_id: UUID) -> dict:
+    draft = checked_draft(graph)
+    if issue := archive_issue(graph, db, project_id):
+        raise graph_error(issue)
+    return draft
+
+
 @router.get("/check-types", response_model=CatalogRead)
-def list_node_types() -> CatalogRead:
+def list_node_types(user: CurrentUser) -> CatalogRead:
     return CatalogRead(items=list(CATALOG.values()))
 
 
 @router.post("/workflows/generate", response_model=GeneratedWorkflow)
-def generate_draft(data: GenerationRequest, request: Request) -> GeneratedWorkflow:
+def generate_draft(
+    data: GenerationRequest, request: Request, user: CurrentUser, db: Database, workspace_id: UUID | None = None,
+) -> GeneratedWorkflow:
+    if workspace_id is not None:
+        workspace_role(db, workspace_id, user.id)
     urls = {normalize_repository(url.rstrip(".,;:!?")) for url in re.findall(
         r"""https://github\.com/[^\s<>()\[\]{}"'\x60]+""", data.description,
     )}
@@ -54,7 +86,7 @@ def generate_draft(data: GenerationRequest, request: Request) -> GeneratedWorkfl
     if repository_url is not None and not is_repository_allowed(repository_url, request.app.state.allowed_repositories):
         raise ApiError(422, "REPOSITORY_NOT_ALLOWED", "Репозиторий отсутствует в списке учебных источников.")
     try:
-        return generate_workflow(data, request.app.state.settings, repository_url)
+        return generate_workflow(data, model_settings(db, workspace_id, request.app.state.settings), repository_url)
     except ModelError as error:
         raise ApiError(502, "MODEL_ERROR", str(error)) from None
     except GenerationError as error:
@@ -62,33 +94,33 @@ def generate_draft(data: GenerationRequest, request: Request) -> GeneratedWorkfl
 
 
 @router.get("/projects/{project_id}/workflows", response_model=Page[WorkflowRead])
-def list_workflows(project_id: UUID, db: Database, pagination: PageQuery) -> dict:
-    get_project(project_id, db)
+def list_workflows(project_id: UUID, db: Database, pagination: PageQuery, user: CurrentUser) -> dict:
+    get_project(project_id, db, user.id)
     statement = select(Workflow).where(Workflow.project_id == project_id).order_by(Workflow.updated_at.desc(), Workflow.id.desc())
     return page(db, statement, pagination.limit, pagination.offset)
 
 
 @router.post("/projects/{project_id}/workflows", status_code=201, response_model=WorkflowRead)
-def create_workflow(project_id: UUID, data: WorkflowCreate, db: Database) -> Workflow:
-    get_project(project_id, db)
-    workflow = Workflow(project_id=project_id, name=data.name, graph_json=_draft(data.graph))
+def create_workflow(project_id: UUID, data: WorkflowCreate, db: Database, user: CurrentUser) -> Workflow:
+    get_project(project_id, db, user.id, owner_required=True)
+    workflow = Workflow(project_id=project_id, name=data.name, graph_json=checked_project_draft(data.graph, db, project_id))
     db.add(workflow)
     db.commit()
     return workflow
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowRead)
-def workflow_detail(workflow_id: UUID, db: Database) -> Workflow:
-    return get_workflow(workflow_id, db)
+def workflow_detail(workflow_id: UUID, db: Database, user: CurrentUser) -> Workflow:
+    return get_workflow(workflow_id, db, user.id)
 
 
 @router.patch("/workflows/{workflow_id}", response_model=WorkflowRead)
-def modify_workflow(workflow_id: UUID, data: WorkflowPatch, db: Database) -> Workflow:
-    workflow = get_workflow(workflow_id, db, lock=True)
+def modify_workflow(workflow_id: UUID, data: WorkflowPatch, db: Database, user: CurrentUser) -> Workflow:
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     if data.name is not None:
         workflow.name = data.name
     if data.graph is not None:
-        workflow.graph_json = _draft(data.graph)
+        workflow.graph_json = checked_project_draft(data.graph, db, workflow.project_id)
         schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id).with_for_update())
         if schedule is not None and schedule.enabled:
             issues = validate_graph(data.graph, expected_trigger="schedule_trigger")
@@ -101,16 +133,18 @@ def modify_workflow(workflow_id: UUID, data: WorkflowPatch, db: Database) -> Wor
 
 
 @router.post("/workflows/{workflow_id}/validate", response_model=ValidationResult)
-def validate_workflow(workflow_id: UUID, db: Database, data: ValidateWorkflow | None = None) -> ValidationResult:
-    workflow = get_workflow(workflow_id, db)
+def validate_workflow(workflow_id: UUID, db: Database, user: CurrentUser, data: ValidateWorkflow | None = None) -> ValidationResult:
+    workflow = get_workflow(workflow_id, db, user.id)
     graph = data.graph if data and data.graph is not None else Graph.model_validate(workflow.graph_json)
     issues = validate_graph(graph)
+    if not issues and (issue := archive_issue(graph, db, workflow.project_id)):
+        issues.append(issue)
     return ValidationResult(valid=not issues, issues=issues)
 
 
 @router.get("/workflows/{workflow_id}/schedule", response_model=ScheduleRead)
-def get_schedule(workflow_id: UUID, db: Database) -> ScheduleRead:
-    get_workflow(workflow_id, db)
+def get_schedule(workflow_id: UUID, db: Database, user: CurrentUser) -> ScheduleRead:
+    get_workflow(workflow_id, db, user.id)
     schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id))
     return schedule_read(schedule)
 
@@ -123,14 +157,16 @@ def _spec(data: ScheduleSettings):
 
 
 @router.post("/schedules/preview", response_model=SchedulePreview)
-def preview_schedule(data: ScheduleSettings) -> SchedulePreview:
+def preview_schedule(data: ScheduleSettings, user: CurrentUser) -> SchedulePreview:
+    if data.timezone is None:
+        data = data.model_copy(update={"timezone": user.timezone})
     _spec(data)
     return SchedulePreview(next_runs=preview(data))
 
 
 @router.put("/workflows/{workflow_id}/schedule", response_model=ScheduleRead)
-def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database) -> ScheduleRead:
-    workflow = get_workflow(workflow_id, db, lock=True)
+def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database, user: CurrentUser) -> ScheduleRead:
+    workflow = get_workflow(workflow_id, db, user.id, lock=True, owner_required=True)
     schedule = db.scalar(select(Schedule).where(Schedule.workflow_id == workflow_id).with_for_update())
     if not data.enabled:
         if data.timezone is not None:
@@ -147,6 +183,8 @@ def set_schedule(workflow_id: UUID, data: ScheduleUpdate, db: Database) -> Sched
             db.commit()
         return schedule_read(schedule)
 
+    if data.timezone is None:
+        data = data.model_copy(update={"timezone": user.timezone})
     spec = _spec(data)
     graph = Graph.model_validate(workflow.graph_json)
     if issues := validate_graph(graph, expected_trigger="schedule_trigger"):

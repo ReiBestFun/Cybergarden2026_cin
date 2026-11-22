@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import math
 import re
 import tomllib
+from collections import Counter
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Iterator
 
@@ -37,6 +41,9 @@ _KEY_FORMAT = re.compile(
     r"(?:AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{30,}|"
     r"github_pat_[A-Za-z0-9_]{30,}|-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----)"
 )
+_OPAQUE_TOKEN = re.compile(r"[A-Za-z0-9_-]{24,256}={0,2}")
+_UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_PAGINATION_NAMES = ("paginationtoken", "pagetoken", "continuationtoken")
 _KEY_VALUE = re.compile(r"^\s*(?:export\s+)?([\w.-]+)\s*[:=]\s*(.*?)\s*$")
 
 
@@ -46,9 +53,13 @@ def accepts_secrets_source(path: PurePosixPath) -> bool:
     )
 
 
+def _normalized_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 def _role(name: str) -> str | None:
-    normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-    if normalized.endswith(("paginationtoken", "pagetoken", "continuationtoken")):
+    normalized = _normalized_name(name)
+    if normalized.endswith(_PAGINATION_NAMES):
         return None
     if normalized.endswith(("password", "passwd")):
         return "password"
@@ -57,6 +68,25 @@ def _role(name: str) -> str | None:
     if normalized.endswith(("token", "authorization", "clientsecret")) or normalized == "secret":
         return "configuration-token"
     return None
+
+
+def _literal_role(value: str, role: str | None, name: str) -> str | None:
+    if role:
+        return role
+    if _KEY_FORMAT.search(value):
+        return "api-key"
+    normalized = _normalized_name(name)
+    if normalized in {"", "artifact", "artifactid"} or normalized.endswith((*_PAGINATION_NAMES, "checksum", "digest", "hash")):
+        return None
+    value = _CREDENTIAL_PREFIX.sub("", value)
+    if not _OPAQUE_TOKEN.fullmatch(value) or _UUID.fullmatch(value):
+        return None
+    if len(value) in {32, 40, 56, 64, 96, 128} and re.fullmatch(r"[0-9a-fA-F]+", value):
+        return None
+    # Bits per character in the observed literal, after length and format checks.
+    frequencies = (count / len(value) for count in Counter(value).values())
+    entropy = -sum(p * math.log2(p) for p in frequencies)
+    return "configuration-token" if entropy >= 4.0 else None
 
 
 def _concrete(value: str) -> bool:
@@ -124,23 +154,61 @@ def _fallback(source: kotlin.KotlinFile, node: Node, role: str | None) -> str | 
     return _constant(source, right) if role or (key and _role(key)) else None
 
 
+def _encoded_credential(source: kotlin.KotlinFile, node: Node) -> Node | None:
+    as_text = kotlin.call(source.resolve(node))
+    if not as_text or as_text.name != "decodeToString" or as_text.args or as_text.receiver is None:
+        return None
+    decode = kotlin.call(source.resolve(as_text.receiver))
+    if not decode or decode.name != "decode" or len(decode.args) != 1 or decode.receiver is None:
+        return None
+    factory = kotlin.call(source.resolve(decode.receiver))
+    if not factory or factory.name != "getDecoder" or factory.receiver is None or factory.args:
+        return None
+    if kotlin.text(factory.receiver) not in {"Base64", "java.util.Base64"}:
+        return None
+    literal = source.resolve(decode.args[0])
+    value = kotlin.literal(literal)
+    if value is None or len(value) > 8192:
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except ValueError:
+        return None
+    return literal if _concrete(decoded) else None
+
+
 def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
-    def check(node: Node, role: str | None, context: Node) -> Finding | None:
+    inferred: dict[Node, Finding] = {}
+    classified: set[Node] = set()
+
+    def check(node: Node, context: Node, name: str, *, role: str | None = None) -> Finding | None:
+        """Defer inferred matches so explicit uses can classify the same literal."""
+        role = role or _role(name)
         origin = source.resolve(node)
+        # The declaration owns inferred context when another expression refers to it.
+        if role is None and not (node.start_byte <= origin.start_byte and origin.end_byte <= node.end_byte):
+            return None
+        if role and (encoded := _encoded_credential(source, origin)) is not None:
+            classified.add(encoded)
+            return _finding("recoverable-token", path, kotlin.line(encoded), kotlin.end_line(encoded))
         fallback = _fallback(source, origin, role)
         if fallback is not None and _concrete(fallback):
             return _finding("secret-fallback", path, kotlin.line(origin), kotlin.end_line(origin))
         value = _constant(source, origin)
         if value is None or not _concrete(value):
             return None
-        if role is None and _KEY_FORMAT.search(value):
-            role = "api-key"
-        if role is None:
+        kind = _literal_role(value, role, name)
+        if kind is None:
             return None
         anchor = context if origin == node else origin
         if kotlin.literal(origin) is None:
-            role = "recoverable-token"
-        return _finding(role, path, kotlin.line(anchor), kotlin.end_line(anchor))
+            kind = "recoverable-token"
+        finding = _finding(kind, path, kotlin.line(anchor), kotlin.end_line(anchor))
+        if role is None:
+            inferred.setdefault(origin, finding)
+            return None
+        classified.add(origin)
+        return finding
 
     for annotation in kotlin.walk(source.root, "annotation"):
         if not _SPRING_VALUE.match(kotlin.text(annotation)):
@@ -155,20 +223,20 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
 
     for node in kotlin.walk(source.root, "property_declaration"):
         value = kotlin.property_value(node)
-        if value is not None and (finding := check(value[1], _role(value[0]), node)):
-            yield finding
+        if value is not None and (finding := check(value[1], node, value[0])):
+            yield replace(finding, metadata=finding.metadata | {"property_offset": str(node.start_byte)})
 
     for node in kotlin.walk(source.root, "assignment"):
         left, right = (node.child_by_field_name(side) for side in ("left", "right"))
         if left is not None and right is not None:
-            role = _role(kotlin.text(left).rsplit(".", 1)[-1])
-            if role and (finding := check(right, role, node)):
+            name = kotlin.text(left).rsplit(".", 1)[-1]
+            if finding := check(right, node, name):
                 yield finding
     for node in kotlin.walk(source.root, "infix_expression"):
         parts = kotlin.children(node)
         if len(parts) == 3 and kotlin.text(parts[1]) == "to":
             key = kotlin.literal(parts[0])
-            if key and (role := _role(key)) and (finding := check(parts[2], role, node)):
+            if key and (finding := check(parts[2], node, key)):
                 yield finding
 
     for node in kotlin.walk(source.root, "call_expression"):
@@ -177,30 +245,35 @@ def _kotlin_findings(path: str, source: kotlin.KotlinFile) -> Iterator[Finding]:
             continue
         if call.name in {"header", "addHeader", "setHeader", "set", "add"} and len(call.args) >= 2:
             header = kotlin.literal(call.args[0])
-            if header and (role := _role(header)):
-                if finding := check(call.args[1], role, node):
+            if header and _role(header):
+                if finding := check(call.args[1], node, header):
                     yield finding
         if call.name in {"password", "setPassword", "setBearerAuth", "setApiKey"} and call.args:
-            role = "configuration-token" if call.name == "setBearerAuth" else _role(call.name)
-            if finding := check(call.args[0], role, node):
+            role = "configuration-token" if call.name == "setBearerAuth" else None
+            if finding := check(call.args[0], node, call.name, role=role):
                 yield finding
         arguments = kotlin.child(node, "value_arguments")
         if arguments is not None:
             for argument in kotlin.children(arguments):
                 values = kotlin.children(argument)
                 if len(values) == 2 and values[0].type == "identifier":
-                    role = _role(kotlin.text(values[0]))
-                    if role and (finding := check(values[1], role, argument)):
+                    name = kotlin.text(values[0])
+                    if finding := check(values[1], argument, name):
                         yield finding
+
+    for origin, finding in inferred.items():
+        if origin not in classified:
+            yield finding
 
 
 def _configuration_finding(
     path: str, keys: tuple[str, ...], value: str, start: int, end: int, *, dotenv: bool = False
 ) -> Finding | None:
     value = value.strip()
-    role = _role(keys[-1]) if keys else None
-    if len(keys) >= 2 and keys[-1].lower() in {"value", "default"}:
-        role = _role(keys[-2])
+    name = keys[-1] if keys else ""
+    if len(keys) >= 2 and name.lower() in {"value", "default"}:
+        name = keys[-2]
+    role = _role(name)
     stripped = _CREDENTIAL_PREFIX.sub("", value).strip()
     reference = (_DOTENV_REFERENCE if dotenv else _ENV_REFERENCE).fullmatch(stripped)
     if reference:
@@ -209,8 +282,7 @@ def _configuration_finding(
         if fallback and (role or (name and _role(name))) and _concrete(fallback):
             return _finding("secret-fallback", path, start, end)
         return None
-    if role is None and _KEY_FORMAT.search(value):
-        role = "api-key"
+    role = _literal_role(value, role, name)
     if role is not None and _concrete(value):
         return _finding(role, path, start, end)
     return None
@@ -271,6 +343,21 @@ def _toml_entries(content: str) -> Iterator[tuple[tuple[str, ...], str, int, int
             yield keys, str(value), index, index
 
 
+def _configuration_entries(name: PurePosixPath, content: str) -> Iterator[tuple[tuple[str, ...], str, int, int]]:
+    extension = name.suffix
+    if extension == ".json":
+        json.loads(content)
+    if extension in {".yaml", ".yml", ".json"}:
+        return _yaml_entries(content)
+    if extension == ".toml":
+        return _toml_entries(content)
+    return _properties_entries(content, dotenv=_is_dotenv(name))
+
+
+def _is_dotenv(name: PurePosixPath) -> bool:
+    return name.name.startswith(".env") or name.suffix == ".env"
+
+
 def scan_secrets(snapshot: Snapshot) -> ScanResult:
     scan = Scan(snapshot, accepts_secrets_source)
     findings = []
@@ -284,16 +371,8 @@ def scan_secrets(snapshot: Snapshot) -> ScanResult:
             findings.extend(_kotlin_findings(path, source))
             continue
         try:
-            dotenv = name.name.startswith(".env") or extension == ".env"
-            if extension == ".json":
-                json.loads(content)
-            if extension in {".yaml", ".yml", ".json"}:
-                entries = _yaml_entries(content)
-            elif extension == ".toml":
-                entries = _toml_entries(content)
-            else:
-                entries = _properties_entries(content, dotenv=dotenv)
-            for keys, value, start, end in entries:
+            dotenv = _is_dotenv(name)
+            for keys, value, start, end in _configuration_entries(name, content):
                 if finding := _configuration_finding(path, keys, value, start, end, dotenv=dotenv):
                     findings.append(finding)
         except tomllib.TOMLDecodeError:

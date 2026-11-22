@@ -6,7 +6,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..db.models import NodeRun, Project, ScanRun, Schedule, Workflow
-from ..schemas.contracts import Graph
+from ..schemas.contracts import Graph, NodeStatus
+from ..workspace_logs import diagnostic
 from .schedules import advance
 from .validation import validate_graph
 
@@ -26,19 +27,23 @@ def _enqueue(
     trigger: str, schedule: Schedule | None = None, scheduled_for: datetime | None = None,
     ci_request_id: str | None = None,
 ) -> ScanRun:
+    archive = next((node for node in graph.nodes if node.type == "local_archive"), None)
+    source = ({"archive_sha256": archive.config["archive_sha256"]} if archive
+              else {"repository_url": project.repository_url, "ref": ref})
     run = ScanRun(
         project_id=project.id,
         workflow_id=workflow.id,
         trigger=trigger,
         status="queued",
         graph_snapshot=graph.model_dump(mode="json"),
-        source_snapshot={"repository_url": project.repository_url, "ref": ref},
+        source_snapshot=source,
         ci_request_id=ci_request_id,
         schedule_id=schedule.id if schedule else None,
         scheduled_for=scheduled_for,
     )
     db.add(run)
     db.flush()
+    diagnostic(db, run.id, "run.enqueue", "queued")
     db.add_all([
         NodeRun(run_id=run.id, node_id=node.id, type=node.type, status="pending")
         for node in graph.nodes
@@ -58,8 +63,9 @@ class ClaimedRun:
 
 def claim_next(db: Session) -> ClaimedRun | None:
     run = db.scalar(
-        select(ScanRun).where(ScanRun.status == "queued")
-        .order_by(ScanRun.created_at, ScanRun.id).limit(1).with_for_update(skip_locked=True)
+        select(ScanRun).join(Project, Project.id == ScanRun.project_id)
+        .where(ScanRun.status == "queued", Project.owner_id.is_not(None))
+        .order_by(ScanRun.created_at, ScanRun.id).limit(1).with_for_update(of=ScanRun, skip_locked=True)
     )
     if run is None:
         return None
@@ -69,34 +75,45 @@ def claim_next(db: Session) -> ClaimedRun | None:
     run.claim_token = token
     run.started_at = now
     run.heartbeat_at = now
+    diagnostic(db, run.id, "run.claim", "running")
     return ClaimedRun(run.id, run.project_id, token, run.trigger, run.graph_snapshot, run.source_snapshot)
 
 
-def fail_run(db: Session, run: ScanRun, code: str, message: str) -> None:
+@dataclass(frozen=True)
+class FailedRun:
+    id: UUID
+    nodes: list[tuple[UUID, str, NodeStatus]]
+
+
+def fail_run(db: Session, run: ScanRun, code: str, message: str) -> FailedRun:
     now = datetime.now(UTC)
     error = {"code": code, "message": message}
     run.status = "failed"
     run.error = error
     run.finished_at = now
     run.claim_token = None
-    db.execute(update(NodeRun).where(
-        NodeRun.run_id == run.id, NodeRun.status == "running",
-    ).values(status="failed", finished_at=now, error=error))
-    db.execute(update(NodeRun).where(
-        NodeRun.run_id == run.id, NodeRun.status == "pending",
-    ).values(status="skipped", finished_at=now, error=error))
+    transitions: tuple[tuple[NodeStatus, NodeStatus], ...] = (("running", "failed"), ("pending", "skipped"))
+    nodes: list[tuple[UUID, str, NodeStatus]] = []
+    for previous, status in transitions:
+        rows = db.execute(
+            update(NodeRun).where(NodeRun.run_id == run.id, NodeRun.status == previous)
+            .values(status=status, finished_at=now, error=error).returning(NodeRun.id, NodeRun.type)
+        )
+        nodes.extend((node_id, node_type, status) for node_id, node_type in rows)
+    diagnostic(db, run.id, "run.finish", "failed")
+    for node_id, _, status in nodes:
+        diagnostic(db, run.id, "node.finish", status, node_id)
+    return FailedRun(run.id, nodes)
 
 
-def expire_stale_runs(db: Session, cutoff: datetime) -> int:
+def expire_stale_runs(db: Session, cutoff: datetime) -> list[FailedRun]:
     runs = db.scalars(
-        select(ScanRun).where(
-            ScanRun.status == "running",
+        select(ScanRun).join(Project, Project.id == ScanRun.project_id).where(
+            ScanRun.status == "running", Project.owner_id.is_not(None),
             func.coalesce(ScanRun.heartbeat_at, ScanRun.started_at, ScanRun.created_at) < cutoff,
-        ).with_for_update(skip_locked=True)
+        ).with_for_update(of=ScanRun, skip_locked=True)
     ).all()
-    for run in runs:
-        fail_run(db, run, "WORKER_EXPIRED", "Воркер перестал обновлять состояние запуска.")
-    return len(runs)
+    return [fail_run(db, run, "WORKER_EXPIRED", "Воркер перестал обновлять состояние запуска.") for run in runs]
 
 
 def enqueue_due_schedules(db: Session, now: datetime, limit: int = 20) -> int:
@@ -107,8 +124,9 @@ def enqueue_due_schedules(db: Session, now: datetime, limit: int = 20) -> int:
     produce a single run, after which the schedule moves to the next future slot.
     """
     schedules = db.scalars(
-        select(Schedule).where(Schedule.enabled, Schedule.next_run_at <= now)
-        .order_by(Schedule.next_run_at).limit(limit).with_for_update(skip_locked=True)
+        select(Schedule).join(Workflow, Workflow.id == Schedule.workflow_id).join(Project, Project.id == Workflow.project_id)
+        .where(Schedule.enabled, Schedule.next_run_at <= now, Project.owner_id.is_not(None))
+        .order_by(Schedule.next_run_at).limit(limit).with_for_update(of=Schedule, skip_locked=True)
     ).all()
     created = 0
     for schedule in schedules:

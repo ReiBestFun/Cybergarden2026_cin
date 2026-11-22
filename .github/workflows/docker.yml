@@ -1,0 +1,68 @@
+name: Docker Compose
+
+on:
+  push:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'compose.yaml'
+      - 'deploy/**'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare a disposable deployment
+        run: |
+          cp deploy/env.example .env
+          python3 - <<'PY'
+          import base64, secrets
+          from pathlib import Path
+
+          def key():
+              return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+
+          values = {
+              "APP_BASE_URL": "http://localhost:18080",
+              "HTTP_PORT": "18080",
+              "HTTPS_PORT": "18443",
+              "POSTGRES_PORT": "15432",
+              "POSTGRES_PASSWORD": secrets.token_hex(16) + "@:/",
+              "DATA_ENCRYPTION_KEY": key(),
+              "CREDENTIALS_ENCRYPTION_KEY": key(),
+              "GITHUB_CLIENT_ID": "compose-test",
+              "GITHUB_CLIENT_SECRET": "compose-test",
+              "COMPOSE_PROFILES": "",
+          }
+          config = Path(".env")
+          lines = config.read_text().splitlines()
+          for i, line in enumerate(lines):
+              name = line.partition("=")[0]
+              if name in values:
+                  lines[i] = f"{name}={values.pop(name)}"
+          assert not values, sorted(values)
+          config.write_text("\n".join(lines) + "\n")
+          PY
+      - name: Build and start the stack
+        run: |
+          docker compose --profile '*' config --quiet
+          docker compose up -d --build
+      - name: Check the deployment
+        run: |
+          curl --fail --silent --show-error --retry 20 --retry-all-errors --retry-delay 2 http://localhost:18080/api/health
+          python3 deploy/smoke.py http://localhost:18080
+          docker compose exec -T worker sh -ec 'git --version && test -w /var/lib/cyberflow/logs && test "$(cat /var/lib/cyberflow/logs/.cyberflow-destination)" = docker-archive'
+          docker compose exec -T notifications python -m backend.app.notification_worker --once
+          docker compose run --rm migrate
+      - name: Show container diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail 60

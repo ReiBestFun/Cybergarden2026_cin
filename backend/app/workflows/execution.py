@@ -10,19 +10,22 @@ import regex
 from pydantic import ValidationError
 
 from ..ai_reports import ReportError, explain_report
-from ..analyzers.models import Category, Finding, ScanError, Warning, finding_key
+from ..analyzers.models import Finding, ScanError, Warning, finding_key
+from ..analyzers.registry import SCANNER_NODES, SCANNERS
 from ..config import Settings
-from ..integrations.repository import Allowlist, RepositorySnapshot, allowed_repository_urls, prepare_repository
-from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig
+from ..integrations.archives import prepare_archive
+from ..integrations.repository import Allowlist, RepositorySnapshot, ci_repository_allowlist, prepare_repository
+from ..nodes.catalog import NOTIFIER_CONFIGS, CiGateConfig, ConditionConfig, ConditionExpression, ConditionGroup, TelegramConfig
 from ..notifications import build_message
+from ..notifications.content import build_slack_message
 from ..notifications.queue import NotificationDraft, allowed_recipients
+from ..notifications.slack import SLACK_CHANNEL_RECIPIENT
 from ..reports import NodeResult, RunReport, merge_findings
 from ..schemas.contracts import CiVerdict, Edge, Graph, Node
 from ..worker import run_scan
 from .persistence import RunProgress, error_payload
 from .validation import validate_graph
 
-SCANS: dict[str, Category] = {"scan_secrets": "secrets", "scan_sca": "sca", "scan_sast": "sast"}
 _COMPARISONS = {"eq": eq, "ne": ne, "gt": gt, "gte": ge, "lt": lt, "lte": le}
 _INACTIVE = Warning("INACTIVE_BRANCH", "Вход находится в невыбранной ветке.")
 _UPSTREAM_FAILED = Warning("UPSTREAM_FAILED", "Вход недоступен из-за ошибки предыдущей ноды.")
@@ -59,7 +62,7 @@ def evaluate_ci_gate(config: CiGateConfig, bundle: RunReport) -> CiVerdict:
     return CiVerdict(decision=decision, reason=reason, threshold=config.threshold, findings_at_threshold=count)
 
 
-def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVerdict | None) -> str:
+def _matches_condition(config: ConditionConfig, bundle: RunReport, verdict: CiVerdict | None) -> bool:
     if config.field == "ci.decision":
         if verdict is None:
             raise ScanError(Warning("CI_VERDICT_MISSING", "Для проверки вердикта CI проведите данные через ноду «Порог CI»."))
@@ -69,7 +72,7 @@ def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVer
     else:
         actual = getattr(bundle.summary, config.field.removeprefix("summary."))
     try:
-        matches = (
+        return (
             regex.search(config.value, actual, timeout=0.05) is not None
             if config.operator == "matches" else _COMPARISONS[config.operator](actual, config.value)
         )
@@ -77,6 +80,14 @@ def _condition_branch(config: ConditionConfig, bundle: RunReport, verdict: CiVer
         raise ScanError(Warning("CONDITION_TIMEOUT", "Проверка регулярного выражения превысила лимит времени.")) from None
     except regex.error:
         raise ScanError(Warning("INVALID_REGEX", "Не удалось обработать регулярное выражение.")) from None
+
+
+def _condition_branch(config: ConditionConfig | ConditionGroup, bundle: RunReport, verdict: CiVerdict | None) -> str:
+    if isinstance(config, ConditionGroup):
+        combine = all if config.mode == "AND" else any
+        matches = combine(_matches_condition(rule, bundle, verdict) for rule in config.conditions)
+    else:
+        matches = _matches_condition(config, bundle, verdict)
     return "true" if matches else "false"
 
 
@@ -115,7 +126,7 @@ class GraphExecution:
     def __init__(self, progress: RunProgress, settings: Settings, allowed: Allowlist):
         self.progress = progress
         self.settings = settings
-        self.allowed = allowed_repository_urls(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
+        self.allowed = ci_repository_allowlist(settings.allowed_repositories) if progress.claim.trigger == "ci" else allowed
         self.source = progress.claim.source
         self.prepared: RepositorySnapshot | None = None
         self.steps: dict[str, Step] = {}
@@ -132,6 +143,13 @@ class GraphExecution:
     def _execute_node(self, node: Node, edges: list[Edge], resources: ExitStack) -> Step:
         if node.type in {"manual_trigger", "schedule_trigger", "ci_trigger"}:
             return Step(ports=("params",), preview={"trigger": self.progress.claim.trigger, "ref": self.source.get("ref")})
+        if node.type == "local_archive":
+            digest = node.config["archive_sha256"]
+            content = self.progress.archive_content(digest)
+            if content is None:
+                raise ScanError(Warning("ARCHIVE_NOT_FOUND", "Загрузите ZIP в этот проект."))
+            self.prepared = resources.enter_context(prepare_archive(content, digest, self.settings.sca_catalog_path))
+            return Step(ports=("snapshot",), preview={"archive_sha256": digest, "files": len(self.prepared.snapshot.files)})
         if node.type == "repository":
             url, ref = self.source.get("repository_url"), self.source.get("ref")
             if not isinstance(url, str) or not isinstance(ref, str):
@@ -139,16 +157,17 @@ class GraphExecution:
             prepared = resources.enter_context(prepare_repository(
                 url, ref, allowed=self.allowed, timeout=self.settings.repository_timeout_seconds,
                 catalog_path=self.settings.sca_catalog_path,
+                pin_training_catalog=self.progress.claim.trigger == "ci",
             ))
             if self.progress.claim.trigger == "ci" and prepared.snapshot.sha != ref:
                 raise ScanError(Warning("CI_SHA_MISMATCH", "Полученный коммит не совпадает с SHA из CI."))
             self.prepared = prepared
             return Step(ports=("snapshot",), preview={"commit_sha": self.sha, "files": len(self.prepared.snapshot.files)})
-        if node.type in SCANS:
+        if node.type in SCANNER_NODES:
             assert self.prepared is not None
             outcome = run_scan(
-                SCANS[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
-                run_id=str(self.progress.claim.id),
+                SCANNER_NODES[node.type], self.prepared.snapshot, self.prepared.catalog_path, self.settings.scan_timeout_seconds,
+                run_id=self.progress.claim.id,
             )
             ports = ("result",) if outcome.status == "succeeded" else ()
             return Step(outcome.status, ports, _scan_preview(outcome), outcome.warning, scan=outcome)
@@ -162,7 +181,7 @@ class GraphExecution:
             upstream = self.steps[edges[0].source]
             bundle = upstream.bundle
             assert bundle is not None
-            branch = _condition_branch(ConditionConfig.model_validate(node.config), bundle, upstream.ci_verdict)
+            branch = _condition_branch(ConditionExpression.model_validate(node.config).root, bundle, upstream.ci_verdict)
             preview = {"branch": branch, **_bundle_preview(bundle, upstream.ci_verdict)}
             return Step(ports=(branch,), preview=preview, bundle=bundle, ci_verdict=upstream.ci_verdict)
         if node.type == "ci_gate":
@@ -176,37 +195,59 @@ class GraphExecution:
             bundle = self.steps[edges[0].source].bundle
             assert bundle is not None
             try:
-                text = explain_report(bundle, self.settings)
+                settings = self.progress.llm_settings(self.settings)
+                text = explain_report(bundle, settings)
             except ReportError as error:
                 # Keep the scanner report available to downstream notifications.
                 return Step("failed", ports=("report",), bundle=bundle,
                             warning=Warning("AI_REPORT_UNAVAILABLE", str(error)))
-            return Step(ports=("report",), bundle=bundle, preview={"text": text, "model": self.settings.llm_model})
+            return Step(ports=("report",), bundle=bundle, preview={"text": text, "model": settings.llm_model})
         return Step("failed", warning=_INTEGRATION_UNAVAILABLE)
 
     def _notify(self, node: Node, edges: list[Edge]) -> Step:
         bundle = next((self.steps[edge.source].bundle for edge in edges if self._active(edge)), None)
         if bundle is None:
             raise ScanError(Warning("NO_REPORT", "На вход уведомления не пришёл отчёт."))
+        if node.type == "notify_slack":
+            settings = self.progress.delivery_settings("slack")
+            if settings is None or not settings.secret:
+                raise ScanError(Warning("SLACK_NOT_CONFIGURED", "Подключите Slack в настройках команды."))
+            message = build_slack_message(bundle, run_id=str(self.progress.claim.id), app_base_url=self.settings.app_base_url)
+            draft = NotificationDraft(
+                "slack", (SLACK_CHANNEL_RECIPIENT,), None, message, settings.workspace_id, settings.version,
+            )
+        else:
+            draft = self._mail_or_telegram(node, edges, bundle)
+        return Step(
+            ports=("delivery",),
+            preview={"channel": draft.channel, "status": "queued", "attachments": [item.filename for item in draft.message.attachments]},
+            notification=draft,
+        )
+
+    def _mail_or_telegram(self, node: Node, edges: list[Edge], bundle: RunReport) -> NotificationDraft:
         config = NOTIFIER_CONFIGS[node.type].model_validate(node.config)
+        summary_only = isinstance(config, TelegramConfig) and config.summary_only
         message = build_message(
             bundle, run_id=str(self.progress.claim.id), repository=str(self.source.get("repository_url", "")),
             app_base_url=self.settings.app_base_url, attach_json=config.attach_json,
-            max_attachment_bytes=self.settings.notify_max_attachment_bytes,
+            max_attachment_bytes=self.settings.notify_max_attachment_bytes, summary_only=summary_only,
         )
         if getattr(config, "subject", None):
             message = replace(message, subject=config.subject)
         upstream = self.steps[edges[0].source]
-        if edges[0].source_port == "report":
+        if edges[0].source_port == "report" and not summary_only:
             explanation = (upstream.preview or {}).get("text") or "AI-рекомендации недоступны."
             message = replace(message, text=message.text + "\n\n" + explanation)
         channel = node.type.removeprefix("notify_")
-        draft = NotificationDraft(channel, tuple(config.recipients), allowed_recipients(self.settings, channel), message)
-        return Step(
-            ports=("delivery",),
-            preview={"channel": channel, "status": "queued", "attachments": [item.filename for item in message.attachments]},
-            notification=draft,
-        )
+        allowed = allowed_recipients(self.settings, channel)
+        recipients = tuple(config.recipients)
+        workspace_id = None
+        if config.use_workspace_settings:
+            settings = self.progress.delivery_settings(channel)
+            if settings is None or not settings.recipients:
+                raise ScanError(Warning("WORKSPACE_DELIVERY_UNCONFIGURED", "Настройте получателей команды для этого канала."))
+            workspace_id, recipients = settings.workspace_id, tuple(settings.recipients)
+        return NotificationDraft(channel, recipients, allowed, message, workspace_id)
 
     def _run_node(self, node: Node, inputs: list[Edge], resources: ExitStack) -> Step:
         active = [edge for edge in inputs if self._active(edge)]
@@ -235,8 +276,9 @@ class GraphExecution:
     def _record(self, node: Node, step: Step) -> None:
         self.steps[node.id] = step
         findings = []
-        if node.type in SCANS:
-            outcome = step.scan or NodeResult(SCANS[node.type], step.status, warning=step.warning)
+        if node.type in SCANNER_NODES:
+            category = SCANNERS[SCANNER_NODES[node.type]].category
+            outcome = step.scan or NodeResult(category, step.status, warning=step.warning)
             self.scans[node.id] = outcome
             if outcome.result is not None:
                 for finding in outcome.result.findings:
@@ -275,7 +317,7 @@ class GraphExecution:
                 ready = order.get_ready()
                 scans = {
                     node_id: pool.submit(self._run_node, nodes[node_id], incoming[node_id], resources)
-                    for node_id in ready if nodes[node_id].type in SCANS
+                    for node_id in ready if nodes[node_id].type in SCANNER_NODES
                 }
                 for node_id in ready:
                     node = nodes[node_id]

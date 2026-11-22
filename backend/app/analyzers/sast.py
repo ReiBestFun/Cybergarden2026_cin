@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Iterator
 
 import yaml
 from tree_sitter import Node
-from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from . import kotlin as kt
 from .models import Finding, Scan, ScanResult, Severity, Snapshot, Warning
+from .spring_settings import spring_settings
 
 _RULES: dict[str, tuple[Severity, str, str, str]] = {
+    "error-stacktrace": (
+        "medium", "Стек исключения в ответе сервера",
+        "Spring Boot настроен передавать стек исключения в ответах об ошибках.",
+        "Установите server.error.include-stacktrace=never.",
+    ),
     "sql-injection": (
         "high", "Пользовательский ввод в SQL", "SQL-команда строится на основе параметра запроса.",
         "Передавайте значения отдельными параметрами JDBC, а текст запроса оставляйте статическим.",
@@ -47,8 +52,10 @@ _RULES: dict[str, tuple[Severity, str, str, str]] = {
 _MAPPING_METHODS = {f"{method.title()}Mapping": method for method in ("GET", "POST", "PUT", "DELETE", "PATCH")}
 _AUTH_ANNOTATIONS = {"PreAuthorize", "Secured", "RolesAllowed", "PostAuthorize"}
 _WEB_INPUTS = {"RequestParam", "PathVariable", "RequestHeader", "RequestBody", "CookieValue", "ModelAttribute"}
-_OWNERS = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\b", re.IGNORECASE)
-_OWNER_BIND = re.compile(r"\b(?:owner|customer|user|account|tenant)_?id\s*=\s*(\?)", re.IGNORECASE)
+_OWNER_COLUMN = r"\b(?:owner|customer|user|account|tenant|organizer)_?id\b"
+_OWNERS = re.compile(_OWNER_COLUMN, re.IGNORECASE)
+_OWNER_BIND = re.compile(_OWNER_COLUMN + r"\s*=\s*(\?|:\w+)", re.IGNORECASE)
+_ID_BIND = re.compile(r"\b(?:\w+_)?id\s*=\s*(\?|:\w+)", re.IGNORECASE)
 _SENSITIVE = re.compile(
     r"\b(?:(?:customer|user|account|tenant|owner)_?(?:id|address|number)|"
     r"password|email|email_address|phone|phone_number|ssn)\b", re.IGNORECASE
@@ -99,6 +106,10 @@ _ACTUATOR_METHODS = {
 
 def accepts_sast_source(path: PurePosixPath) -> bool:
     return path.suffix == ".kt" or path.name in _SPRING_CONFIGURATION
+
+
+def accepts_spring_source(path: PurePosixPath) -> bool:
+    return accepts_sast_source(path) or bool(re.fullmatch(r"application-.+\.(?:properties|ya?ml)", path.name))
 
 
 def _short(node: Node) -> str:
@@ -308,14 +319,16 @@ def _index(
     return functions, routes, supertypes
 
 
-def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
+def _located_finding(kind: str, path: str, start: int, end: int) -> Finding:
     severity, title, description, remediation = _RULES[kind]
-    start = kt.line(node)
-    end = min(kt.end_line(last or node), start + 14)
     return Finding(
-        f"sast.{kind}", "sast", severity, title, description, remediation, function.path,
-        start, end, title, {"class": kind},
+        f"sast.{kind}", "sast", severity, title, description, remediation, path,
+        start, min(end, start + 14), title, {"class": kind},
     )
+
+
+def _finding(kind: str, function: Function, node: Node, last: Node | None = None) -> Finding:
+    return _located_finding(kind, function.path, kt.line(node), kt.end_line(last or node))
 
 
 def _sql_calls(function: Function, *, all_sinks: bool = False) -> Iterator[tuple[Node, kt.Call, Node, str]]:
@@ -344,8 +357,12 @@ def _sql_finding(function: Function, node: Node, sql: Node) -> Finding:
     inside_call = node.start_byte <= sql.start_byte < node.end_byte
     in_function = function.body.start_byte <= sql.start_byte < function.body.end_byte
     if in_function and not inside_call and sql.start_byte < node.start_byte:
-        return _finding("sql-injection", function, sql, node)
-    return _finding("sql-injection", function, node)
+        finding = _finding("sql-injection", function, sql, node)
+    else:
+        finding = _finding("sql-injection", function, node)
+    return replace(finding, metadata=finding.metadata | {
+        "sink_line": str(kt.line(node)), "sink_column": str(node.start_point.column),
+    })
 
 
 def _resolved_calls(
@@ -417,6 +434,34 @@ def _uses_names(source: kt.KotlinFile, node: Node, names: frozenset[str], depth:
     return False
 
 
+def _permissive_trust_manager(function: Function, managers: Node) -> Node | None:
+    source = function.source
+    array = source.resolve(managers)
+    builder = kt.call(array)
+    if builder and builder.name == "arrayOf" and len(builder.args) == 1:
+        manager = source.resolve(builder.args[0])
+    else:
+        # The Kotlin grammar can parse arrayOf<T>(value) as two binary comparisons.
+        match = re.fullmatch(r"arrayOf\s*<\s*(?:javax\.net\.ssl\.)?(?:X509)?TrustManager\s*>\s*\(\s*(\w+)\s*\)", kt.text(array))
+        binding = source.binding(match[1], array) if match else None
+        manager = source.resolve(binding) if binding is not None else None
+    if manager is None or manager.type != "object_literal":
+        return None
+    parents, body = kt.child(manager, "delegation_specifiers"), kt.child(manager, "class_body")
+    if not parents or not body or not any(_unqualified(_type(base)) == "X509TrustManager" for base in kt.children(parents)):
+        return None
+    for method in kt.children(body):
+        name, implementation = method.child_by_field_name("name"), kt.child(method, "function_body")
+        modifiers = kt.child(method, "modifiers")
+        if (name is not None and kt.text(name) == "checkServerTrusted" and implementation is not None
+                and modifiers is not None and "override" in kt.text(modifiers).split()
+                and len(_parameter_list(method)) == 2):
+            block = kt.child(implementation, "block")
+            if block is not None and not kt.children(block):
+                return method
+    return None
+
+
 def _tls_findings(function: Function) -> Iterator[Finding]:
     for assignment in kt.walk(function.body, "assignment", stop=_FUNCTION_SCOPE):
         left, right = (assignment.child_by_field_name(side) for side in ("left", "right"))
@@ -443,6 +488,12 @@ def _tls_findings(function: Function) -> Iterator[Finding]:
         if receiver_is_https or typed_connection:
             yield _finding("tls-verification", function, assignment)
     for node, call in function.calls():
+        if call.name == "init" and call.receiver is not None and len(call.args) == 3:
+            factory = kt.call(function.source.resolve(call.receiver))
+            if (factory and factory.name == "getInstance" and factory.receiver is not None
+                    and kt.text(factory.receiver) in {"SSLContext", "javax.net.ssl.SSLContext"}):
+                if (unchecked := _permissive_trust_manager(function, call.args[1])) is not None:
+                    yield _finding("tls-verification", function, unchecked)
         if call.name in {"trustManager", "setHostnameVerifier", "hostnameVerifier"} and call.args:
             arg = kt.text(function.source.resolve(call.args[0]))
             if re.fullmatch(r"(?:[\w.]*\.)?(?:InsecureTrustManagerFactory|NoopHostnameVerifier)\.INSTANCE", arg):
@@ -474,58 +525,41 @@ class AccessRule:
         return re.fullmatch(pattern, route.path) is not None
 
 
-def _spring_configuration(path: str, content: str) -> Iterator[dict[str, str]]:
-    if path.endswith(".properties"):
-        values = {}
-        for line in content.splitlines():
-            if match := re.fullmatch(r"\s*([\w.-]+)\s*[:=]\s*(.*?)\s*", line):
-                values[match[1]] = match[2]
-        yield values
-        return
-
-    def flatten(node, prefix: str = "", depth: int = 0) -> Iterator[tuple[str, str]]:
-        if depth > 8:
-            return
-        if isinstance(node, MappingNode):
-            for key, value in node.value:
-                if isinstance(key, ScalarNode):
-                    key_path = f"{prefix}.{key.value}" if prefix else key.value
-                    if key_path == "management" or key_path.startswith("management."):
-                        yield from flatten(value, key_path, depth + 1)
-        elif isinstance(node, SequenceNode) and all(isinstance(item, ScalarNode) for item in node.value):
-            yield prefix, ",".join(item.value for item in node.value)
-        elif isinstance(node, ScalarNode):
-            yield prefix, node.value
-
-    for document in yaml.compose_all(content, Loader=yaml.SafeLoader):
-        yield dict(flatten(document))
-
-
-def _actuator_findings(scan: Scan, rules: list[AccessRule]) -> Iterator[Finding]:
+def _actuator_access(properties: dict[str, str], rules: list[AccessRule]) -> Iterator[Finding]:
     if not rules:
         return
+    include = set(map(str.strip, properties.get("management.endpoints.web.exposure.include", "").split(",")))
+    exclude = set(map(str.strip, properties.get("management.endpoints.web.exposure.exclude", "").split(",")))
+    base_path = properties.get("management.endpoints.web.base-path", "/actuator").rstrip("/")
+    if not base_path.startswith("/") or "*" in exclude or properties.get("management.server.port"):
+        return
+    for endpoint, method in _ACTUATOR_METHODS.items():
+        if endpoint in exclude or ("*" not in include and endpoint not in include):
+            continue
+        if (
+            properties.get(f"management.endpoint.{endpoint}.enabled") == "false"
+            or properties.get(f"management.endpoint.{endpoint}.access") == "none"
+        ):
+            continue
+        route = Route(method, f"{base_path}/{endpoint}", rules[0].function)
+        access = next((rule for rule in rules if rule.matches(route)), None)
+        if access and access.action == "permitAll":
+            yield _finding("actuator-exposure", access.function, access.node)
+
+
+def _config_findings(scan: Scan, rules: list[AccessRule], *, check_error_responses: bool) -> Iterator[Finding]:
+    if not rules and not check_error_responses:
+        return
     for path, content in scan.files.items():
-        if PurePosixPath(path).name not in _SPRING_CONFIGURATION:
+        if path.endswith(".kt"):
             continue
         try:
-            for properties in _spring_configuration(path, content):
-                include = set(map(str.strip, properties.get("management.endpoints.web.exposure.include", "").split(",")))
-                exclude = set(map(str.strip, properties.get("management.endpoints.web.exposure.exclude", "").split(",")))
-                base_path = properties.get("management.endpoints.web.base-path", "/actuator").rstrip("/")
-                if not base_path.startswith("/") or "*" in exclude or properties.get("management.server.port"):
-                    continue
-                for endpoint, method in _ACTUATOR_METHODS.items():
-                    if endpoint in exclude or ("*" not in include and endpoint not in include):
-                        continue
-                    if (
-                        properties.get(f"management.endpoint.{endpoint}.enabled") == "false"
-                        or properties.get(f"management.endpoint.{endpoint}.access") == "none"
-                    ):
-                        continue
-                    route = Route(method, f"{base_path}/{endpoint}", rules[0].function)
-                    access = next((rule for rule in rules if rule.matches(route)), None)
-                    if access and access.action == "permitAll":
-                        yield _finding("actuator-exposure", access.function, access.node)
+            for settings in spring_settings(path, content):
+                properties = {key: value for key, (value, _) in settings.items()}
+                yield from _actuator_access(properties, rules)
+                if check_error_responses and properties.get("server.error.include-stacktrace", "").lower() == "always":
+                    line = settings["server.error.include-stacktrace"][1]
+                    yield _located_finding("error-stacktrace", path, line, line)
         except (yaml.YAMLError, RecursionError):
             scan.skip(path, "SPRING_CONFIG_PARSE_ERROR", "Не удалось проверить конфигурацию Spring Boot.")
 
@@ -610,6 +644,45 @@ def _checked(function: Function) -> bool:
     )
 
 
+def _private_cors_route(matcher: AccessRule, methods: set[str], routes: list[Route], rules: list[AccessRule]) -> bool:
+    for route in routes:
+        if not matcher.matches(route) or (methods and "*" not in methods and route.method not in methods):
+            continue
+        if route.function.principal:
+            return True
+        access = next((rule for rule in rules if rule.matches(route)), None)
+        if access and access.action in {"authenticated", "hasRole", "hasAnyRole", "hasAuthority"} and _sensitive(route.function):
+            return True
+    return False
+
+
+def _mvc_cors(function: Function, routes: list[Route], rules: list[AccessRule]) -> Iterator[Finding]:
+    if function.name != "addCorsMappings":
+        return
+    for node, call in function.calls():
+        if node.parent and node.parent.type == "navigation_expression":
+            continue  # Inspect the completed registration once, including any later overrides.
+        options = {}
+        while call and call.receiver is not None and call.name != "addMapping":
+            options.setdefault(call.name, call.args)
+            call = kt.call(call.receiver)
+        if not call or call.name != "addMapping" or len(call.args) != 1 or call.receiver is None:
+            continue
+        if _unqualified(function.receiver_type(call.receiver)) != "CorsRegistry":
+            continue
+        path = kt.literal(call.args[0])
+        credentials = options.get("allowCredentials", ())
+        origins = [kt.literal(function.source.resolve(arg)) or "" for arg in options.get("allowedOriginPatterns", ())]
+        if not path or len(credentials) != 1 or kt.text(function.source.resolve(credentials[0])) != "true":
+            continue
+        if not any(re.fullmatch(r"(?:https?://)?\*(?:\.[\w.-]+)?", origin) for origin in origins):
+            continue
+        methods = ({(kt.literal(arg) or "?").upper() for arg in options["allowedMethods"]}
+                   if "allowedMethods" in options else {"GET", "HEAD", "POST"})
+        if _private_cors_route(AccessRule(function, node, "", "*", path), methods, routes, rules):
+            yield _finding("credentialed-cors", function, node)
+
+
 def _cors_findings(
     functions: list[Function], routes: list[Route], rules: list[AccessRule], scan: Scan
 ) -> Iterator[Finding]:
@@ -617,6 +690,7 @@ def _cors_findings(
         scan.warn(Warning("UNRESOLVED_CORS", "Не удалось статически разобрать регистрацию CORS.", function.path), incomplete=True)
 
     for function in functions:
+        yield from _mvc_cors(function, routes, rules)
         for _, call in function.calls():
             if call.name != "registerCorsConfiguration" or len(call.args) != 2:
                 continue
@@ -651,17 +725,7 @@ def _cors_findings(
                 continue
             methods = {value.upper() for _, value in _literal_nodes(fields["allowedMethods"][1])} if "allowedMethods" in fields else set()
             matcher = AccessRule(function, origins[0], "", "*", path)
-            if any(
-                matcher.matches(route) and (not methods or "*" in methods or route.method in methods) and (
-                    route.function.principal
-                    or (
-                        _sensitive(route.function)
-                        and (access := next((rule for rule in rules if rule.matches(route)), None))
-                        and access.action in {"authenticated", "hasRole", "hasAnyRole", "hasAuthority"}
-                    )
-                )
-                for route in routes
-            ):
+            if _private_cors_route(matcher, methods, routes, rules):
                 first, last = sorted((origins[0], credentials[0]), key=lambda node: node.start_byte)
                 yield _finding("credentialed-cors", function, first, last)
 
@@ -695,11 +759,8 @@ def _jdbc_values(args: tuple[Node, ...]) -> list[Node]:
     ]
 
 
-def _object_findings(
-    route: Route, connections: list[tuple[kt.Call, Function]], scan: Scan
-) -> Iterator[Finding]:
-    handler = route.function
-    candidates = [(handler, handler.inputs, handler.principal)]
+def _object_contexts(handler: Function, connections: list[tuple[kt.Call, Function]]):
+    yield handler, handler.inputs, handler.principal
     for call, target in connections:
         parameters = target.parameters
         inputs = frozenset(
@@ -710,24 +771,82 @@ def _object_findings(
             name for arg, name in zip(call.args, parameters)
             if _uses_names(handler.source, arg, handler.principal)
         )
-        if inputs:
-            candidates.append((target, inputs, principal))
-    for function, inputs, principal in candidates:
+        if inputs or principal:
+            yield target, inputs, principal
+
+
+def _bound_value(source: kt.KotlinFile, call: kt.Call, sql: str, placeholder: re.Match[str]) -> Node | None:
+    values = _jdbc_values(call.args)
+    parameter = placeholder[1]
+    if parameter == "?":
+        position = sql.count("?", 0, placeholder.start(1))
+        return values[position] if position < len(values) else None
+    mapping = kt.call(source.resolve(values[0])) if values else None
+    if mapping and mapping.name == "mapOf":
+        for entry in mapping.args:
+            parts = kt.children(entry)
+            if (entry.type == "infix_expression" and len(parts) == 3 and kt.text(parts[1]) == "to"
+                    and kt.literal(parts[0]) == parameter[1:]):
+                return parts[2]
+    return None
+
+
+def _owned_tables(routes: list[Route], index: dict[tuple[str, str], list[Function]]) -> dict[str, set[str]]:
+    """Associate a controller with tables its GET handlers filter by the authenticated principal."""
+    tables: dict[str, set[str]] = {}
+    for route in routes:
+        handler = route.function
+        if route.method != "GET" or not handler.principal:
+            continue
+        for function, _, principal in _object_contexts(handler, list(_direct_calls(handler, index))):
+            if not principal:
+                continue
+            for _, call, _, sql in _sql_calls(function):
+                query = re.match(r"\s*select\b[^;]*?\bfrom\s+(\w+)\s+where\b", sql, re.I)
+                owner = _OWNER_BIND.search(sql, query.end()) if query else None
+                if query and owner and not re.search(r"\bor\b", sql[query.end():], re.I):
+                    bound = _bound_value(function.source, call, sql, owner)
+                    if bound is not None and _uses_names(function.source, bound, principal):
+                        tables.setdefault(handler.owner, set()).add(query[1].lower())
+    return tables
+
+
+def _object_findings(
+    route: Route, connections: list[tuple[kt.Call, Function]], scan: Scan, owned_tables: set[str],
+) -> Iterator[Finding]:
+    handler = route.function
+    for function, inputs, principal in _object_contexts(handler, connections):
+        if not inputs:
+            continue
         for node, call, _, sql in _sql_calls(function):
             where = re.search(r"\bwhere\b", sql, re.IGNORECASE)
-            if where is None or not _OWNERS.search(sql[:where.start()]):
+            if where is None:
+                continue
+            if not _OWNERS.search(sql[:where.start()]):
+                # A sibling read establishes ownership. Follow the bound request ID into a write on that table.
+                write = re.match(r"\s*(?:update|delete\s+from)\s+(\w+)\b", sql, re.I)
+                if (owned_tables and write and write[1].lower() in owned_tables and not handler.principal
+                        and "{" in route.path and not _checked(handler) and not _checked(function)
+                        and not _OWNERS.search(sql[where.end():])):
+                    for match in _ID_BIND.finditer(sql, where.end()):
+                        key = _bound_value(function.source, call, sql, match)
+                        if key is not None and _uses_names(function.source, key, inputs):
+                            yield _finding("object-authorization", function, node)
+                            break
                 continue
             values = _jdbc_values(call.args)
-            if not any(_uses_names(function.source, arg, inputs) for arg in values):
+            if not (any(_uses_names(function.source, arg, inputs) for arg in values) or any(
+                (bound := _bound_value(function.source, call, sql, match)) is not None
+                and _uses_names(function.source, bound, inputs) for match in _ID_BIND.finditer(sql, where.end())
+            )):
                 continue
             if _checks_owner_before_return(function, principal) or _checks_owner_before_return(handler, handler.principal):
                 continue
             predicate = sql[where.end():]
-            owner_filter = _OWNER_BIND.search(predicate)
+            owner_filter = _OWNER_BIND.search(sql, where.end())
             if owner_filter and not re.search(r"\bor\b", predicate, re.IGNORECASE):
-                position = sql.count("?", 0, where.end() + owner_filter.start(1))
-                if position < len(values):
-                    bound = values[position]
+                bound = _bound_value(function.source, call, sql, owner_filter)
+                if bound is not None:
                     if _uses_names(function.source, bound, principal):
                         continue
                     if _uses_names(function.source, bound, inputs):
@@ -747,14 +866,9 @@ def _spring_data(kind: str, supertypes: dict[str, list[str]], depth: int = 0) ->
     )
 
 
-def scan_sast(snapshot: Snapshot) -> ScanResult:
-    scan = Scan(snapshot, accepts_sast_source)
-    if scan.files and not any(path.endswith(".kt") for path in scan.files):
-        scan.warn(Warning("NO_KOTLIN_SOURCES", "В снимке нет доступных файлов Kotlin."), incomplete=True)
-    findings: list[Finding] = []
+def _index_snapshot(scan: Scan) -> tuple[list[Function], list[Route], dict[str, list[str]]]:
     functions: list[Function] = []
     routes: list[Route] = []
-    index: dict[tuple[str, str], list[Function]] = {}
     supertypes: dict[str, list[str]] = {}
     for path, data in scan.files.items():
         if not path.endswith(".kt"):
@@ -766,29 +880,56 @@ def scan_sast(snapshot: Snapshot) -> ScanResult:
         functions.extend(current_functions)
         routes.extend(current_routes)
         supertypes.update(current_supertypes)
-        for function in current_functions:
-            index.setdefault((function.owner, function.name), []).append(function)
-            findings.extend(_tls_findings(function))
+    return functions, routes, supertypes
+
+
+def _spring_security_findings(
+    scan: Scan, functions: list[Function], routes: list[Route], *, check_error_responses: bool,
+) -> tuple[list[AccessRule], list[Finding]]:
+    rules, cors = _security(functions, scan)
+    findings = list(_config_findings(scan, rules, check_error_responses=check_error_responses))
+    if cors:
+        findings.extend(_cors_findings(functions, routes, rules, scan))
+    return rules, findings
+
+
+def scan_spring_config(snapshot: Snapshot) -> ScanResult:
+    scan = Scan(snapshot, accepts_spring_source)
+    functions, routes, _ = _index_snapshot(scan)
+    _, findings = _spring_security_findings(scan, functions, routes, check_error_responses=True)
+    return scan.result("sast", "Настройки Spring Boot, Actuator и CORS", findings)
+
+
+def scan_sast(snapshot: Snapshot) -> ScanResult:
+    scan = Scan(snapshot, accepts_sast_source)
+    if scan.files and not any(path.endswith(".kt") for path in scan.files):
+        scan.warn(Warning("NO_KOTLIN_SOURCES", "В снимке нет доступных файлов Kotlin."), incomplete=True)
+    functions, routes, supertypes = _index_snapshot(scan)
+    rules, findings = _spring_security_findings(scan, functions, routes, check_error_responses=False)
+    index: dict[tuple[str, str], list[Function]] = {}
+    for function in functions:
+        index.setdefault((function.owner, function.name), []).append(function)
+        findings.extend(_tls_findings(function))
     implementations: dict[str, list[str]] = {}
     for kind, parents in supertypes.items():
         for parent in parents:
             implementations.setdefault(parent, []).append(kind)
     findings.extend(_sql_injection_findings(functions, index, implementations))
+    owned_tables = _owned_tables(routes, index)
 
-    rules, cors = _security(functions, scan)
-    findings.extend(_actuator_findings(scan, rules))
-    if cors:
-        findings.extend(_cors_findings(functions, routes, rules, scan))
     for route in routes:
         handler = route.function
         connections = list(_direct_calls(handler, index))
         rule = next((rule for rule in rules if rule.matches(route)), None)
         if rule and rule.action == "permitAll" and not _checked(handler):
             targets = [target for _, target in connections]
-            if _sensitive(handler) or any(_sensitive(target) and not _checked(target) for target in targets):
+            shadowed = any(later.pattern == route.path and later.matches(route) and later.action != "permitAll"
+                           for later in rules[rules.index(rule) + 1:])
+            if shadowed or _sensitive(handler) or any(_sensitive(target) and not _checked(target) for target in targets):
                 findings.append(_finding("route-authorization", rule.function, rule.node))
         if handler.inputs:
-            findings.extend(_object_findings(route, connections, scan))
+            tables = owned_tables.get(handler.owner, set()) if not rule or rule.action in {"authenticated", "permitAll"} else set()
+            findings.extend(_object_findings(route, connections, scan, tables))
             resolved = {call.name for call, _ in _resolved_calls(handler, index, implementations)}
             if not connections and any(
                 call.receiver is not None and kt.text(call.receiver) in handler.parameter_types

@@ -1,5 +1,6 @@
 import type { Edge } from '@xyflow/react';
-import type { FlowNode } from './types';
+import type { FlowData, FlowNode } from './types';
+import { encodeCondition } from './conditionFields';
 import type { NodeTypeDefinition, ParamField } from '../../shared/api/nodeTypes';
 import type { ApiGraph, JsonValue } from '../../shared/api/workflows';
 
@@ -18,16 +19,39 @@ function toConfigValue(field: ParamField | undefined, raw: string): JsonValue {
   return raw;
 }
 
+function encodeConfig(data: FlowData, properties: Record<string, ParamField>): Record<string, JsonValue> {
+  if (data.kind === 'condition') {
+    const group = data.conditionGroup;
+    return group ? { mode: group.mode, conditions: group.conditions.map(encodeCondition) } : encodeCondition(data.config ?? {});
+  }
+  const config: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(data.config ?? {})) {
+    if (data.config?.use_workspace_settings === 'true' && (key === 'recipients' || key === 'credential_id')) continue;
+    if (value === '' || !(key in properties)) continue;
+    if (properties[key].type === 'array' && splitList(value).length === 0) continue;
+    config[key] = toConfigValue(properties[key], value);
+  }
+  return config;
+}
+
+function decodeConfig(node: ApiGraph['nodes'][number]): Pick<FlowData, 'config' | 'conditionGroup'> {
+  const { mode, conditions } = node.config ?? {};
+  if (node.type === 'condition' && (mode === 'AND' || mode === 'OR') && Array.isArray(conditions)) {
+    const rows = conditions.map(rule => {
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('Некорректная проверка условия.');
+      return Object.fromEntries(Object.entries(rule).map(([key, value]) => [key, String(value)]));
+    });
+    return { conditionGroup: { mode, conditions: rows } };
+  }
+  return { config: Object.fromEntries(Object.entries(node.config ?? {}).filter(([, v]) => v !== null)
+    .map(([k, v]) => [k, Array.isArray(v) ? v.join('\n') : String(v)])) };
+}
+
 export function toApiGraph(nodes: FlowNode[], edges: Edge[], types: NodeTypeDefinition[]): ApiGraph {
   return {
     nodes: nodes.map(n => {
       const properties = types.find(t => t.kind === n.data.kind)?.params_schema.properties ?? {};
-      const config: Record<string, JsonValue> = {};
-      for (const [key, value] of Object.entries(n.data.config ?? {})) {
-        if (value === '' || !(key in properties)) continue;
-        if (properties[key].type === 'array' && splitList(value).length === 0) continue;
-        config[key] = toConfigValue(properties[key], value);
-      }
+      const config = encodeConfig(n.data, properties);
       return { id: n.id, type: n.data.kind, config, position: { x: Math.round(n.position.x), y: Math.round(n.position.y) } };
     }),
     edges: edges.map(e => {
@@ -53,8 +77,7 @@ export function fromApiGraph(graph: ApiGraph, types: NodeTypeDefinition[], label
       data: {
         kind: n.type,
         label: labels[n.id] ?? types.find(t => t.kind === n.type)?.label ?? n.type,
-        config: Object.fromEntries(Object.entries(n.config ?? {}).filter(([, v]) => v !== null)
-          .map(([k, v]) => [k, Array.isArray(v) ? v.join('\n') : String(v)])),
+        ...decodeConfig(n),
       },
     })),
     edges: graph.edges.map(e => ({

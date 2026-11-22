@@ -1,27 +1,246 @@
 from datetime import datetime, time as local_time
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, String,
-    Text, Time, UniqueConstraint, func, text,
+    Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text,
+    UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from ..analyzers.models import FindingVerification, VerificationStatus
+from .encryption import EncryptedBinary, EncryptedJSON, EncryptedText, EncryptedTime
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class Project(Base):
-    __tablename__ = "projects"
+class StorageMetadata(Base):
+    __tablename__ = "storage_metadata"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_storage_metadata_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    key_check: Mapped[str] = mapped_column(String(64))
+
+
+class User(Base):
+    __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(120))
-    repository_url: Mapped[str] = mapped_column(Text)
-    default_ref: Mapped[str] = mapped_column(String(255))
+    github_key: Mapped[str] = mapped_column(String(64), unique=True)
+    github_login: Mapped[str] = mapped_column(EncryptedText("users.github_login"))
+    display_name: Mapped[str] = mapped_column(EncryptedText("users.display_name"))
+    avatar_url: Mapped[str | None] = mapped_column(EncryptedText("users.avatar_url"))
+    timezone: Mapped[str] = mapped_column(EncryptedText("users.timezone"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OAuthAttempt(Base):
+    __tablename__ = "oauth_attempts"
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    browser_hash: Mapped[str] = mapped_column(String(64))
+    verifier: Mapped[str] = mapped_column(EncryptedText("oauth_attempts.verifier"))
+    return_path: Mapped[str] = mapped_column(EncryptedText("oauth_attempts.return_path"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        CheckConstraint("personal_user_id IS NULL OR personal_user_id = id", name="ck_workspace_personal_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(EncryptedText("workspaces.name"))
+    personal_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), unique=True)
+
+    @property
+    def personal(self) -> bool:
+        return self.personal_user_id is not None
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_membership_role"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(16))
+
+
+class WorkspaceMcpToken(Base):
+    __tablename__ = "workspace_mcp_tokens"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("workspace_id", "user_id"),
+            ("workspace_memberships.workspace_id", "workspace_memberships.user_id"),
+            ondelete="CASCADE",
+        ),
+        Index("ix_workspace_mcp_tokens_membership", "workspace_id", "user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    name: Mapped[str] = mapped_column(EncryptedText("workspace_mcp_tokens.name"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceLLMProfile(Base):
+    __tablename__ = "workspace_llm_profiles"
+    __table_args__ = (CheckConstraint("(provider = 'ollama') = (api_key IS NULL)", name="ck_workspace_llm_key"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    base_url: Mapped[str] = mapped_column(String(255))
+    model: Mapped[str] = mapped_column(String(128))
+    provider: Mapped[str] = mapped_column(String(16), server_default="openai")
+    api_key: Mapped[str | None] = mapped_column(EncryptedText("workspace_llm_profiles.api_key"))
+
+
+class WorkspaceDeliverySetting(Base):
+    __tablename__ = "workspace_delivery_settings"
+    __table_args__ = (CheckConstraint("channel IN ('email', 'telegram', 'slack')", name="ck_workspace_delivery_channel"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    recipients: Mapped[list[str]] = mapped_column(EncryptedJSON("workspace_delivery_settings.recipients"))
+    username: Mapped[str | None] = mapped_column(EncryptedText("workspace_delivery_settings.username"))
+    secret: Mapped[str | None] = mapped_column(EncryptedText("workspace_delivery_settings.secret"))
+
+
+class WorkspaceLogPolicy(Base):
+    __tablename__ = "workspace_log_policies"
+
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    destination: Mapped[str] = mapped_column(String(48))
+    audit_days: Mapped[int]
+    diagnostic_days: Mapped[int]
+    member_view: Mapped[bool]
+    member_export: Mapped[bool]
+    member_manage: Mapped[bool]
+    version: Mapped[int] = mapped_column(server_default=text("0"))
+
+
+class WorkspaceLog(Base):
+    __tablename__ = "workspace_logs"
+    __table_args__ = (Index("ix_workspace_logs_lookup", "workspace_id", "kind", "at"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
+    kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[UUID | None]
+    action: Mapped[str] = mapped_column(String(48))
+    result: Mapped[str] = mapped_column(String(16))
+    run_id: Mapped[UUID | None] = mapped_column(index=True)
+    node_run_id: Mapped[UUID | None]
+    destination: Mapped[str] = mapped_column(String(48))
+    delivery_id: Mapped[UUID | None]
+    archive_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived: Mapped[bool] = mapped_column(server_default=text("false"))
+
+
+class WorkspaceInvitation(Base):
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (CheckConstraint("role IN ('owner', 'member')", name="ck_workspace_invitation_role"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    issuer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(16))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "repository_key", name="uq_project_workspace_repository"),
+        CheckConstraint("(owner_id IS NULL) = (repository_key IS NULL)", name="ck_project_owner_key"),
+        CheckConstraint("(workspace_id IS NULL) = (owner_id IS NULL)", name="ck_project_workspace_owner"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    repository_key: Mapped[str | None] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(EncryptedText("projects.name"))
+    repository_url: Mapped[str] = mapped_column(EncryptedText("projects.repository_url"))
+    default_ref: Mapped[str] = mapped_column(EncryptedText("projects.default_ref"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkflowTemplate(Base):
+    __tablename__ = "workflow_templates"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    draft_source_workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"))
+    name: Mapped[str] = mapped_column(EncryptedText("workflow_templates.name"))
+    description: Mapped[str] = mapped_column(EncryptedText("workflow_templates.description"))
+    graph_json: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("workflow_templates.graph_json"))
+    schedule: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("workflow_templates.schedule"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    @property
+    def can_edit(self) -> bool:
+        return self.owner_id is not None
+
+
+class TelegramDestination(Base):
+    __tablename__ = "telegram_destinations"
+    __table_args__ = (UniqueConstraint("owner_id", "chat_key", name="uq_telegram_destination_owner_chat"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    chat_key: Mapped[str] = mapped_column(String(64))
+    chat_id: Mapped[str] = mapped_column(EncryptedText("telegram_destinations.chat_id"))
+    label: Mapped[str] = mapped_column(EncryptedText("telegram_destinations.label"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    challenge_hash: Mapped[str | None] = mapped_column(String(64))
+    challenge_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    challenge_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+
+
+class TelegramLink(Base):
+    __tablename__ = "telegram_links"
+
+    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    id: Mapped[UUID] = mapped_column(unique=True)
+    token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    group_chat: Mapped[bool] = mapped_column(Boolean)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    destination_id: Mapped[UUID | None] = mapped_column(ForeignKey("telegram_destinations.id", ondelete="SET NULL"))
+
+
+class TelegramChallengeLimit(Base):
+    __tablename__ = "telegram_challenge_limits"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    next_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ProjectArchive(Base):
+    __tablename__ = "project_archives"
+
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content: Mapped[bytes] = mapped_column(EncryptedBinary("project_archives.content"))
 
 
 class Workflow(Base):
@@ -30,22 +249,11 @@ class Workflow(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"))
-    name: Mapped[str] = mapped_column(String(120))
-    graph_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    name: Mapped[str] = mapped_column(EncryptedText("workflows.name"))
+    graph_json: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("workflows.graph_json"))
     ci_token_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-
-class WorkflowTemplate(Base):
-    __tablename__ = "workflow_templates"
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(120))
-    description: Mapped[str] = mapped_column(Text)
-    graph_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    schedule: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Credential(Base):
@@ -71,14 +279,14 @@ class Schedule(Base):
     workflow_id: Mapped[UUID] = mapped_column(ForeignKey("workflows.id"), unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     frequency: Mapped[str] = mapped_column(String(16), server_default=text("'daily'"))
-    time: Mapped[local_time | None] = mapped_column(Time)
-    weekdays: Mapped[list[int] | None] = mapped_column(JSONB(none_as_null=True))
-    day_of_month: Mapped[int | None] = mapped_column(Integer)
-    cron: Mapped[str | None] = mapped_column(String(120))
-    timezone: Mapped[str | None] = mapped_column(String(128))
+    time: Mapped[local_time | None] = mapped_column(EncryptedTime("schedules.time"))
+    weekdays: Mapped[list[int] | None] = mapped_column(EncryptedJSON("schedules.weekdays"))
+    day_of_month: Mapped[int | None] = mapped_column(EncryptedJSON("schedules.day_of_month"))
+    cron: Mapped[str | None] = mapped_column(EncryptedText("schedules.cron"))
+    timezone: Mapped[str | None] = mapped_column(EncryptedText("schedules.timezone"))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    last_error: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("schedules.last_error"))
 
 
 class ScanRun(Base):
@@ -98,9 +306,9 @@ class ScanRun(Base):
     workflow_id: Mapped[UUID] = mapped_column(ForeignKey("workflows.id"))
     trigger: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), server_default=text("'queued'"))
-    graph_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    source_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    commit_sha: Mapped[str | None] = mapped_column(String(64))
+    graph_snapshot: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("scan_runs.graph_snapshot"))
+    source_snapshot: Mapped[dict[str, Any]] = mapped_column(EncryptedJSON("scan_runs.source_snapshot"))
+    commit_sha: Mapped[str | None] = mapped_column(EncryptedText("scan_runs.commit_sha"))
     ci_request_id: Mapped[str | None] = mapped_column(String(100))
     schedule_id: Mapped[UUID | None] = mapped_column(ForeignKey("schedules.id"))
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -109,9 +317,9 @@ class ScanRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claim_token: Mapped[UUID | None]
-    summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    error: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    summary: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("scan_runs.summary"))
+    report: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("scan_runs.report"))
+    error: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("scan_runs.error"))
 
 
 class NodeRun(Base):
@@ -129,9 +337,9 @@ class NodeRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active_output_ports: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
-    input_preview: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    output_preview: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    error: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    input_preview: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("node_runs.input_preview"))
+    output_preview: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("node_runs.output_preview"))
+    error: Mapped[dict[str, Any] | None] = mapped_column(EncryptedJSON("node_runs.error"))
 
 
 class FindingRow(Base):
@@ -152,35 +360,52 @@ class FindingRow(Base):
     rule_id: Mapped[str] = mapped_column(String(128))
     category: Mapped[str] = mapped_column(String(16))
     severity: Mapped[str] = mapped_column(String(16))
-    title: Mapped[str] = mapped_column(Text)
-    description: Mapped[str] = mapped_column(Text)
-    remediation: Mapped[str] = mapped_column(Text)
-    path: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(EncryptedText("findings.title"))
+    description: Mapped[str] = mapped_column(EncryptedText("findings.description"))
+    remediation: Mapped[str] = mapped_column(EncryptedText("findings.remediation"))
+    path: Mapped[str] = mapped_column(EncryptedText("findings.path"))
     line: Mapped[int | None] = mapped_column(Integer)
     end_line: Mapped[int | None] = mapped_column(Integer)
-    evidence: Mapped[str] = mapped_column(Text)
-    details: Mapped[dict[str, str]] = mapped_column("metadata", JSONB)
+    evidence: Mapped[str] = mapped_column(EncryptedText("findings.evidence", preserve_mask=True))
+    details: Mapped[dict[str, str | dict[str, str]]] = mapped_column("metadata", EncryptedJSON("findings.metadata"))
+
+    @property
+    def finding_metadata(self) -> dict[str, str]:
+        return {key: value for key, value in self.details.items() if key != "verification" and isinstance(value, str)}
+
+    @property
+    def verification(self) -> FindingVerification | None:
+        data = self.details.get("verification")
+        if not isinstance(data, dict):
+            return None
+        return FindingVerification(cast(VerificationStatus, data["status"]), data["code"], data["message"])
 
 
 class NotificationBatch(Base):
     __tablename__ = "notification_batches"
+    settings_workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"))
+    settings_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
-        CheckConstraint("channel IN ('email', 'telegram')", name="ck_notification_channel"),
+        CheckConstraint("channel IN ('email', 'telegram', 'slack')", name="ck_notification_channel"),
+        CheckConstraint(
+            "channel <> 'slack' OR (settings_workspace_id IS NOT NULL AND settings_version IS NOT NULL)",
+            name="ck_slack_notification_scope",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     node_run_id: Mapped[UUID] = mapped_column(ForeignKey("node_runs.id"), unique=True)
     channel: Mapped[str] = mapped_column(String(16))
-    subject: Mapped[str] = mapped_column(Text)
-    body: Mapped[str] = mapped_column(Text)
-    attachment_name: Mapped[str | None] = mapped_column(String(255))
-    attachment_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    subject: Mapped[str] = mapped_column(EncryptedText("notification_batches.subject"))
+    body: Mapped[str] = mapped_column(EncryptedText("notification_batches.body"))
+    attachment_name: Mapped[str | None] = mapped_column(EncryptedText("notification_batches.attachment_name"))
+    attachment_content: Mapped[bytes | None] = mapped_column(EncryptedBinary("notification_batches.attachment_content"))
 
 
 class NotificationDelivery(Base):
     __tablename__ = "notification_deliveries"
     __table_args__ = (
-        UniqueConstraint("batch_id", "recipient", name="uq_notification_recipient"),
+        UniqueConstraint("batch_id", "recipient_key", name="uq_notification_recipient"),
         CheckConstraint(
             "status IN ('queued', 'sending', 'accepted', 'failed', 'unknown', 'cancelled')",
             name="ck_notification_status",
@@ -191,7 +416,8 @@ class NotificationDelivery(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     batch_id: Mapped[UUID] = mapped_column(ForeignKey("notification_batches.id"))
-    recipient: Mapped[str] = mapped_column(String(254))
+    recipient: Mapped[str] = mapped_column(EncryptedText("notification_deliveries.recipient"))
+    recipient_key: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), server_default=text("'queued'"))
     phase: Mapped[str] = mapped_column(String(16), server_default=text("'message'"))
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
@@ -199,7 +425,7 @@ class NotificationDelivery(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claim_token: Mapped[UUID | None]
-    message_id: Mapped[str | None] = mapped_column(String(255))
-    attachment_id: Mapped[str | None] = mapped_column(String(255))
+    message_id: Mapped[str | None] = mapped_column(EncryptedText("notification_deliveries.message_id"))
+    attachment_id: Mapped[str | None] = mapped_column(EncryptedText("notification_deliveries.attachment_id"))
     error_code: Mapped[str | None] = mapped_column(String(64))
-    error_message: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(EncryptedText("notification_deliveries.error_message"))

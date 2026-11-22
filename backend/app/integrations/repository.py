@@ -1,5 +1,6 @@
 """Prepare a local snapshot from an allowed GitHub source."""
 
+import hashlib
 import os
 import re
 import subprocess
@@ -12,8 +13,11 @@ from typing import Iterator
 from urllib.parse import urlsplit
 
 from ..analyzers.models import ScanError, Snapshot, Warning
+from ..analyzers.sca import BUNDLED_CATALOG
 
 TRAINING_REPOSITORY = "https://github.com/TBagirov/training"
+# vulnerability-database/vulnerabilities.json at training commit fe1fcbe212669783480666b9b60147c8a8c6eef4
+_TRAINING_CATALOG_SHA256 = "1f58bd08feae5938b0831a88b094920bd14f24395c8516005746a0d2774b9b78"
 REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 
 
@@ -32,6 +36,10 @@ def canonical_repository_url(url: str) -> str:
 
 def allowed_repository_urls(urls: list[str]) -> frozenset[str]:
     return frozenset(canonical_repository_url(url).casefold() for url in urls)
+
+
+def ci_repository_allowlist(urls: list[str]) -> frozenset[str]:
+    return allowed_repository_urls(urls).intersection({TRAINING_REPOSITORY.casefold()})
 
 
 # None means "any public GitHub repository" (ALLOW_ANY_REPOSITORY=true).
@@ -76,6 +84,19 @@ def _git(directory: Path, deadline: float, *arguments: str) -> str:
         raise ScanError(Warning("REPOSITORY_FETCH_FAILED", "Не удалось получить исходники для указанной ветки, тега или коммита.")) from None
 
 
+def _training_catalog(directory: Path, pinned: bool) -> Path | None:
+    catalog = directory / "vulnerability-database" / "vulnerabilities.json"
+    if catalog.parent.is_symlink() or catalog.is_symlink() or not catalog.is_file():
+        return None
+    if pinned:
+        with catalog.open("rb") as stream:
+            # Bound the read even for an oversized catalog proposed by a PR.
+            content = stream.read(64 * 1024)
+            if stream.read(1) or hashlib.sha256(content).hexdigest() != _TRAINING_CATALOG_SHA256:
+                return None
+    return catalog
+
+
 @contextmanager
 def prepare_repository(
     url: str,
@@ -84,6 +105,7 @@ def prepare_repository(
     allowed: Allowlist,
     timeout: float,
     catalog_path: Path | None,
+    pin_training_catalog: bool = False,
 ) -> Iterator[RepositorySnapshot]:
     try:
         canonical = canonical_repository_url(url)
@@ -104,9 +126,7 @@ def prepare_repository(
         _git(directory, deadline, "checkout", "--quiet", "--detach", sha)
         training_project = directory / "training-project"
         project = training_project if training_project.is_dir() else directory
-        if catalog_path is None and canonical.casefold() == TRAINING_REPOSITORY.casefold():
-            advisory_directory = directory / "vulnerability-database"
-            advisory_file = advisory_directory / "vulnerabilities.json"
-            if not advisory_directory.is_symlink() and not advisory_file.is_symlink() and advisory_file.is_file():
-                catalog_path = advisory_file
+        if catalog_path is None:
+            catalog_path = (_training_catalog(directory, pin_training_catalog)
+                            if canonical.casefold() == TRAINING_REPOSITORY.casefold() else BUNDLED_CATALOG)
         yield RepositorySnapshot(Snapshot.from_directory(project, sha), catalog_path)

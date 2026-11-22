@@ -1,0 +1,151 @@
+{
+  "findings": [
+    {
+      "category": "SCA",
+      "path": "build.gradle.kts",
+      "description": "Версия 1.9 соответствует диапазону GHSA-599f-7c49-w659.",
+      "remediation": "Обновите зависимость до подходящей исправленной версии из справочника (1.10.0).",
+      "severity": "CRITICAL",
+      "group": "org.apache.commons",
+      "artifact": "commons-text",
+      "version": "1.9",
+      "advisoryId": "GHSA-599f-7c49-w659"
+    },
+    {
+      "category": "SCA",
+      "path": "build.gradle.kts",
+      "description": "Версия 1.14.1 соответствует диапазону GHSA-m72m-mhq2-9p6c.",
+      "remediation": "Обновите зависимость до подходящей исправленной версии из справочника (1.14.2).",
+      "severity": "HIGH",
+      "group": "org.jsoup",
+      "artifact": "jsoup",
+      "version": "1.14.1",
+      "advisoryId": "GHSA-m72m-mhq2-9p6c"
+    },
+    {
+      "category": "SCA",
+      "path": "build.gradle.kts",
+      "description": "Версия 1.25.0 соответствует диапазону GHSA-4g9r-vxhx-9pgx.",
+      "remediation": "Обновите зависимость до подходящей исправленной версии из справочника (1.26.0).",
+      "severity": "MEDIUM",
+      "group": "org.apache.commons",
+      "artifact": "commons-compress",
+      "version": "1.25.0",
+      "advisoryId": "GHSA-4g9r-vxhx-9pgx"
+    },
+    {
+      "category": "SCA",
+      "path": "build.gradle.kts",
+      "description": "Версия 3.8.0 соответствует диапазону GHSA-cgp8-4m63-fhh5.",
+      "remediation": "Обновите зависимость до подходящей исправленной версии из справочника (3.9.0).",
+      "severity": "MEDIUM",
+      "group": "commons-net",
+      "artifact": "commons-net",
+      "version": "3.8.0",
+      "advisoryId": "GHSA-cgp8-4m63-fhh5"
+    },
+    {
+      "category": "SCA",
+      "path": "build.gradle.kts",
+      "description": "Версия 20230227 соответствует диапазону GHSA-4jq9-2xhw-jpx7.",
+      "remediation": "Обновите зависимость до подходящей исправленной версии из справочника (20231013).",
+      "severity": "HIGH",
+      "group": "org.json",
+      "artifact": "json",
+      "version": "20230227",
+      "advisoryId": "GHSA-4jq9-2xhw-jpx7"
+    },
+    {
+      "category": "SAST",
+      "path": "src/main/kotlin/lab/repairdesk/config/RepairCors.kt",
+      "description": "Широкий допуск источников применяется к маршруту с пользовательскими данными.",
+      "remediation": "Разрешайте учётные данные только для конкретных доверенных источников.",
+      "severity": "MEDIUM",
+      "class": "credentialed-cors",
+      "line": 13,
+      "endLine": 14
+    },
+    {
+      "category": "SAST",
+      "path": "src/main/kotlin/lab/repairdesk/config/RepairSecurity.kt",
+      "description": "Публичное правило открывает обработчик, который работает с защищаемыми данными или действиями.",
+      "remediation": "Ограничьте доступ нужной ролью и проверьте порядок правил Spring Security.",
+      "severity": "HIGH",
+      "class": "route-authorization",
+      "line": 18
+    },
+    {
+      "category": "SECRET",
+      "path": "src/main/kotlin/lab/repairdesk/integration/DepotStatusClient.kt",
+      "description": "Значение доступно любому, кто может читать репозиторий.",
+      "remediation": "Удалите значение из исходников, замените его и загружайте из хранилища секретов.",
+      "severity": "LOW",
+      "class": "secret-fallback",
+      "line": 8
+    },
+    {
+      "category": "SECRET",
+      "path": "src/main/kotlin/lab/repairdesk/integration/PartsImportSettings.kt",
+      "description": "Значение доступно любому, кто может читать репозиторий.",
+      "remediation": "Удалите значение из исходников, замените его и загружайте из хранилища секретов.",
+      "severity": "HIGH",
+      "class": "password",
+      "line": 4
+    },
+    {
+      "category": "SECRET",
+      "path": "src/main/kotlin/lab/repairdesk/integration/QuoteRequest.kt",
+      "description": "Значение доступно любому, кто может читать репозиторий.",
+      "remediation": "Удалите значение из исходников, замените его и загружайте из хранилища секретов.",
+      "severity": "MEDIUM",
+      "class": "api-key",
+      "line": 7
+    },
+    {
+      "category": "SAST",
+      "path": "src/main/kotlin/lab/repairdesk/integration/SupplierHttpsClient.kt",
+      "description": "Клиент использует настройку, отключающую проверку TLS.",
+      "remediation": "Используйте штатную проверку сертификата и имени хоста.",
+      "severity": "MEDIUM",
+      "class": "tls-verification",
+      "line": 13
+    },
+    {
+      "category": "SECRET",
+      "path": "src/main/kotlin/lab/repairdesk/integration/WarrantyHeaders.kt",
+      "description": "Значение доступно любому, кто может читать репозиторий.",
+      "remediation": "Удалите значение из исходников, замените его и загружайте из хранилища секретов.",
+      "severity": "MEDIUM",
+      "class": "recoverable-token",
+      "line": 9
+    },
+    {
+      "category": "SAST",
+      "path": "src/main/kotlin/lab/repairdesk/repair/RepairLookupController.kt",
+      "description": "SQL-команда строится на основе параметра запроса.",
+      "remediation": "Передавайте значения отдельными параметрами JDBC, а текст запроса оставляйте статическим.",
+      "severity": "HIGH",
+      "class": "sql-injection",
+      "line": 14
+    },
+    {
+      "category": "SAST",
+      "path": "src/main/kotlin/lab/repairdesk/repair/RepairTicketReader.kt",
+      "description": "Идентификатор из запроса используется для чтения записи без подтверждённой проверки владельца.",
+      "remediation": "Ограничьте выборку или ответ идентификатором владельца из аутентифицированного пользователя.",
+      "severity": "HIGH",
+      "class": "object-authorization",
+      "line": 10,
+      "endLine": 14
+    },
+    {
+      "category": "SECRET",
+      "path": "src/main/resources/application.yml",
+      "description": "Значение доступно любому, кто может читать репозиторий.",
+      "remediation": "Удалите значение из исходников, замените его и загружайте из хранилища секретов.",
+      "severity": "HIGH",
+      "class": "configuration-token",
+      "line": 13
+    }
+  ]
+}

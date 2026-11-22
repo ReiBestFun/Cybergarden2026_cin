@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Bot, X } from 'lucide-react';
+import { useWorkspace } from '../../app/workspaceContext';
 import { errorMessage } from '../../shared/api/client';
 import { generateWorkflow, type GeneratedWorkflow } from '../../shared/api/workflows';
-import { browserTimeZone } from './defaults';
 import { useEditorStore } from './store';
 
 export function WorkflowGenerator() {
+  const { workspace } = useWorkspace();
   const busy = useEditorStore(state => state.busy);
   const applyGenerated = useEditorStore(state => state.applyGenerated);
   const [open, setOpen] = useState(false);
@@ -25,7 +26,7 @@ export function WorkflowGenerator() {
     setError('');
     setCandidate(null);
     try {
-      const draft = await generateWorkflow(description.trim(), browserTimeZone(), controller.signal);
+      const draft = await generateWorkflow(description.trim(), useEditorStore.getState().profileTimezone, workspace.id, controller.signal);
       if (controller.signal.aborted) return;
       const editor = useEditorStore.getState();
       if (editor.nodes.length || editor.workflowId || editor.busy) setCandidate(draft);

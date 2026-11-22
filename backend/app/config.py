@@ -1,15 +1,26 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = "postgresql+psycopg://workflow:workflow@127.0.0.1:5432/workflow"
+    data_encryption_key: SecretStr | None = None
+    log_destinations: dict[Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,47}$")], Path] = Field(default_factory=dict)
+
+    @field_validator("log_destinations")
+    @classmethod
+    def validate_log_destinations(cls, values: dict[str, Path]) -> dict[str, Path]:
+        if "postgresql" in values or any(not path.is_absolute() for path in values.values()):
+            raise ValueError("Use a dedicated alias and an absolute mount path for each log destination.")
+        return values
+    github_client_id: str = ""
+    github_client_secret: SecretStr | None = None
     frontend_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     allowed_repositories: list[str] = ["https://github.com/TBagirov/training"]
     # Development switch: accept any public GitHub repository instead of the allowlist above.

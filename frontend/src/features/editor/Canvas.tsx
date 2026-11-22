@@ -7,7 +7,7 @@ import { useEditorStore } from './store';
 import { validateConnection } from './validateConnection';
 import type { NodeKind } from './types';
 
-export function Canvas() {
+export function Canvas({ editable = true }: { editable?: boolean }) {
   const { nodes, edges, run, canvasRevision, onNodesChange, onEdgesChange, onConnect, setSelected, addNode } = useEditorStore();
   const knownKinds = useNodeTypesStore(s => s.types);
   const { screenToFlowPosition, fitView } = useReactFlow();
@@ -48,9 +48,11 @@ export function Canvas() {
       screenToFlowPosition({ x: e.clientX, y: e.clientY })
     );
   }, [addNode, knownKinds, screenToFlowPosition]);
-  return <main className="canvas" onDrop={onDrop} onDragOver={e => e.preventDefault()}>
+  return <main className="canvas" onDrop={editable ? onDrop : undefined} onDragOver={editable ? e => e.preventDefault() : undefined}>
     <ReactFlow nodes={nodes} edges={displayedEdges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
-      onConnect={onConnect} 
+      onConnect={editable ? onConnect : undefined}
+      nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={editable}
+      deleteKeyCode={editable ? 'Backspace' : null}
       isValidConnection={(edgeOrConnection) =>
         isValidConnection({
           source: edgeOrConnection.source,
@@ -61,8 +63,8 @@ export function Canvas() {
       } 
       nodeTypes={nodeTypes}
       onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)}>
-      <Background color="#dfd4c8" gap={22} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
+      <Background color="#dfd4c8" gap={20} size={1}/><Controls/><MiniMap pannable zoomable nodeColor="#cbbeb5"/>
     </ReactFlow>
-    <div className="canvas-hint">Соединяйте порты одного типа. Запуск выполняется на бэкенде, статусы нод обновляются по ходу.</div>
+    {editable && <div className="canvas-hint">Соединяйте порты одного типа. Запуск выполняется на бэкенде, статусы нод обновляются по ходу.</div>}
   </main>;
 }

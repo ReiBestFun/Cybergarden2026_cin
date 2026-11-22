@@ -1,6 +1,8 @@
 // Base URL of the backend. Empty string means same origin: in development
 // Vite proxies /api to the FastAPI server (see vite.config.ts).
 export const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').replace(/\/$/, '');
+export const SESSION_EXPIRED = 'cyberflow:session-expired';
+export const WORKSPACE_UNAVAILABLE = 'cyberflow:workspace-unavailable';
 
 export type ApiErrorBody = { code: string; message: string; node_id?: string | null; field?: string | null };
 
@@ -20,18 +22,26 @@ async function request(path: string, init: RequestInit & { json?: unknown } = {}
   try {
     response = await fetch(apiUrl(path), {
       ...rest,
+      credentials: 'include',
       headers: json !== undefined ? { 'Content-Type': 'application/json', ...headers } : headers,
       body: json !== undefined ? JSON.stringify(json) : rest.body,
     });
-  } catch {
+  } catch (error) {
+    if (rest.signal?.aborted) throw error;
     throw new ApiError(0, { code: 'NETWORK_ERROR', message: 'Бэкенд недоступен. Проверьте, что API запущен.' });
   }
   if (!response.ok) {
+    if (response.status === 401 && path !== '/api/me' && !path.startsWith('/api/auth/')) {
+      window.dispatchEvent(new Event(SESSION_EXPIRED));
+    }
     let body: ApiErrorBody = { code: `HTTP_${response.status}`, message: `Ошибка API: ${response.status}` };
     try {
       const payload = await response.json();
       if (payload?.error?.message) body = payload.error;
     } catch { /* not JSON */ }
+    if (body.code === 'WORKSPACE_NOT_FOUND') {
+      window.dispatchEvent(new Event(WORKSPACE_UNAVAILABLE));
+    }
     throw new ApiError(response.status, body);
   }
   return response;
@@ -43,8 +53,19 @@ export async function api<T>(path: string, init?: RequestInit & { json?: unknown
   return response.json() as Promise<T>;
 }
 
-export async function apiFile(path: string): Promise<Blob> {
-  return (await request(path)).blob();
+export async function listAll<T>(path: string, query: Record<string, string>, signal?: AbortSignal): Promise<T[]> {
+  const items: T[] = [];
+  for (let offset = 0; ;) {
+    const params = new URLSearchParams({ ...query, limit: '200', offset: String(offset) });
+    const page = await api<{ items: T[]; total: number }>(`${path}?${params}`, { signal });
+    items.push(...page.items);
+    if (page.items.length === 0 || items.length >= page.total) return items;
+    offset += page.items.length;
+  }
+}
+
+export async function apiFile(path: string, signal?: AbortSignal): Promise<Blob> {
+  return (await request(path, { signal })).blob();
 }
 
 export function errorMessage(error: unknown): string {

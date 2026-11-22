@@ -1,11 +1,11 @@
 """Turn a model's interpretation into a graph with known nodes and ports."""
 
-import json
 import re
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import AfterValidator, Field, StringConstraints, WithJsonSchema
 
+from ..analyzers.registry import SCANNERS, SCANNER_NODES
 from ..config import Settings
 from ..llm import complete_json
 from ..nodes.catalog import CATALOG, CiGateConfig, ConditionConfig
@@ -26,10 +26,21 @@ class NotificationPlan(Input):
     recipients: list[str] = Field(default_factory=list, max_length=50)
 
 
+def _known_scanner(name: str) -> str:
+    if name not in SCANNERS:
+        raise ValueError("Тип анализатора отсутствует в каталоге.")
+    return name
+
+
+ScannerName = Annotated[str, AfterValidator(_known_scanner), WithJsonSchema({
+    "type": "string", "enum": list(SCANNERS),
+})]
+
+
 class WorkflowPlan(Input):
     name: Name
     trigger: Literal["manual", "schedule", "ci"]
-    scanners: list[Literal["secrets", "sca", "sast"]] = Field(min_length=1, max_length=3)
+    scanners: list[ScannerName] = Field(min_length=1, max_length=len(SCANNERS))
     schedule: ScheduleSettings | None = None
     ci_branch: Ref | None = None
     ci_threshold: CiThreshold = CiGateConfig().threshold
@@ -54,12 +65,18 @@ class GenerationError(Exception):
     pass
 
 
+_SCANNER_GUIDE = "\n".join(
+    f"- {name}: {CATALOG[kind].label}. {CATALOG[kind].description}"
+    for kind, name in SCANNER_NODES.items()
+)
+
 _SYSTEM_PROMPT = """Ты переводишь описание защитной проверки собственного учебного проекта в план CyberFlow.
 Ответь только JSON: {"plan":{"name":"...","trigger":"manual","scanners":["secrets"]}}.
 Дай сценарию короткое название на языке пользователя.
 Заполняй только поддерживаемые поля. Если запрос нельзя выразить средствами приложения, верни {"plan":null}.
 Триггеры: manual — разовый запуск, schedule — периодический, ci — GitHub Actions.
-Сканеры: secrets — поиск секретов, sca — зависимости, sast — статический анализ. Если пользователь просит общую проверку, выбери все три.
+В scanners перечисли идентификаторы запрошенных анализаторов из каталога ниже. Для явно названной специализированной проверки используй её отдельный идентификатор.
+Если запрошены все анализаторы, перечисли весь каталог. Для общей проверки без уточнений выбери secrets, sca и sast.
 Для schedule укажи schedule с frequency (daily, weekly, monthly, cron), time в формате HH:MM,
 weekdays (0 — понедельник, 6 — воскресенье), day_of_month или cron, смотря какие поля нужны.
 Укажи timezone только если пользователь назвал часовой пояс. «По Москве» = Europe/Moscow.
@@ -72,6 +89,7 @@ weekdays (0 — понедельник, 6 — воскресенье), day_of_mo
 Если есть условие, примени его к соответствующим уведомлениям. Добавляй ai_report=true только по явной просьбе об AI-пояснении.
 Заполняй recipients только явно указанными адресами или Telegram chat_id / @username. Не подставляй выдуманных получателей.
 Расположение, связи и адрес репозитория определяет само приложение."""
+_SYSTEM_PROMPT += "\nКаталог анализаторов:\n" + _SCANNER_GUIDE
 
 
 def _recipient_mentioned(recipient: str, description: str) -> bool:
@@ -84,15 +102,20 @@ def generate_workflow(data: GenerationRequest, settings: Settings, repository_ur
     # Schema describes the model's intent. The application owns the graph topology.
     answer = complete_json(
         settings, ModelAnswer,
-        system=_SYSTEM_PROMPT + "\nСхема ответа:\n" + json.dumps(ModelAnswer.model_json_schema(), ensure_ascii=False),
-        user=data.description,
+        system=_SYSTEM_PROMPT,
+        # Compiling the full workflow grammar can terminate an Ollama runner.
+        # JSON mode still validates the result against ModelAnswer in complete_json.
+        user=data.description, constrain_ollama_schema=False,
     )
     if answer.plan is None:
         raise GenerationError("Опишите учебную проверку, её запуск, сканеры и нужные уведомления.")
-    return _build_workflow(answer.plan, data, repository_url)
+    return build_workflow(answer.plan, description=data.description, timezone=data.timezone, repository_url=repository_url)
 
 
-def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url: str | None) -> GeneratedWorkflow:
+def build_workflow(
+    plan: WorkflowPlan, *, description: str = "", timezone: str = "UTC",
+    repository_url: str | None = None, source: Literal["repository", "local_archive"] = "repository",
+) -> GeneratedWorkflow:
     graph = Graph()
     issues: list[Issue] = []
 
@@ -108,13 +131,13 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
 
     trigger_config = {"branch": plan.ci_branch} if plan.trigger == "ci" and plan.ci_branch else {}
     trigger = add(f"{plan.trigger}_trigger", 0, **trigger_config)
-    repository = add("repository", 1)
+    source_id = add(source, 1)
     merged = add("merge_findings", 3)
-    connect(trigger, "params", repository, "params")
+    connect(trigger, "params", source_id, "params")
     scanners = list(dict.fromkeys(plan.scanners))
     for index, kind in enumerate(scanners):
         scanner = add(f"scan_{kind}", 2, index - (len(scanners) - 1) / 2)
-        connect(repository, "snapshot", scanner, "snapshot")
+        connect(source_id, "snapshot", scanner, "snapshot")
         connect(scanner, "result", merged, "results")
 
     column = 4
@@ -148,7 +171,7 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
 
     missing_recipients = set()
     for index, item in enumerate(plan.notifications):
-        recipients = list(dict.fromkeys(r for r in item.recipients if _recipient_mentioned(r, data.description)))
+        recipients = list(dict.fromkeys(r for r in item.recipients if _recipient_mentioned(r, description)))
         kind = f"notify_{item.channel}"
         config = {"recipients": recipients} if recipients else {}
         node = add(kind, column, index - (len(plan.notifications) - 1) / 2, **config)
@@ -157,7 +180,9 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
         connect(*outputs[item.when], node, "report")
 
     for issue in validate_graph(graph):
-        if issue.node_id in missing_recipients and issue.field == "config.recipients":
+        if issue.code == "ARCHIVE_REQUIRED" and issue.node_id == source_id:
+            issues.append(issue)
+        elif issue.node_id in missing_recipients and issue.field == "config.recipients":
             label = CATALOG[next(n.type for n in graph.nodes if n.id == issue.node_id)].label
             issues.append(Issue(code="RECIPIENTS_REQUIRED", message=f"Укажите получателей в ноде «{label}».",
                                 node_id=issue.node_id, field=issue.field))
@@ -167,7 +192,7 @@ def _build_workflow(plan: WorkflowPlan, data: GenerationRequest, repository_url:
     schedule = None
     if plan.trigger == "schedule":
         schedule = plan.schedule or ScheduleSettings()
-        schedule = schedule.model_copy(update={"timezone": schedule.timezone or data.timezone})
+        schedule = schedule.model_copy(update={"timezone": schedule.timezone or timezone})
         try:
             spec_from_settings(schedule)
         except ScheduleSpecError as error:

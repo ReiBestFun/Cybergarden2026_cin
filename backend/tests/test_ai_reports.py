@@ -46,6 +46,21 @@ def test_provider_contract_and_grounding(monkeypatch, failure):
         assert "private/path.kt:13" in result and "Смените пароль." in result
 
 
+@pytest.mark.parametrize(("url", "provider", "key", "permitted"), [
+    ("http://ollama:11434", "ollama", "", True),
+    ("http://ollama:11434", "ollama", "secret", False),
+    ("http://ollama:11434", "openai_compatible", "", False),
+    ("http://ollama.example:11434", "ollama", "", False),
+])
+def test_compose_ollama_address(url, provider, key, permitted):
+    settings = Settings(_env_file=None, llm_base_url=url, llm_provider=provider, llm_api_key=key)
+    if permitted:
+        assert llm._provider_headers(settings) == {}
+    else:
+        with pytest.raises(llm.ModelError, match="HTTPS"):
+            llm._provider_headers(settings)
+
+
 @pytest.mark.parametrize("available", [True, False])
 def test_ai_node_passes_original_bundle_to_notification(monkeypatch, available):
     def generate(bundle, settings):
@@ -56,7 +71,8 @@ def test_ai_node_passes_original_bundle_to_notification(monkeypatch, available):
     monkeypatch.setattr(execution, "explain_report", generate)
     settings = Settings(_env_file=None, notify_email_recipients=["dev@example.org"])
     claim = SimpleNamespace(id=uuid4(), trigger="manual", source={"repository_url": "demo"})
-    worker = execution.GraphExecution(SimpleNamespace(claim=claim), settings, set())
+    progress = SimpleNamespace(claim=claim, llm_settings=lambda defaults: defaults)
+    worker = execution.GraphExecution(progress, settings, set())
     bundle = RunReport("f" * 40, "succeeded", (), ())
     worker.steps["merge"] = execution.Step(ports=("bundle",), bundle=bundle)
     ai = Node(id="ai", type="ai_report", position={"x": 0, "y": 0})
@@ -72,3 +88,16 @@ def test_ai_node_passes_original_bundle_to_notification(monkeypatch, available):
     message = result.notification.message
     assert ("AI объяснение" if available else "AI-рекомендации недоступны") in message.text
     assert json.loads(message.attachments[0].content) == {"findings": []}
+
+    telegram = Node(id="team", type="notify_telegram", position=ai.position,
+                    config={"recipients": ["@team_alerts"], "summary_only": True})
+    team_edge = Edge(id="team-out", source="ai", source_port="report", target="team", target_port="report")
+    with ExitStack() as stack:
+        summary = worker._execute_node(telegram, [team_edge], stack).notification.message
+    assert summary.text.splitlines() == [
+        "CyberFlow: сводка проверки",
+        "Результат анализа: проверка завершена",
+        "Находок: 0 · HIGH: 0 · CRITICAL: 0",
+        f"Отчёт: {settings.app_base_url}/results?run={claim.id}",
+    ]
+    assert summary.attachments == ()

@@ -9,9 +9,9 @@ import { SettingsPanel } from './SettingsPanel';
 import { CiSetup } from './CiSetup';
 import { PublishTemplate } from './PublishTemplate';
 import { WorkflowGenerator } from './WorkflowGenerator';
+import { ImportMcpDraft } from './ImportMcpDraft';
 import { toApiGraph } from './graph';
-import { errorMessage } from '../../shared/api/client';
-import { getSecurityWorkflow } from '../../shared/api/workflows';
+import { useWorkspace } from '../../app/workspaceContext';
 
 function download(blob: Blob, filename: string) {
   const link = document.createElement('a');
@@ -22,38 +22,38 @@ function download(blob: Blob, filename: string) {
 }
 
 export function Editor() {
+  const { workspace } = useWorkspace();
+  const editable = workspace.role === 'owner';
   const { nodes, edges, project, name, workflowId, busy, notice, run, canvasRevision, save, runWorkflow, loadWorkflow, newWorkflow, setNotice } = useEditorStore();
   const types = useNodeTypesStore(s => s.types);
   const [params, setParams] = useSearchParams();
-  const [downloadingCi, setDownloadingCi] = useState(false);
+  const requestedWorkflowId = params.get('workflow');
+  const [openedLink, setOpenedLink] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const hasCiTrigger = nodes.some(node => node.data.kind === 'ci_trigger');
 
-  // /editor?workflow=<id> opens a saved workflow from the server.
   useEffect(() => {
-    const id = params.get('workflow');
-    if (id) {
-      // Always re-read: the server copy (graph, schedule state) may have changed since the draft was saved.
-      void loadWorkflow(id);
-      setParams({}, { replace: true });
+    if (requestedWorkflowId && useEditorStore.getState().workflowId !== requestedWorkflowId) {
+      void loadWorkflow(requestedWorkflowId);
     }
-  }, [params, loadWorkflow, setParams]);
+  }, [requestedWorkflowId, loadWorkflow]);
+
+  useEffect(() => {
+    if (!requestedWorkflowId || requestedWorkflowId === workflowId) setOpenedLink(requestedWorkflowId);
+  }, [requestedWorkflowId, workflowId]);
+
+  if (requestedWorkflowId && openedLink !== requestedWorkflowId && workflowId !== requestedWorkflowId) {
+    return <main className="page">
+      {notice?.kind === 'error' && !busy ? <>
+        <p role="alert" className="notice error">{notice.text}</p>
+        <button className="btn secondary" onClick={() => void loadWorkflow(requestedWorkflowId)}>Повторить загрузку</button>
+      </> : <p role="status">Загружаем сценарий и расписание…</p>}
+    </main>;
+  }
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify({ name, repository_url: project, graph: toApiGraph(nodes, edges, types) }, null, 2)], { type: 'application/json' });
     download(blob, 'cyberflow-workflow.json');
-  };
-
-  const exportCi = async () => {
-    setDownloadingCi(true);
-    try {
-      const id = await save();
-      if (id) download(await getSecurityWorkflow(id), 'security.yml');
-    } catch (error) {
-      setNotice({ kind: 'error', text: errorMessage(error) });
-    } finally {
-      setDownloadingCi(false);
-    }
   };
 
   return (
@@ -63,8 +63,11 @@ export function Editor() {
           <h1>Редактор сценария</h1>
           <span className="muted">{name} · {workflowId ? 'сохранён на сервере' : 'не сохранён'}</span>
         </div>
-        <div className="toolbar-actions">
-          <button className="btn secondary" onClick={() => newWorkflow()} disabled={!!busy} title="Новый сценарий">
+        {editable && <div className="toolbar-actions">
+          <button className="btn secondary" onClick={() => {
+            newWorkflow();
+            setParams({}, { replace: true });
+          }} disabled={!!busy} title="Новый сценарий">
             <FilePlus size={16} /> Новый
           </button>
           <button className="btn secondary" onClick={() => void save()} disabled={!!busy}>
@@ -73,16 +76,12 @@ export function Editor() {
           <button className="btn secondary" onClick={exportJson}>
             <Download size={16} /> JSON
           </button>
+          <ImportMcpDraft onImported={() => setParams({}, { replace: true })} />
           <button className="btn secondary" disabled={!!busy} aria-expanded={publishing} onClick={() => setPublishing(value => !value)}>В шаблоны</button>
-          {hasCiTrigger && (
-            <button className="btn secondary" disabled={!!busy || downloadingCi} onClick={() => void exportCi()}>
-              <Download size={16} /> security.yml
-            </button>
-          )}
           {!hasCiTrigger && <button className="btn primary" disabled={!!busy} onClick={() => void runWorkflow()}>
             <Play size={16} /> {busy === 'run' ? 'Выполнение…' : 'Запустить'}
           </button>}
-        </div>
+        </div>}
       </header>
 
       {notice && (
@@ -93,16 +92,16 @@ export function Editor() {
         </div>
       )}
 
-      {hasCiTrigger && <CiSetup key={project} />}
-      {publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
+      {editable && hasCiTrigger && <CiSetup key={project} onDownload={download} />}
+      {editable && publishing && <PublishTemplate onClose={() => setPublishing(false)} />}
 
-      <div className="editor-layout">
-        <NodePalette />
-        <Canvas />
-        <SettingsPanel />
+      <div className={`editor-layout${editable ? '' : ' editor-readonly'}`}>
+        {editable && <NodePalette />}
+        <Canvas editable={editable} />
+        {editable && <SettingsPanel />}
       </div>
 
-      <WorkflowGenerator key={canvasRevision} />
+      {editable && <WorkflowGenerator key={canvasRevision} />}
     </div>
   );
 }

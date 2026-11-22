@@ -5,14 +5,17 @@ import sys
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
+from queue import Queue
+from time import monotonic
 
 import pytest
 
 from backend.app.analyzers import Snapshot, VulnerabilityCatalog, scan_sast, scan_sca, scan_secrets
 from backend.app.analyzers.models import ScanError, Warning
 from backend.app.analyzers.sca import VersionRange
+from backend.app.analyzers.verification import verify_findings
 from backend.app.reports import NodeResult, merge_findings, readable_report, submission_json
-from backend.app.worker import run_analysis
+from backend.app.worker import _verified_outcome, run_analysis
 
 SHA = "a" * 40
 ADVISORY = "GHSA-aaaa-bbbb-cccc"
@@ -35,6 +38,70 @@ def catalog():
             "fixedVersions": ["1.7"],
         }],
     })
+
+
+def test_verifies_secret_literals_and_references_without_exposing_values():
+    path = ".env"
+    snapshot = Snapshot(SHA, {path: "SERVICE_PASSWORD=fixture-pass-928"})
+    findings = scan_secrets(snapshot).findings
+    for content, status, code in (
+        ("SERVICE_PASSWORD=fixture-pass-928", "confirmed", "SECRET_LITERAL"),
+        ("SERVICE_PASSWORD=${UPSTREAM_PASSWORD:-fixture-default-928}", "confirmed", "SECRET_FALLBACK"),
+        ("SERVICE_PASSWORD=<YOUR_PASSWORD>", "false_positive", "SECRET_PLACEHOLDER"),
+        ("SERVICE_PASSWORD=${UPSTREAM_PASSWORD}", "false_positive", "SECRET_ENV_REFERENCE"),
+        ("SERVICE_PASSWORD='${UPSTREAM_PASSWORD}'", "needs_review", "SECRET_CONTEXT_UNVERIFIED"),
+    ):
+        verdict, = verify_findings(Snapshot(SHA, {path: content}), findings)
+        assert (verdict.status, verdict.code) == (status, code)
+        assert "fixture-" not in verdict.message
+
+
+def test_verifies_the_exact_kotlin_property_and_its_fallback():
+    path = "Settings.kt"
+    source = """
+        val maskedPassword = "<YOUR_PASSWORD>"; val fallback = System.getenv("APP_TOKEN") ?: "fixture-fallback-51"
+        fun configure() { val password = "<YOUR_PASSWORD>"; setBearerAuth("fixture-header-52") }
+    """
+    snapshot = Snapshot(SHA, {path: source})
+    findings = scan_secrets(snapshot).findings
+    assert [item.metadata["class"] for item in findings] == ["secret-fallback", "configuration-token"]
+    assert [verdict.code for verdict in verify_findings(snapshot, findings)] == [
+        "SECRET_FALLBACK", "SECRET_CONTEXT_UNVERIFIED",
+    ]
+
+
+def test_verifies_gradle_versions_only_with_matching_lock_configuration():
+    files = {"build.gradle.kts": 'dependencies { implementation("demo:asset:1.4") }'}
+    lock_path = "gradle.lockfile"
+    locked = Snapshot(SHA, files | {lock_path: "demo:asset:1.4=runtimeClasspath"})
+    advisories = catalog()
+    locked_findings = scan_sca(locked, advisories).findings
+    verdict, = verify_findings(locked, locked_findings, advisories)
+    assert (verdict.status, verdict.code) == ("confirmed", "SCA_LOCK_VERSION_AFFECTED")
+    for lock, expected in (
+        ("demo:asset:1.7=runtimeClasspath", "false_positive"),
+        ("demo:asset:1.4=testRuntimeClasspath", "needs_review"),
+        ("demo:asset:1.4=runtimeClasspath\ndemo:asset:1.7=runtimeClasspath", "needs_review"),
+    ):
+        snapshot = Snapshot(SHA, files | {lock_path: lock})
+        verdict, = verify_findings(snapshot, locked_findings, advisories)
+        assert verdict.status == expected
+    declared = Snapshot(SHA, files)
+    verdict, = verify_findings(declared, scan_sca(declared, advisories).findings, advisories)
+    assert (verdict.status, verdict.code) == ("needs_review", "SCA_DECLARED_VERSION")
+
+
+@pytest.mark.parametrize(("crash", "code"), [(True, "VERIFICATION_FAILED"), (False, "VERIFICATION_TIMEOUT")])
+def test_verifier_failure_preserves_the_original_scan(crash, code):
+    result = scan_secrets(Snapshot(SHA, {".env": "SERVICE_PASSWORD=fixture-pass-928"}))
+    queue = Queue()
+    if crash:
+        queue.put(None)
+    node = _verified_outcome(NodeResult("secrets", "succeeded", result), queue, monotonic())
+    assert node.status == "succeeded" and node.result.coverage == result.coverage
+    finding, = node.result.findings
+    assert finding.evidence == "***"
+    assert finding.verification.status == "needs_review" and finding.verification.code == code
 
 
 def test_secrets_classifies_literals_and_excludes_controls():
@@ -67,6 +134,46 @@ def test_secrets_classifies_literals_and_excludes_controls():
     assert len(result.findings) == 5
     assert all(item.evidence == "***" for item in result.findings)
     assert "fixture-" not in json.dumps(asdict(result))
+
+
+@pytest.mark.parametrize("path", ["Settings.kt", "app.properties"])
+def test_secrets_combines_entropy_with_format_and_context(path, caplog):
+    entries = [
+        ("material", "Q2vp8KhJ41Ybm6Li3NVdT7fx0s"),
+        ("identifier", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+        ("materialId", "d85a1f09bc37e264" * 4),
+        ("password", "example-Q2vp8KhJ41Ybm6Li3NVdT7fx0s"),
+        ("databasePassword", "zzzzzz"),
+        ("pageToken", "G3js8Qvp1Lj5cY4rHu07axBt"),
+        ("label", "aaaabbbbccccddddaaaabbbbccccdddd"),
+        ("contentType", "application/x-www-form-urlencoded"),
+        ("path", "/usr/local/share/zoneinfo/America/New_York"),
+        ("materialHeader", "Bearer x47Vie9QbnOb2NCT79Ug5rdF"),
+        ("artifact", "com-example-OrdersApplicationConfiguration"),
+    ]
+    lines = [f'val {key} = "{value}"' if path.endswith(".kt") else f"{key}={value}"
+             for key, value in entries]
+    result = scan_secrets(Snapshot(SHA, {path: "\n".join(lines)}))
+    assert [(item.line, item.metadata["class"]) for item in result.findings] == [
+        (1, "configuration-token"), (5, "password"), (10, "configuration-token"),
+    ]
+    report = merge_findings(SHA, (NodeResult("secrets", "succeeded", result),))
+    outputs = (json.dumps(asdict(result)), submission_json(report), readable_report(report), caplog.text)
+    assert all(value not in output for _, value in entries for output in outputs)
+
+
+def test_secrets_uses_explicit_kotlin_context_for_the_same_literal():
+    result = scan_secrets(Snapshot(SHA, {"Config.kt": """
+        val material = "Q2vp8KhJ41Ybm6Li3NVdT7fx0s"
+        val databasePassword = material
+        val settings = mapOf("opaque" to "G3js8Qvp1Lj5cY4rHu07axBt")
+        val service = Service(material = "kI79Fo68jcxQDCnbsUYN1BRW")
+        val pageToken = "Lm8ofNqz1C6jVb75xeiSAZB4"
+        val params = pageToken
+    """}))
+    assert [(item.line, item.metadata["class"]) for item in result.findings] == [
+        (2, "password"), (4, "configuration-token"), (5, "configuration-token"),
+    ]
 
 
 def test_invalid_yaml_keeps_other_safe_results():

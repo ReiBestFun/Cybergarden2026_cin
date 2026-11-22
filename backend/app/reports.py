@@ -10,6 +10,11 @@ from typing import Literal
 from .analyzers.models import Category, Finding, ScanResult, Warning, finding_key, safe_path
 
 _CATEGORIES = {"secrets": "SECRET", "sca": "SCA", "sast": "SAST"}
+_VERDICTS = {
+    "confirmed": "Подтверждено",
+    "needs_review": "Нужна проверка",
+    "false_positive": "Ложное срабатывание",
+}
 
 
 @dataclass(frozen=True)
@@ -108,10 +113,12 @@ def _warning_text(warning: Warning) -> str:
     return _cell(f"{text} {warning.hint}" if warning.hint else text)
 
 
-def readable_report(report: RunReport) -> str:
+def readable_report(report: RunReport, *, archive_sha256: str | None = None) -> str:
     status = {"succeeded": "Проверка завершена", "partial": "Проверка завершена частично", "failed": "Проверка не выполнена"}
     lines = ["# Отчёт статического анализа", ""]
-    if report.sha:
+    if archive_sha256:
+        lines.extend((f"ZIP · SHA-256 {archive_sha256}", ""))
+    elif report.sha:
         lines.extend((f"Коммит {report.sha}", ""))
     lines.extend((status[report.status], ""))
     for node in report.nodes:
@@ -137,8 +144,8 @@ def readable_report(report: RunReport) -> str:
         return "\n".join(lines) + "\n"
 
     lines.extend((
-        "", "| Категория | Критичность | Находка | Место | Исправление |",
-        "|---|---|---|---|---|",
+        "", "| Категория | Критичность | Находка | Место | Дополнительная проверка | Исправление |",
+        "|---|---|---|---|---|---|",
     ))
     for finding in report.findings:
         location = finding.path
@@ -152,6 +159,8 @@ def readable_report(report: RunReport) -> str:
                 location += f"–{min(finding.end_line, finding.line + 14)}"
             if finding.category == "secrets":
                 detail += " Значение скрыто."
-        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, finding.remediation)
+        verification = finding.verification
+        verdict = f"{_VERDICTS[verification.status]}. {verification.message}" if verification else "—"
+        cells = (_CATEGORIES[finding.category], finding.severity.upper(), detail, location, verdict, finding.remediation)
         lines.append("| " + " | ".join(map(_cell, cells)) + " |")
     return "\n".join(lines) + "\n"

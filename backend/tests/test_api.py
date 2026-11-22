@@ -1,12 +1,16 @@
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from secrets import randbits
 from threading import Barrier, Event, Lock
 from typing import get_args
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -14,16 +18,22 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from cryptography.fernet import Fernet
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from backend.app.analyzers.models import Coverage, ScanError, ScanResult, Snapshot, Warning
 from backend.app.api import runs as runs_api
+from backend.app.api import auth
 from backend.app.config import Settings
 from backend.app.credentials import resolve_credential
-from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, Workflow
+from backend.app.db.encryption import require_cipher
+from backend.app.notifications.destinations import telegram_chat_key
+from backend.app.db.models import Credential, FindingRow, NodeRun, ScanRun, Schedule, TelegramDestination, Workflow, WorkspaceInvitation, WorkspaceMcpToken
 from backend.app.integrations.github_actions import security_workflow
+from backend.app.integrations.github_oauth import GitHubIdentity
 from backend.app.integrations.repository import (
     RepositorySnapshot, allowed_repository_urls, is_repository_allowed, prepare_repository, repository_allowlist,
 )
@@ -31,13 +41,59 @@ from backend.app.main import create_app
 from backend.app import notification_worker
 from backend.app.queue_worker import run_next
 from backend.app.reports import NodeResult
-from backend.app.schemas.contracts import Graph
+from backend.app.schemas.contracts import Graph, RunDetail
 from backend.app.schemas.credentials import CredentialKind
 from backend.app.workflows import execution
 from backend.app.workflows.persistence import ClaimLost, RunProgress
 from backend.app.workflows.queue import claim_next, enqueue_due_schedules, expire_stale_runs
 from backend.app.workflows.scheduling import next_daily_slot
 from backend.app.workflows.validation import validate_graph
+
+ORIGIN = "http://localhost:5173"
+TEST_KEY = urlsafe_b64encode(b"fixture-only-encryption-key-2026").decode()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_api_logs_errors_without_exposing_the_exception(caplog, monkeypatch, streaming):
+    app = create_app(Settings(_env_file=None, frontend_origins=[ORIGIN]))
+    logger = logging.getLogger("cyberflow.events")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    caplog.set_level(logging.INFO, logger=logger.name)
+    secret = "synthetic-private-exception-detail"
+
+    @app.get("/api/fixture-failure")
+    async def fail():
+        if not streaming:
+            raise RuntimeError(secret)
+
+        async def chunks():
+            yield b"partial response"
+            raise RuntimeError(secret)
+
+        return StreamingResponse(chunks())
+
+    with TestClient(app, headers={"Origin": ORIGIN}) as client:
+        if streaming:
+            with pytest.raises(RuntimeError, match="CyberFlow API response was interrupted") as error:
+                client.get("/api/fixture-failure", params={"key": secret})
+            assert secret not in str(error.value)
+        else:
+            response = client.get("/api/fixture-failure", params={"key": secret})
+            assert response.status_code == 500 and secret not in response.text
+            assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
+            assert "X-Request-ID" in response.headers["Access-Control-Expose-Headers"]
+    [event] = [json.loads(record.getMessage()) for record in caplog.records if record.name == logger.name]
+    assert event["action"] == "http.request" and event["result"] == "failed"
+    assert event["http_status"] == (200 if streaming else 500)
+    UUID(event["request_id"])
+    assert secret not in caplog.text
+
+
+def test_invalid_token_settings_omit_input_values_from_startup_errors():
+    secret = "synthetic-private-configuration-token"
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None, ci_workflow_tokens=[secret])
+    assert secret not in str(error.value)
 
 
 def node(node_id, kind, config=None):
@@ -87,9 +143,20 @@ def test_github_actions_template_and_gate_config():
     for mode, runner in [("local", ["self-hosted", "Windows", "cyberflow"]), ("hosted", "ubuntu-latest")]:
         workflow = yaml.load(security_workflow(workflow_id, "release/demo", mode), Loader=yaml.BaseLoader)
         assert workflow["on"]["push"]["branches"] == ["release/demo"]
+        trigger = workflow["on"]["pull_request_target"]
+        assert trigger["branches"] == ["release/demo"]
+        assert set(trigger["types"]) == {"opened", "reopened", "synchronize", "edited"}
         assert workflow["permissions"] == {}
         job = workflow["jobs"]["cyberflow"]
         assert job["runs-on"] == runner
+        assert job["env"]["SOURCE_SHA"] == "${{ github.sha }}"
+        pr = workflow["jobs"]["report-pr"]
+        assert pr["env"]["SOURCE_SHA"] == "${{ github.event.pull_request.head.sha }}"
+        assert pr["runs-on"] == "ubuntu-latest"
+        assert pr["permissions"] == {"statuses": "write"}
+        assert pr["steps"][-1]["if"] == "always()"
+        assert pr["steps"][-1]["env"]["SCAN_OUTCOME"] == "${{ steps.scan.outcome }}"
+        assert pr["steps"][-1]["env"]["DECISION"] == "${{ steps.scan.outputs.decision }}"
         assert job["steps"][0]["env"]["CYBERFLOW_TOKEN"] == "${{ secrets.CYBERFLOW_TOKEN }}"
     assert validate_graph(Graph.model_validate(ci_graph()), expected_trigger="ci_trigger") == []
     assert validate_graph(Graph.model_validate(ci_graph("LOW")))[0].code == "INVALID_CONFIG"
@@ -166,12 +233,26 @@ def test_allow_any_repository_switch():
     assert is_repository_allowed("https://github.com/other/project", repository_allowlist([], allow_any=True))
 
 
+def test_ci_stays_on_training_repository_when_project_allowlist_is_expanded(api):
+    client, _ = api
+    other = "https://github.com/other/project"
+    client.app.state.settings.allowed_repositories.append(other)
+    client.app.state.allowed_repositories = allowed_repository_urls(client.app.state.settings.allowed_repositories)
+    project = client.post("/api/projects", json={"name": "Other", "repository_url": other})
+    assert project.status_code == 201, project.text
+    workflow_id = create_workflow(client, project.json()["id"], ci_graph())
+    response = client.post(f"/api/workflows/{workflow_id}/ci-test", json={"commit_sha": "a" * 40})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CI_REPOSITORY_NOT_ALLOWED"
+
+
 def test_template_is_portable_and_schedule_stays_disabled(api):
     client, _ = api
     project_id, target_id = create_project(client), create_project(client)
     graph = analysis_graph("schedule_trigger")
     graph["nodes"].append(node("email", "notify_email", {
         "credential_id": str(UUID(int=5)), "recipients": ["user@example.org"], "subject": "Private subject", "attach_json": False,
+        "use_workspace_settings": True,
     }))
     graph["edges"].append(edge("deliver", "merge", "bundle", "email", "report"))
     workflow_id = create_workflow(client, project_id, graph)
@@ -193,23 +274,24 @@ def test_template_is_portable_and_schedule_stays_disabled(api):
     assert schedule["enabled"] is False and schedule["time"] == "08:30" and schedule["next_run_at"] is None
 
 
-def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch):
+@pytest.mark.parametrize("logout", [False, True])
+def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch, logout):
     client, sessions = api
     workflow_id = create_workflow(client, create_project(client), analysis_graph())
     run_id = UUID(client.post(f"/api/workflows/{workflow_id}/runs", json={}).json()["id"])
-    with sessions() as db:
-        initial = runs_api.get_run(run_id, db)
+    session_hash = auth.token_hash(client.cookies["cyberflow_session"])
+    initial = RunDetail.model_validate(client.get(f"/api/runs/{run_id}").json())
     dsn = make_url(client.app.state.settings.database_url).set(drivername="postgresql").render_as_string(hide_password=False)
     listening = Event()
-    get_run = runs_api.get_run
+    run_detail = runs_api._run_detail
 
     def observed_read(*args):
-        run = get_run(*args)
+        run = run_detail(*args)
         listening.set()
         return run
 
-    monkeypatch.setattr(runs_api, "get_run", observed_read)
-    events = runs_api._run_events(initial, sessions, dsn)
+    monkeypatch.setattr(runs_api, "_run_detail", observed_read)
+    events = runs_api._run_events(initial, sessions, dsn, session_hash)
     assert '"status":"queued"' in next(events)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(next, events)
@@ -218,9 +300,16 @@ def test_run_event_snapshot_updates_after_postgres_notification(api, monkeypatch
             db.get(ScanRun, run_id).status = "running"
         runtime = json.loads(pending.result(timeout=4).split("data: ", 1)[1])
         assert runtime["status"] == "running"
-    events.close()
+    if logout:
+        assert client.post("/api/auth/logout").status_code == 204
     with sessions.begin() as db:
         db.get(ScanRun, run_id).status = "succeeded"
+    if logout:
+        # Ignore keepalives. A closed session must receive no further run data.
+        assert all(chunk.startswith(":") for chunk in events)
+        assert client.get(f"/api/runs/{run_id}/events").status_code == 401
+        return
+    assert any('"status":"succeeded"' in chunk for chunk in events)
     terminal = client.get(f"/api/runs/{run_id}/events")
     assert terminal.headers["content-type"].startswith("text/event-stream")
     assert '"status":"succeeded"' in terminal.text
@@ -255,10 +344,14 @@ def test_ci_editor_run_and_token_rotation(api, monkeypatch, tmp_path):
     assert client.get(status_endpoint, headers={"Authorization": f"Bearer {token}"}).status_code == 200
 
 
-def test_project_credentials_are_encrypted_and_scoped(api):
+def test_project_credentials_are_encrypted_and_scoped(api, monkeypatch):
     client, sessions = api
     project_id = UUID(create_project(client))
-    other_project_id = UUID(create_project(client))
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        other_project_id = UUID(create_project(other))
+        assert other_project_id != project_id
+        assert other.get(f"/api/projects/{project_id}/credentials").status_code == 404
     route = f"/api/projects/{project_id}/credentials"
     settings = client.app.state.settings
     settings.credentials_encryption_key = None
@@ -302,6 +395,14 @@ def test_worker_reads_current_credential_without_exposing_it(api, monkeypatch, t
     settings.credentials_encryption_key = Settings(credentials_encryption_key=Fernet.generate_key().decode()).credentials_encryption_key
     settings.notify_telegram_recipients = [recipient] if kind == "telegram" else []
     settings.notify_email_recipients = [recipient] if kind == "smtp" else []
+    if kind == "telegram":
+        owner_id = UUID(client.get("/api/me").json()["id"])
+        with sessions.begin() as db:
+            cipher = require_cipher(db.get_bind().dialect)
+            db.add(TelegramDestination(
+                owner_id=owner_id, chat_id=recipient, label="Test destination",
+                verified_at=datetime.now(UTC), chat_key=telegram_chat_key(cipher, owner_id, recipient),
+            ))
     route = f"/api/projects/{project_id}/credentials"
     value = {"secret": "synthetic-old"}
     if kind == "smtp":
@@ -367,19 +468,35 @@ def api(monkeypatch):
     if not url:
         pytest.skip("Set TEST_DATABASE_URL to a dedicated PostgreSQL test database")
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", TEST_KEY)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
     # Tests use the strict allowlist regardless of a developer's local .env.
-    app = create_app(Settings(database_url=url, allow_any_repository=False))
-    with TestClient(app) as client:
+    app = create_app(Settings(
+        database_url=url, allow_any_repository=False, app_base_url=ORIGIN,
+        github_client_id="fixture-github-app", github_client_secret="fixture-github-secret",
+    ))
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        login(client, monkeypatch, randbits(48) + 1)
         yield client, app.state.session_factory
+
+
+def login(client, monkeypatch, identity, *, name="Пользователь", login_name="test-user", next_path="/"):
+    monkeypatch.setattr(auth, "fetch_identity", lambda *args: GitHubIdentity(identity, login_name, name, None))
+    start = client.get("/api/auth/github/start", params={"next": next_path}, follow_redirects=False)
+    assert start.status_code == 303, start.text
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    callback = client.get("/api/auth/github/callback", params={"code": "fixture-code", "state": query["state"][0]}, follow_redirects=False)
+    assert callback.status_code == 303 and "cyberflow_session" in callback.headers["set-cookie"]
+    return callback
 
 
 def create_project(client):
     response = client.post("/api/projects", json={
         "name": "Учебный проект", "repository_url": "https://github.com/TBagirov/training.git",
     })
-    assert response.status_code == 201, response.text
+    assert response.status_code in {200, 201}, response.text
     return response.json()["id"]
 
 
@@ -390,6 +507,198 @@ def create_workflow(client, project, graph=None):
     response = client.post(f"/api/projects/{project}/workflows", json=payload)
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+def test_mcp_token_is_read_only_workspace_scoped_and_revocable(api):
+    client, sessions = api
+    personal = client.get("/api/workspaces").json()["items"][0]["id"]
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph())
+    run = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+    team = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    other_project = client.post("/api/projects", json={
+        "workspace_id": team, "name": "Другой проект", "repository_url": "https://github.com/TBagirov/training",
+    }).json()["id"]
+    other_workflow = create_workflow(client, other_project, analysis_graph())
+    other_run = client.post(f"/api/workflows/{other_workflow}/runs").json()["id"]
+
+    path = f"/api/workspaces/{personal}/mcp-tokens"
+    issued = client.post(path, json={"name": "Локальный MCP"})
+    assert issued.status_code == 201
+    access = issued.json()
+    assert access["token"] not in client.get(path).text
+    with sessions.begin() as db:
+        assert db.get(WorkspaceMcpToken, UUID(access["id"])).token_hash != access["token"]
+        scanned = db.scalar(select(NodeRun).where(NodeRun.run_id == UUID(run), NodeRun.type == "scan_secrets"))
+        db.add(FindingRow(
+            run_id=UUID(run), node_run_id=scanned.id, rule_id="fixture.rule", category="sast", severity="high",
+            title="Синтетическая находка", description="private-description", remediation="private-remediation",
+            path="Demo.kt", line=3, end_line=3, evidence="private-evidence",
+            details={"advisory_id": "FIXTURE-1", "other": "private-metadata"},
+        ))
+    assert client.get("/api/mcp/runs").status_code == 401
+    headers = {"Authorization": f"Bearer {access['token']}"}
+    with TestClient(client.app, base_url=ORIGIN) as mcp_client:
+        listings = mcp_client.get("/api/mcp/runs", headers=headers).json()
+        assert [item["id"] for item in listings["items"]] == [run]
+        assert mcp_client.get(f"/api/mcp/runs/{run}/summary", headers=headers).json()["status"] == "queued"
+        findings = mcp_client.get(f"/api/mcp/runs/{run}/findings", headers=headers)
+        [finding] = findings.json()["items"]
+        assert finding["advisory_id"] == "FIXTURE-1" and "private-" not in findings.text
+        assert set(finding) == {"id", "category", "rule_id", "severity", "title", "path", "line", "end_line", "advisory_id"}
+        assert mcp_client.get(f"/api/mcp/runs/{other_run}/summary", headers=headers).status_code == 404
+        assert mcp_client.get(f"/api/mcp/runs/{other_run}/findings", headers=headers).status_code == 404
+        assert mcp_client.get("/api/me", headers=headers).status_code == 401
+        assert mcp_client.post(f"/api/workflows/{workflow}/runs", headers=headers).status_code == 401
+        draft_path = f"/api/workspaces/{personal}/workflow-drafts/validate"
+        assert mcp_client.post(draft_path, headers=headers, json=analysis_graph()).status_code == 401
+        assert client.post(draft_path, json=analysis_graph()).json() == analysis_graph()
+        assert len(client.get(f"/api/projects/{project}/workflows").json()["items"]) == 1
+        assert client.delete(f"{path}/{access['id']}").status_code == 204
+        assert mcp_client.get(f"/api/mcp/runs/{run}/findings", headers=headers).status_code == 401
+        expiring = client.post(path, json={"name": "Истекает"}).json()
+        with sessions.begin() as db:
+            db.get(WorkspaceMcpToken, UUID(expiring["id"])).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        assert mcp_client.get("/api/mcp/runs", headers={"Authorization": f"Bearer {expiring['token']}"}).status_code == 401
+
+
+def test_removing_a_member_invalidates_old_mcp_tokens_even_after_rejoin(api, monkeypatch):
+    owner, _ = api
+    team = owner.post("/api/workspaces", json={"name": "Команда MCP"}).json()["id"]
+    base = f"/api/workspaces/{team}"
+
+    def invitation():
+        return owner.post(f"{base}/invitations", json={"role": "member"}).json()["token"]
+
+    with TestClient(owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as member:
+        login(member, monkeypatch, randbits(48) + 1)
+        member_id = member.get("/api/me").json()["id"]
+        assert member.post(f"{base}/join", json={"token": invitation()}).status_code == 200
+        access = member.post(f"{base}/mcp-tokens", json={"name": "Участник"}).json()
+        headers = {"Authorization": f"Bearer {access['token']}"}
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 200
+        assert owner.get(f"{base}/mcp-tokens").json() == []
+        assert owner.delete(f"{base}/members/{member_id}").status_code == 204
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 401
+        assert member.post(f"{base}/join", json={"token": invitation()}).status_code == 200
+        assert member.get("/api/mcp/runs", headers=headers).status_code == 401
+
+
+def test_workspace_transfer_preserves_project_workflow_and_history(api, monkeypatch):
+    client, _ = api
+    [personal] = client.get("/api/workspaces").json()["items"]
+    assert personal["personal"] and personal["role"] == "owner"
+    response = client.post("/api/workspaces", json={"name": "Команда"})
+    assert response.status_code == 201
+    team = response.json()["id"]
+    project = create_project(client)
+    workflow = create_workflow(client, project, analysis_graph())
+    run = client.post(f"/api/workflows/{workflow}/runs").json()["id"]
+
+    moved = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert moved.status_code == 200 and moved.json()["workspace_id"] == team
+    assert client.post(f"/api/projects/{project}/move", json={"workspace_id": team}).status_code == 200
+    assert client.get("/api/projects").json()["items"] == []
+    assert [item["id"] for item in client.get("/api/projects", params={"workspace_id": team}).json()["items"]] == [project]
+    assert client.get(f"/api/workflows/{workflow}").status_code == 200
+    assert client.get(f"/api/projects/{project}/runs").json()["items"][0]["id"] == run
+    assert client.get(f"/api/runs/{run}").json()["workflow_id"] == workflow
+
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        login(other, monkeypatch, randbits(48) + 1)
+        assert other.get("/api/projects", params={"workspace_id": team}).status_code == 404
+        assert other.get(f"/api/projects/{project}").status_code == 404
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 404
+        assert other.get(f"/api/workflows/{workflow}").status_code == 404
+        assert other.get(f"/api/runs/{run}/findings").status_code == 404
+        other_id = UUID(other.get("/api/me").json()["id"])
+        route = f"/api/workspaces/{team}"
+        invitation = client.post(route + "/invitations", json={"role": "member", "days": 2})
+        assert invitation.status_code == 201, invitation.text
+        token = invitation.json()["token"]
+        accept = route + "/join"
+        assert other.post(accept, json={"token": token}).status_code == 200
+        assert other.post(accept, json={"token": token}).status_code == 410
+        spaces = other.get("/api/workspaces").json()["items"]
+        assert next(space for space in spaces if space["id"] == team)["role"] == "member"
+        assert other.get("/api/projects", params={"workspace_id": team}).json()["items"][0]["id"] == project
+        assert other.get(f"/api/runs/{run}").status_code == 200
+        assert other.patch(f"/api/projects/{project}", json={"name": "Чужое изменение"}).status_code == 403
+        assert other.post(f"/api/workflows/{workflow}/runs").status_code == 403
+        assert other.get(f"/api/projects/{project}/credentials").status_code == 403
+        assert other.post(f"/api/projects/{create_project(other)}/move", json={"workspace_id": team}).status_code == 403
+        assert other.post(route + "/invitations", json={"role": "owner"}).status_code == 403
+        assert client.patch(route + f"/members/{other_id}", json={"role": "owner"}).status_code == 200
+        assert other.get(route + "/invitations").status_code == 200
+        published = other.post("/api/templates", json={"workflow_id": workflow, "workspace_id": team, "name": "Командный"})
+        assert published.status_code == 201, published.text
+        template = "/api/templates/" + published.json()["id"]
+        assert client.delete(route + f"/members/{other_id}").status_code == 204
+        assert other.get(f"/api/runs/{run}").status_code == 404
+        assert other.get(template).status_code == 404
+        assert client.get(template).status_code == 200
+        assert client.get(f"/api/runs/{run}").status_code == 200
+        assert client.get(f"/api/workflows/{workflow}").status_code == 200
+
+
+def test_workspace_invitations_expiry_revocation_and_scope(api, monkeypatch):
+    client, sessions = api
+    owner = client.get("/api/me").json()["id"]
+    team = client.post("/api/workspaces", json={"name": "Team A"}).json()["id"]
+    route = f"/api/workspaces/{team}"
+    assert client.delete(route + "/members/" + owner).status_code == 409
+    assert client.patch(route + "/members/" + owner, json={"role": "member"}).status_code == 409
+    assert client.post(f"/api/workspaces/{owner}/invitations", json={"role": "owner"}).status_code == 404
+    revoked, expired, active = [client.post(route + "/invitations", json={"role": "owner"}).json() for _ in range(3)]
+    assert client.delete(route + "/invitations/" + revoked["id"]).status_code == 204
+    with sessions.begin() as db:
+        db.get(WorkspaceInvitation, UUID(expired["id"])).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert [row["id"] for row in client.get(route + "/invitations").json()] == [active["id"]]
+    with TestClient(client.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as other:
+        assert other.post(route + "/join", json={"token": active["token"]}).status_code == 401
+        login(other, monkeypatch, randbits(48) + 1)
+        second = other.post("/api/workspaces", json={"name": "Team B"}).json()["id"]
+        assert other.get(route + "/members").status_code == 404
+        assert other.post(f"/api/workspaces/{second}/join", json={"token": active["token"]}).status_code == 410
+        for invalid in [revoked, expired]:
+            assert other.post(route + "/join", json={"token": invalid["token"]}).status_code == 410
+        assert other.post(route + "/join", json={"token": active["token"]}).json()["role"] == "owner"
+        assert client.get(f"/api/workspaces/{second}/members").status_code == 404
+
+
+def test_workspace_invitation_two_github_users_redeem_concurrently(api, monkeypatch):
+    owner, _ = api
+    team = owner.post("/api/workspaces", json={"name": "Одно приглашение"}).json()["id"]
+    path = f"/api/workspaces/{team}"
+    invite = owner.post(path + "/invitations", json={"role": "member"}).json()
+    ready = Barrier(2)
+
+    def accept(client):
+        ready.wait(timeout=5)
+        return client.post(path + "/join", json={"token": invite["token"]}).status_code
+
+    with TestClient(owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as first, TestClient(
+        owner.app, base_url=ORIGIN, headers={"Origin": ORIGIN},
+    ) as second:
+        for client in (first, second):
+            login(client, monkeypatch, randbits(48) + 1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(accept, (first, second))) == [200, 410]
+    assert len(owner.get(path + "/members").json()) == 2
+
+
+def test_workspace_repository_conflict_preserves_personal_project(api):
+    client, _ = api
+    team = client.post("/api/workspaces", json={"name": "Другая команда"}).json()["id"]
+    project = create_project(client)
+    payload = {"name": "Командный проект", "repository_url": "https://github.com/TBagirov/training", "workspace_id": team}
+    created = client.post("/api/projects", json=payload)
+    assert created.status_code == 201 and created.json()["id"] != project
+    duplicate = client.post("/api/projects", json=payload)
+    assert duplicate.status_code == 200 and duplicate.json()["id"] == created.json()["id"]
+    rejected = client.post(f"/api/projects/{project}/move", json={"workspace_id": team})
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "WORKSPACE_REPOSITORY_EXISTS"
+    assert client.get("/api/projects").json()["items"][0]["id"] == project
 
 
 def test_project_workflow_and_run_are_persisted(api):
@@ -481,6 +790,7 @@ def test_persisted_findings_are_filtered_and_exported(api):
     assert page["total"] == 1
     assert page["items"][0]["metadata"] == {"class": "password"}
     assert page["items"][0]["evidence"] == "***"
+    assert page["items"][0]["verification"] is None
     assert client.get(f"{base}/findings?category=sca").json()["total"] == 0
     assert client.get(f"{base}/report").json()["summary"]["high_count"] == 1
     export = client.get(f"{base}/export")
@@ -540,14 +850,228 @@ def test_queue_worker_runs_analysis_and_keeps_results_on_failed_sca(api, monkeyp
     assert steps["branch"]["status"] == "skipped" and steps["branch"]["error"]["code"] == "INACTIVE_BRANCH"
     findings = client.get(f"{base}/findings").json()["items"]
     assert [(item["category"], item["evidence"]) for item in findings] == [("secrets", "***")]
+    assert findings[0]["verification"]["status"] == "confirmed"
+    assert findings[0]["verification"]["code"] == "SECRET_LITERAL"
+    assert "verification" not in findings[0]["metadata"]
     report = client.get(f"{base}/report").json()
     assert report["summary"]["total"] == 1
     assert report["coverage"]["status"] == "partial"
     markdown = client.get(f"{base}/export?format=markdown").text
     assert "**SECRET** — полное покрытие" in markdown
     assert "**SCA** — Для SCA требуется справочник Maven." in markdown
+    assert "Подтверждено" in markdown
+    assert "verification" not in client.get(f"{base}/export").json()["findings"][0]
     for url in (base, f"{base}/findings", f"{base}/report", f"{base}/export?format=markdown"):
         assert "fixture-pass-98" not in client.get(url).text
+
+
+def test_password_hashing_node_persists_only_fast_password_digests(api, monkeypatch):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_password_hashing")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    source = """fun store(password: String) = DigestUtils.md5Hex(password)
+fun verify(rawPassword: String, stored: String) = DigestUtils.sha1Hex(rawPassword) == stored
+fun hash(password: String): ByteArray {
+    val digest = MessageDigest.getInstance("SHA-256")
+    return digest.digest(password.toByteArray())
+}
+fun checksum(file: File) = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+fun secure(password: String) = BCryptPasswordEncoder().encode(password)
+fun matches(password: String, stored: String) = Argon2PasswordEncoder.defaultsForSpringSecurity_v5_8().matches(password, stored)
+fun salted(password: String, salt: String) = DigestUtils.sha256Hex(salt + password)
+fun storeInParts(password: String, file: File) {
+    val md = MessageDigest.getInstance("SHA-1")
+    md.update(password.toByteArray())
+    save(md.digest())
+    md.update(file.readBytes())
+    checksum(md.digest())
+}
+"""
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("b" * 40, {"Auth.kt": source}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+
+    base = f"/api/runs/{run_id}"
+    history = client.get(base).json()
+    assert history["status"] == "succeeded"
+    step = next(item for item in history["nodes"] if item["node_id"] == "scan")
+    assert step["type"] == scanner["type"]
+    assert step["output_preview"]["finding_count"] == 5
+    findings = client.get(f"{base}/findings").json()["items"]
+    assert [(f["metadata"]["algorithm"], f["line"]) for f in findings] == [
+        ("MD5", 1), ("SHA-1", 2), ("SHA-256", 5), ("SHA-256", 10), ("SHA-1", 14),
+    ]
+    exported = client.get(f"{base}/export").json()["findings"]
+    assert [(f["path"], f["line"]) for f in exported] == [
+        ("Auth.kt", 1), ("Auth.kt", 2), ("Auth.kt", 5), ("Auth.kt", 10), ("Auth.kt", 14),
+    ]
+    assert all("Argon2id" in f["remediation"] for f in exported)
+
+
+def test_sensitive_logging_node_reports_only_exposed_values(api, monkeypatch):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_sensitive_logging")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    source = '''fun audit(request: Request, tokenId: String) {
+    val password = "synthetic-private-canary"
+    logger.warn("password={}", password)
+    logger.debug { "session=${request.accessToken}" }
+    val header = request.getHeader("Authorization")
+    log.error("header=" + header)
+    logger.info("password={}", mask(password))
+    logger.info("token id=$tokenId")
+    logger.info("header name={}", HttpHeaders.AUTHORIZATION)
+    logger.info { "redacted=${redact(request.accessToken)}" }
+    auditService.info(password)
+    val accessToken = issueJwt()
+    logger.info("received $accessToken")
+    val masked = mask(accessToken)
+    logger.info("received $masked")
+    log.warn("header {}", request.headers[HttpHeaders.AUTHORIZATION])
+    val sink = LoggerFactory.getLogger("audit")
+    sink.error("credential {}", request.password)
+    log.warn("{}", request.headers[HttpHeaders.Authorization] ?: "missing")
+    log.info("{}", HttpHeaders.Authorization)
+    val sessionToken = "prefix-$tokenId"
+    log.trace("{}", sessionToken)
+    val userPassword = "***"
+    log.info("{}", userPassword)
+}'''
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("c" * 40, {"src/Auth.kt": source}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    base = f"/api/runs/{run_id}"
+    assert client.get(base).json()["status"] == "succeeded"
+    findings = client.get(f"{base}/findings").json()["items"]
+    assert [(f["path"], f["line"]) for f in findings] == [
+        ("src/Auth.kt", 3), ("src/Auth.kt", 4), ("src/Auth.kt", 6),
+        ("src/Auth.kt", 13), ("src/Auth.kt", 16), ("src/Auth.kt", 18),
+        ("src/Auth.kt", 19), ("src/Auth.kt", 22),
+    ]
+    assert all(f["rule_id"] == "sast.sensitive-logging" and f["severity"] == "high" for f in findings)
+    report = client.get(f"{base}/export").json()["findings"]
+    assert [f["line"] for f in report] == [3, 4, 6, 13, 16, 18, 19, 22]
+    assert all(f["remediation"] for f in report)
+    for url in (base, f"{base}/findings", f"{base}/export", f"{base}/export?format=markdown"):
+        assert "synthetic-private-canary" not in client.get(url).text
+
+
+@pytest.mark.parametrize(("mode", "total", "coverage", "branch"), [
+    ("AND", 0, "complete", "true"), ("AND", 0, "partial", "false"),
+    ("AND", 1, "complete", "false"), ("AND", 1, "partial", "false"),
+    ("OR", 0, "complete", "true"), ("OR", 0, "partial", "true"),
+    ("OR", 1, "complete", "true"), ("OR", 1, "partial", "false"),
+    (None, 0, "complete", "true"), (None, 1, "complete", "false"),
+])
+def test_condition_routes_only_the_selected_branch(api, monkeypatch, mode, total, coverage, branch):
+    client, sessions = api
+    graph = analysis_graph()
+    count = {"field": "summary.total", "operator": "eq", "value": total}
+    status = {"field": "coverage.status", "operator": "matches", "value": coverage}
+    config = {"mode": mode, "conditions": [count, status]} if mode else count
+    graph["nodes"].append(node("decision", "condition", config))
+    graph["edges"].append(edge("input", "merge", "bundle", "decision", "bundle"))
+    for port in ("true", "false"):
+        graph["nodes"].append(node(port, "condition", count))
+        graph["edges"].append(edge(port, "decision", port, port, "bundle"))
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(Snapshot("d" * 40, {"Sample.kt": "val count = 1"}), None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    detail = client.get(f"/api/runs/{run_id}").json()
+    steps = {step["node_id"]: step for step in detail["nodes"]}
+    assert steps["decision"]["output_preview"]["branch"] == branch
+    assert steps["decision"]["active_output_ports"] == [branch]
+    assert steps[branch]["status"] == "succeeded"
+    other = "false" if branch == "true" else "true"
+    assert steps[other]["error"]["code"] == "INACTIVE_BRANCH"
+    assert steps[other]["status"] == "skipped"
+
+
+@pytest.mark.parametrize(("change", "code"), [
+    ({"mode": "XOR"}, "INVALID_CONFIG"),
+    ({"conditions": []}, "INVALID_CONFIG"),
+    ({"conditions": [{"field": "summary.total", "operator": "eq", "value": 0}]}, "INVALID_CONFIG"),
+    ({"field": "summary.total"}, "INVALID_CONFIG"),
+    ({"second": {"field": "summary.total", "operator": "gt", "value": "3"}}, "INVALID_CONFIG"),
+    ({"second": {"field": "ci.decision", "operator": "matches", "value": "passed"}}, "INVALID_CONFIG"),
+    ({"second": {"field": "coverage.status", "operator": "matches", "value": "["}}, "INVALID_REGEX"),
+])
+def test_api_rejects_invalid_condition_groups(api, change, code):
+    client, _ = api
+    workflow = create_workflow(client, create_project(client))
+    graph = analysis_graph()
+    count = {"field": "summary.total", "operator": "eq", "value": 0}
+    config = {"mode": "OR", "conditions": [count, count]}
+    if "second" in change:
+        config["conditions"][1] = change["second"]
+    else:
+        config.update(change)
+    graph["nodes"].append(node("decision", "condition", config))
+    graph["edges"].append(edge("input", "merge", "bundle", "decision", "bundle"))
+    url = f"/api/workflows/{workflow}"
+    result = client.post(f"{url}/validate", json={"graph": graph}).json()
+    assert result["valid"] is False
+    assert [(issue["node_id"], issue["code"]) for issue in result["issues"]] == [("decision", code)]
+    assert client.patch(url, json={"graph": graph}).status_code == 422
+
+
+@pytest.mark.parametrize("with_sast", [False, True])
+def test_spring_config_node_exports_each_finding_once(api, monkeypatch, with_sast):
+    client, sessions = api
+    catalog = client.get("/api/check-types").json()["items"]
+    scanner = next(item for item in catalog if item["type"] == "scan_spring_config")
+    graph = analysis_graph()
+    graph["nodes"][2] = node("scan", scanner["type"])
+    if with_sast:
+        graph["nodes"].append(node("sast", "scan_sast"))
+        graph["edges"] += [
+            edge("source-sast", "source", "snapshot", "sast", "snapshot"),
+            edge("sast-merge", "sast", "result", "merge", "results"),
+        ]
+    snapshot = Snapshot("8" * 40, {
+        "Security.kt": """class Security {
+    fun chain(http: HttpSecurity) = http.authorizeHttpRequests { rules ->
+        rules.requestMatchers("/actuator/**").permitAll()
+        rules.anyRequest().authenticated()
+    }
+}""",
+        "application.yml": "management.endpoints.web.exposure.include: [health, env]\nserver.error.include-stacktrace: always",
+    })
+
+    @contextmanager
+    def prepared(*args, **kwargs):
+        yield RepositorySnapshot(snapshot, None)
+
+    monkeypatch.setattr(execution, "prepare_repository", prepared)
+    run_id = enqueue_for_worker(api, graph)
+    assert run_next(sessions, client.app.state.settings, None)
+    base = f"/api/runs/{run_id}"
+    assert client.get(base).json()["status"] == "succeeded"
+    assert client.get(f"{base}/report").json()["summary"]["total"] == 2
+    findings = client.get(f"{base}/export").json()["findings"]
+    assert sorted((f["class"], f["severity"], f["path"], f["line"]) for f in findings) == [
+        ("actuator-exposure", "HIGH", "Security.kt", 3),
+        ("error-stacktrace", "MEDIUM", "application.yml", 2),
+    ]
 
 
 def test_queue_worker_reports_repository_failure(api, monkeypatch):
@@ -624,13 +1148,16 @@ def test_queue_claims_are_exclusive_and_expired_workers_cannot_write(api):
             second_claim = claim_next(second_transaction)
             assert second_claim.id == second
     stale = datetime.now(UTC) - timedelta(minutes=10)
+    progress = RunProgress(sessions, claim)
+    progress.start_node("entry", {})
     with sessions.begin() as db:
         db.get(ScanRun, first).heartbeat_at = stale
     with sessions.begin() as db:
-        assert expire_stale_runs(db, stale + timedelta(seconds=1)) == 1
+        [expired] = expire_stale_runs(db, stale + timedelta(seconds=1))
+        assert expired.id == claim.id
+        assert ("manual_trigger", "failed") in {(kind, status) for _, kind, status in expired.nodes}
     detail = client.get(f"/api/runs/{first}").json()
     assert detail["status"] == "failed" and detail["error"]["code"] == "WORKER_EXPIRED"
-    progress = RunProgress(sessions, claim)
     assert progress.heartbeat() is False
     with pytest.raises(ClaimLost):
         progress.finish_node("entry", "succeeded", ports=["params"])

@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, RootModel, StringConstraints, ValidationInfo, field_validator
 
 from ..notifications.email import ADDRESS
 from ..notifications.telegram import CHAT_ID
@@ -25,6 +25,19 @@ class ConditionDraft(Input):
     value: OPERAND | None = None
 
 
+class ConditionGroup(Input):
+    mode: Literal["AND", "OR"]
+    conditions: list[ConditionConfig] = Field(min_length=2)
+
+
+ConditionExpression = RootModel[ConditionConfig | ConditionGroup]
+
+
+class ArchiveConfig(Input):
+    archive_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] = Field(title="ZIP-архив")
+    filename: Annotated[str, StringConstraints(min_length=1, max_length=255)] | None = Field(default=None, title="Имя файла")
+
+
 class CiGateConfig(Input):
     threshold: CiThreshold = Field(default="CRITICAL", title="Блокировать начиная с")
 
@@ -38,27 +51,47 @@ EmailAddress = Annotated[str, StringConstraints(strip_whitespace=True, max_lengt
 
 
 class NotificationConfig(Input):
+    use_workspace_settings: bool = Field(default=False, title="Получатели и реквизиты команды")
     credential_id: UUID | None = Field(default=None, title="Учётные данные")
     attach_json: bool = Field(default=True, title="Прикладывать JSON-отчёт")
 
+    @field_validator("recipients", mode="before", check_fields=False)
+    @classmethod
+    def ignore_manual_recipients(cls, recipients: object, info: ValidationInfo) -> object:
+        return [] if info.data.get("use_workspace_settings") else recipients
+
+    @field_validator("recipients", check_fields=False)
+    @classmethod
+    def require_recipients(cls, recipients: list[str], info: ValidationInfo) -> list[str]:
+        if not recipients and not info.data.get("use_workspace_settings"):
+            raise ValueError("Укажите получателей уведомления.")
+        return recipients
+
 
 class TelegramConfig(NotificationConfig):
-    recipients: Annotated[list[ChatId], Field(
-        min_length=1, max_length=50, title="Получатели",
+    summary_only: bool = Field(default=False, title="Только краткая сводка и ссылка на отчёт")
+    recipients: list[ChatId] = Field(
+        default_factory=list, validate_default=True, max_length=50, title="Получатели",
         description="chat_id или @username канала, по одному в строке. Бот должен быть добавлен в чат.",
-    )]
+    )
 
 
 class EmailConfig(NotificationConfig):
-    recipients: Annotated[list[EmailAddress], Field(
-        min_length=1, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
-    )]
+    recipients: list[EmailAddress] = Field(
+        default_factory=list, validate_default=True, max_length=50, title="Получатели", description="Адреса почты, по одному в строке.",
+    )
     subject: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200, pattern=r"^[^\r\n]*$")] | None = Field(
         default=None, title="Тема письма", description="Если пусто, тема формируется автоматически.",
     )
 
 
-NOTIFIER_CONFIGS: dict[str, type[TelegramConfig | EmailConfig]] = {"notify_telegram": TelegramConfig, "notify_email": EmailConfig}
+class SlackConfig(Input):
+    pass
+
+
+NOTIFIER_CONFIGS: dict[str, type[TelegramConfig | EmailConfig | SlackConfig]] = {
+    "notify_telegram": TelegramConfig, "notify_email": EmailConfig, "notify_slack": SlackConfig,
+}
 
 
 class Port(BaseModel):
@@ -88,7 +121,7 @@ def definition(
     description: str,
     inputs: tuple[Port, ...],
     outputs: tuple[Port, ...],
-    config: type[Input] = Input,
+    config: type[BaseModel] = Input,
 ) -> NodeDefinition:
     return NodeDefinition(
         type=kind, label=label, description=description, inputs=list(inputs), outputs=list(outputs),
@@ -110,20 +143,26 @@ CATALOG = {node.type: node for node in (
     definition("schedule_trigger", "Расписание", "Поставить запуск в очередь по расписанию.", (), (PARAMS,)),
     definition("ci_trigger", "GitHub Actions", "Проверить коммит, полученный из CI.", (), (PARAMS,), CiTriggerConfig),
     definition("repository", "Репозиторий", "Подготовить исходники и зафиксировать коммит.", (PARAMS,), (SNAPSHOT,)),
+    definition("local_archive", "Локальный ZIP", "Взять исходники из загруженного ZIP-архива.", (PARAMS,), (SNAPSHOT,), ArchiveConfig),
     definition("scan_secrets", "Secrets", "Найти встроенные секреты.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sca", "SCA", "Сопоставить зависимости с учебным справочником.", (SNAPSHOT,), (RESULT,)),
     definition("scan_sast", "SAST", "Проверить Kotlin и конфигурацию безопасности.", (SNAPSHOT,), (RESULT,)),
+    definition("scan_spring_config", "Конфигурация Spring Boot", "Проверить настройки Actuator, CORS и ответов об ошибках.", (SNAPSHOT,), (RESULT,)),
+    definition("scan_password_hashing", "Хеширование паролей", "Найти быстрые хеши паролей в Kotlin.", (SNAPSHOT,), (RESULT,)),
+    definition("scan_sensitive_logging", "Утечки в логи", "Найти передачу паролей, токенов и Authorization в логгер Kotlin.", (SNAPSHOT,), (RESULT,)),
     definition("merge_findings", "Объединение находок", "Собрать результаты анализаторов.",
                (Port(id="results", type="scan_result", multiple=True),), (BUNDLE,)),
     definition("ci_gate", "Порог CI", "Вернуть решение в CI и передать его вместе с находками в следующую ноду.",
                (BUNDLE,), (BUNDLE,), CiGateConfig),
     definition("condition", "IF / ELSE", "Выбрать ветку по сводке, покрытию или вердикту CI.", (BUNDLE,),
-               (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionConfig),
+               (Port(id="true", type=BUNDLE.type), Port(id="false", type=BUNDLE.type)), ConditionExpression),
     definition("ai_report", "AI-отчёт", "Подготовить рекомендации по сохранённым находкам.", (BUNDLE,), (REPORT,)),
     definition("notify_telegram", "Telegram", "Разослать отчёт в чаты Telegram.",
                (NOTIFY_INPUT,), (DELIVERY,), TelegramConfig),
     definition("notify_email", "Почта", "Разослать отчёт по электронной почте.",
                (NOTIFY_INPUT,), (DELIVERY,), EmailConfig),
+    definition("notify_slack", "Slack", "Отправить сводку и ссылку на отчёт в канал команды.",
+               (NOTIFY_INPUT,), (DELIVERY,), SlackConfig),
 )}
 
 
